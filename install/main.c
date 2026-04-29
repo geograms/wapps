@@ -21,7 +21,7 @@
  * Build: cd wapps/archive/install && make
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../hal/geogram_wasm_hal.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

@@ -1,0 +1,16 @@
+[
+  {
+    "$": "screen",
+    "name": "Player",
+    "tip": "Local video playback (handled by the host's media engine).",
+    "children": [
+      {
+        "$": "group",
+        "name": "video-surface",
+        "$type": "video",
+        "controls": "embedded",
+        "fit": "contain"
+      }
+    ]
+  }
+]

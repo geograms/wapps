@@ -7,7 +7,7 @@
  * Build: cd wapps/archive/terminal && make
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../hal/geogram_wasm_hal.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

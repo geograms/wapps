@@ -19,7 +19,7 @@
  * Build: cd wapps && ./build-archive.sh tester
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../hal/geogram_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 

@@ -18,7 +18,7 @@
  * Build: WASI_SDK_PATH=$HOME/wasi-sdk make
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../hal/geogram_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 

@@ -8,7 +8,7 @@
  * Build: cd wapps/archive/maps && make
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../hal/geogram_wasm_hal.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
