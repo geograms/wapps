@@ -797,6 +797,81 @@ must extract the package atomically — partial extracts must leave
 no `manifest.json` so the launcher's idempotent install flow
 treats the wapp as not yet installed.
 
+### 17.1 Folder vs ZIP
+
+A wapp can be hosted in either form, and the engine treats both
+identically once installed:
+
+- **Open folder** — the same tree shown above, on disk, with no
+  ZIP wrapper. This is the friendly form for human authors during
+  development: edit `main.c`, `screens/home.ui.json`, or any other
+  file in place; no repackaging step.
+- **`.wapp` ZIP** — the same tree compressed into a single
+  archive. This is the distribution form: a wapp store catalog
+  serves it from a URL, an "Open with…" picker hands it over as
+  bytes, etc.
+
+The runtime archive at `<baseDir>/wapps/<wappId>/` is *always* an
+open folder regardless of where the wapp came from. ZIP origins are
+expanded once at install time and the runtime never reads the ZIP
+again — the open folder is the single source of truth the engine
+loads from on every boot.
+
+### 17.2 `source.json`
+
+Every installed wapp carries a `source.json` next to its
+`manifest.json` recording where the install came from:
+
+```json
+{
+  "version": 1,
+  "type":    "path" | "file" | "url" | "asset",
+  "value":   "<absolute path | http URL | flutter asset path>"
+}
+```
+
+| `type`  | `value` is…                       | Install action                  |
+|---------|-----------------------------------|---------------------------------|
+| `path`  | absolute folder path              | recursively copy folder verbatim |
+| `file`  | absolute path to a `.wapp` ZIP    | re-read ZIP, overwrite archive  |
+| `url`   | `http(s)` URL of a `.wapp` ZIP    | re-download, overwrite archive  |
+| `asset` | Flutter asset path (e.g. `assets/install.wapp`) | re-extract from bundle, overwrite archive |
+
+The engine writes `source.json` on every successful install — fresh
+install, store install, picker install, asset install — and rewrites
+it on every successful reinstall. Wapps must not modify it.
+
+### 17.3 Reload
+
+The wapp page exposes a Reload button (visible when the user has
+the global Wapp Store debug toggle on). Reload reads `source.json`
+and re-executes the matching install action above:
+
+```
+folder source  →  copy all folder contents into the archive
+ZIP source     →  re-read the .wapp, overwrite the archive
+URL source     →  re-fetch the .wapp, overwrite the archive
+asset source   →  re-extract the asset, overwrite the archive
+```
+
+Then the engine reboots from the refreshed archive. There is no
+"sibling source tree" probe, no path guessing, no automatic
+repackaging — the recorded source is the only thing consulted.
+
+For an open-folder install this gives the natural human dev loop:
+
+```
+edit /path/to/wapps/<wappId>/<any file>
+   ↓
+press Reload in Geogram
+   ↓
+see the change
+```
+
+No build step is required between editing and Reload as long as
+`app.wasm` is up to date — typically `make` in the wapp folder
+when `main.c` changed; for pure JSON / media edits, nothing.
+
 ---
 
 ## 18. File associations
