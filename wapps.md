@@ -718,6 +718,110 @@ Two-way endpoint bind (collaborative shared text field):
 }
 ```
 
+### 4.7 Group primitives — `$type="menu"`, `$type="header-actions"`
+
+Some `<group>` blocks aren't passive containers; their `$type`
+declares a primitive the host renders directly. The two listed
+here are the wapp's "action surface" primitives — every wapp
+that needs an icon-button or a popup uses them.
+
+#### `$type="menu"`
+
+A `<group $type="menu">` collapses into a single icon button.
+Tapping it opens a popup with one entry per `<action>` child;
+selecting an entry dispatches the standard
+`{"type":"action","action":"<name>"}` outbox message.
+
+```json
+{
+  "$": "group",
+  "$type": "menu",
+  "icon": "more_vert",
+  "tip": "More",
+  "children": [
+    { "$": "action", "name": "pick_video",    "label": "Open file…" },
+    { "$": "action", "name": "pick_subtitle", "label": "Subtitle…" }
+  ]
+}
+```
+
+| decl   | default  | meaning                                        |
+|--------|----------|------------------------------------------------|
+| `icon` | `menu`   | Material icon name (engine whitelist; §3.4)    |
+| `tip`  | `Menu`   | Tooltip on the trigger button (i18n-resolved)  |
+| `name` | (none)   | Optional inline label rendered next to the icon |
+
+A menu placed inline (as a child of an ordinary group / screen)
+flows like any other widget. A menu placed inside another
+host-rendered primitive (e.g. `$type="video"`) is positioned by
+that parent — typically as a corner overlay. To pin the trigger
+into the host's title-bar action area, wrap it in a
+`$type="header-actions"` group below.
+
+#### `$type="header-actions"`
+
+A `<group $type="header-actions">` declared at the **top level
+of a screen** is **not rendered in the screen body**. Its
+direct children are hoisted into the host's AppBar `actions`
+slot — i.e. they appear on the same line as the wapp's title,
+right-aligned, in the order declared. This is the wapp's "title
+bar action area" for screen-scoped icons (open file, refresh,
+share, …). A wapp can stack as many icons as it wants; each
+screen of a multi-screen wapp may declare its own set, and the
+host swaps them on tab change.
+
+Two child kinds are supported, and they may be mixed freely:
+
+| child kind                | renders as                              |
+|---------------------------|-----------------------------------------|
+| `<action icon="…">`       | Single `IconButton`, fires that action  |
+| `<group $type="menu">`    | Popup menu (same widget as above)       |
+
+`<action>` decls inside `header-actions`:
+
+| decl    | required | meaning                                                  |
+|---------|----------|----------------------------------------------------------|
+| `name`  | yes      | Action name dispatched on press                          |
+| `icon`  | yes      | Material icon name (engine whitelist)                    |
+| `tip`   | no       | Tooltip; falls back to `label`, then to `name`           |
+| `label` | no       | Used as tooltip fallback; **not rendered** beside the icon (AppBar real estate is tight) |
+
+Example — three icons in the title bar, the rightmost being a
+popup with two extra entries:
+
+```json
+{
+  "$": "screen",
+  "name": "Player",
+  "children": [
+    {
+      "$": "group",
+      "$type": "header-actions",
+      "children": [
+        { "$": "action", "name": "refresh", "icon": "refresh", "tip": "Refresh" },
+        { "$": "action", "name": "share",   "icon": "share",   "tip": "Share" },
+        {
+          "$": "group", "$type": "menu", "icon": "more_vert", "tip": "More",
+          "children": [
+            { "$": "action", "name": "pick_video",    "label": "Open file…" },
+            { "$": "action", "name": "pick_subtitle", "label": "Subtitle…" }
+          ]
+        }
+      ]
+    },
+    { "$": "group", "$type": "video", "fit": "contain" }
+  ]
+}
+```
+
+Both primitives use the same icon whitelist (see §3.4 — `menu`,
+`more_vert`, `more_horiz`, `settings`, `add`, `edit`, `tune`,
+`filter_list`, `sort`, `apps`, `refresh`, `search`, `share`,
+`save`, `delete`, `info`, `help`, `download`, `upload`, `play`,
+`pause`, `stop`, `open`, `close`, `check`, `star`, `favorite`,
+`visibility`). Unknown values fall back to `Icons.menu` so a
+wapp can't reach into arbitrary glyphs by surprise.
+
 ---
 
 ## 5. WASM ↔ UI Communication
@@ -766,6 +870,8 @@ This means `watch` polling is the renderer-initiated path (renderer asks the mod
 |---|---|---|---|---|
 | `screen` | page / tab | `Navigator` route | `lv_tabview` | subcommand |
 | `group` | `<fieldset>` | `Card` widget | `lv_cont` | `--help` section |
+| `group $type=menu` | `<details>`/dropdown | `PopupMenuButton` | menu in `lv_dropdown` | listed verbs |
+| `group $type=header-actions` | nav bar buttons | `AppBar` actions slot | `lv_tabview` header bar | top of `--help` |
 | `field : string` | `<input>` | `TextField` | `lv_textarea` | `--name value` |
 | `field : bool` | `<checkbox>` | `Switch` | `lv_switch` | `--flag` |
 | `field : enum` | `<select>` | `DropdownButton` | `lv_roller` | `--mode [a\|b\|c]` |
