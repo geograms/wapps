@@ -202,6 +202,36 @@ static void send_seek(long long ms) {
     hal_msg_send(msg, str_len(msg));
 }
 
+/* Ask the host to show a native file picker filtered to the given
+ * extensions. The host replies with a single `file.open` message
+ * carrying the chosen path; module_handle_event already routes that
+ * through save_path + send_video_load (or send_video_subtitle for
+ * subtitle types). The "kind" hint lets the host pick a sensible
+ * dialog title without having to parse the extension list. */
+static void send_file_pick_video(void) {
+    const char *msg =
+        "{\"type\":\"file.pick\","
+        "\"kind\":\"video\","
+        "\"title\":\"Pick a video\","
+        "\"extensions\":["
+            "\"mp4\",\"m4v\",\"mkv\",\"webm\",\"mov\",\"avi\","
+            "\"flv\",\"wmv\",\"mpeg\",\"mpg\",\"ogv\","
+            "\"ts\",\"mts\",\"m2ts\",\"3gp\""
+        "]}";
+    hal_msg_send(msg, str_len(msg));
+}
+
+static void send_file_pick_subtitle(void) {
+    const char *msg =
+        "{\"type\":\"file.pick\","
+        "\"kind\":\"subtitle\","
+        "\"title\":\"Pick a subtitle\","
+        "\"extensions\":["
+            "\"srt\",\"vtt\",\"ass\",\"ssa\",\"sub\""
+        "]}";
+    hal_msg_send(msg, str_len(msg));
+}
+
 /* ── Command dispatch ─────────────────────────────────────────── */
 
 static void on_command(const char *cmd) {
@@ -210,6 +240,8 @@ static void on_command(const char *cmd) {
     else if (str_eq(cmd, "stop"))    send_simple("video.stop");
     else if (str_eq(cmd, "back10"))  send_seek(-10000);  /* relative — host applies */
     else if (str_eq(cmd, "fwd10"))   send_seek(10000);
+    else if (str_eq(cmd, "pick_video"))    send_file_pick_video();
+    else if (str_eq(cmd, "pick_subtitle")) send_file_pick_subtitle();
     else if (str_eq(cmd, "reload")) {
         if (has_path) send_video_load(current_path, str_len(current_path), 1);
     }

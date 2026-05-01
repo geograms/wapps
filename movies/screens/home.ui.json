@@ -12,5 +12,31 @@
         "fit": "contain"
       }
     ]
+  },
+  {
+    "$": "screen",
+    "name": "Open",
+    "tip": "Pick a local video file to play.",
+    "children": [
+      {
+        "$": "group",
+        "name": "open-controls",
+        "children": [
+          {
+            "$": "action",
+            "name": "pick_video",
+            "label": "Pick a video…",
+            "style": "primary",
+            "tip": "Open a file picker filtered to video files."
+          },
+          {
+            "$": "action",
+            "name": "pick_subtitle",
+            "label": "Attach subtitle…",
+            "tip": "Pick an SRT/VTT file to attach to the current video."
+          }
+        ]
+      }
+    ]
   }
 ]
