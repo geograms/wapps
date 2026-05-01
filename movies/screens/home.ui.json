@@ -6,15 +6,12 @@
     "children": [
       {
         "$": "group",
-        "name": "video-surface",
-        "$type": "video",
-        "controls": "embedded",
-        "fit": "contain",
+        "$type": "header-actions",
         "children": [
           {
             "$": "group",
             "$type": "menu",
-            "icon": "menu",
+            "icon": "more_vert",
             "tip": "More",
             "children": [
               {
@@ -32,6 +29,13 @@
             ]
           }
         ]
+      },
+      {
+        "$": "group",
+        "name": "video-surface",
+        "$type": "video",
+        "controls": "embedded",
+        "fit": "contain"
       }
     ]
   }

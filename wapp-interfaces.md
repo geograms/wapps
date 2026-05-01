@@ -700,6 +700,7 @@ Group `$type` values reserved for host-side rendering:
 |---|---|
 | `map` | Tiled map (FlutterMap or equivalent) |
 | `menu` | Popup menu (icon button → list of action children) |
+| `header-actions` | Hoists icon-actions / menus into the host AppBar |
 | `output` | Wapp store catalog list |
 | `sources` | Wapp store repository manager |
 | `projects` | App Creator project picker |
@@ -741,7 +742,73 @@ declared as a child of another host-rendered group (e.g. inside a
 `$type="video"` block), the host renderer for that parent decides
 where to place the trigger (typically a corner overlay). When
 declared at screen / inline level, the menu flows like any other
-group.
+group. To pin the trigger into the host AppBar instead, wrap the
+menu in a `$type="header-actions"` group (§14.2).
+
+### 14.2 `$type="header-actions"`
+
+A `<group $type="header-actions">` declared at the top level of a
+screen is **not rendered inside the screen body**. Its direct
+children are hoisted into the host's AppBar `actions` slot — i.e.
+they appear on the same line as the wapp's title, right-aligned,
+in the order declared. This is the wapp's "title bar action area"
+for screen-scoped icons (open file, refresh, share, …).
+
+Two child kinds are supported, and a wapp can mix many of either:
+
+| child kind                | renders as                              |
+|---------------------------|-----------------------------------------|
+| `<action icon="…">`       | Single `IconButton`, fires that action  |
+| `<group $type="menu">`    | Popup menu (same as §14.1)              |
+
+Action decls inside `header-actions`:
+
+| decl   | required | meaning                                                  |
+|--------|----------|----------------------------------------------------------|
+| `name` | yes      | Action name dispatched on press                          |
+| `icon` | yes      | Material icon name (engine whitelist)                    |
+| `tip`  | no       | Tooltip; falls back to `label`, then to `name`           |
+| `label`| no       | Used as tooltip when `tip` is absent (no inline label)   |
+
+Example — three icons in the title bar, the rightmost being a
+popup with two extra entries:
+
+```json
+{
+  "$": "screen",
+  "name": "Player",
+  "children": [
+    {
+      "$": "group",
+      "$type": "header-actions",
+      "children": [
+        { "$": "action", "name": "refresh", "icon": "refresh", "tip": "Refresh" },
+        { "$": "action", "name": "share",   "icon": "share",   "tip": "Share" },
+        {
+          "$": "group", "$type": "menu", "icon": "more_vert", "tip": "More",
+          "children": [
+            { "$": "action", "name": "pick_video",    "label": "Open file…" },
+            { "$": "action", "name": "pick_subtitle", "label": "Subtitle…" }
+          ]
+        }
+      ]
+    },
+    { "$": "group", "$type": "video", "fit": "contain" }
+  ]
+}
+```
+
+Multiple screens can each declare their own `header-actions` —
+the host swaps the AppBar contents on tab change so each screen
+gets its own action set. A screen with no `header-actions` group
+shows just the title (plus engine-injected affordances like the
+dev-mode Reload button).
+
+Icon names follow the same whitelist as §14.1; unknown values
+fall back to `Icons.menu`. The `<action>` elements inside
+`header-actions` are icon-only — `label` is used as the fallback
+tooltip but is not rendered next to the icon, since AppBar real
+estate is tight.
 
 ---
 
