@@ -699,6 +699,7 @@ Group `$type` values reserved for host-side rendering:
 | `$type` | Host renderer |
 |---|---|
 | `map` | Tiled map (FlutterMap or equivalent) |
+| `menu` | Popup menu (icon button → list of action children) |
 | `output` | Wapp store catalog list |
 | `sources` | Wapp store repository manager |
 | `projects` | App Creator project picker |
@@ -712,6 +713,35 @@ Group `$type` values reserved for host-side rendering:
 
 The engine treats unknown types as opaque containers and renders
 their children as standard fields/actions.
+
+### 14.1 `$type="menu"`
+
+A `<group $type="menu">` collapses into a single icon button. When
+the user taps the button, a popup opens with one entry per
+`action` child of the group. Selecting an entry dispatches the
+standard `{"type":"action","action":"<name>"}` outbox message —
+the wapp handles those today, so adopting a menu requires no
+message-handling changes.
+
+Decls (all optional):
+
+| decl   | default | meaning                                                |
+|--------|---------|--------------------------------------------------------|
+| `icon` | `menu`  | Material icon name for the trigger button              |
+| `tip`  | `Menu`  | Tooltip on the trigger button (i18n-resolved)          |
+| `name` | (none)  | Optional label rendered next to the icon               |
+
+Engines should accept a small whitelist of icon names (`menu`,
+`more_vert`, `more_horiz`, `settings`, `add`, `edit`, `tune`,
+`filter_list`, …) and fall back to `menu` for unknown values, so
+wapps can't reach into arbitrary Material icons by surprise.
+
+Position is the host's concern, not the menu's: when the menu is
+declared as a child of another host-rendered group (e.g. inside a
+`$type="video"` block), the host renderer for that parent decides
+where to place the trigger (typically a corner overlay). When
+declared at screen / inline level, the menu flows like any other
+group.
 
 ---
 

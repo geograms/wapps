@@ -12,17 +12,24 @@
         "fit": "contain",
         "children": [
           {
-            "$": "action",
-            "name": "pick_video",
-            "label": "Open file…",
-            "style": "primary",
-            "tip": "Pick a local video to play."
-          },
-          {
-            "$": "action",
-            "name": "pick_subtitle",
-            "label": "Subtitle…",
-            "tip": "Attach an SRT/VTT subtitle file to the current video."
+            "$": "group",
+            "$type": "menu",
+            "icon": "menu",
+            "tip": "More",
+            "children": [
+              {
+                "$": "action",
+                "name": "pick_video",
+                "label": "Open file…",
+                "tip": "Pick a local video to play."
+              },
+              {
+                "$": "action",
+                "name": "pick_subtitle",
+                "label": "Subtitle…",
+                "tip": "Attach an SRT/VTT subtitle file to the current video."
+              }
+            ]
           }
         ]
       }
