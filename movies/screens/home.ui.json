@@ -9,31 +9,20 @@
         "name": "video-surface",
         "$type": "video",
         "controls": "embedded",
-        "fit": "contain"
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "Open",
-    "tip": "Pick a local video file to play.",
-    "children": [
-      {
-        "$": "group",
-        "name": "open-controls",
+        "fit": "contain",
         "children": [
           {
             "$": "action",
             "name": "pick_video",
-            "label": "Pick a video…",
+            "label": "Open file…",
             "style": "primary",
-            "tip": "Open a file picker filtered to video files."
+            "tip": "Pick a local video to play."
           },
           {
             "$": "action",
             "name": "pick_subtitle",
-            "label": "Attach subtitle…",
-            "tip": "Pick an SRT/VTT file to attach to the current video."
+            "label": "Subtitle…",
+            "tip": "Attach an SRT/VTT subtitle file to the current video."
           }
         ]
       }
