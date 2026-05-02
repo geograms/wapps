@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.install",
-  "version":         "1.0.0",
+  "version":         "1.0.1",
   "kind":            "app",
   "description":     "Wapp Store",
   "summary":         "Discover, install and update wapps from any repository. The local wapp store for geogram.",

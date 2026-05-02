@@ -187,10 +187,20 @@ static void parse_sources_raw(void) {
     }
 }
 
+/* Default catalog source when no user configuration exists yet. The
+ * Settings tab can add or replace it; this is just the seed so a
+ * fresh install isn't staring at an empty catalog. The user-facing
+ * github.com tree URL is converted to the raw form at fetch time
+ * (see github_tree_to_raw below). */
+#define DEFAULT_SOURCE "https://github.com/geograms/wapps/tree/main/binaries"
+
 static void load_sources(void) {
     uint32_t n = hal_kv_get("source", 6, sources_raw, sizeof(sources_raw) - 1);
-    if (n > 0) sources_raw[n] = '\0';
-    else sources_raw[0] = '\0';
+    if (n > 0) {
+        sources_raw[n] = '\0';
+    } else {
+        str_copy(sources_raw, DEFAULT_SOURCE, sizeof(sources_raw));
+    }
     parse_sources_raw();
 }
 
@@ -382,6 +392,49 @@ static void advance_fetch_queue(void);
 static int32_t pending_req = -1;
 static char index_buf[8192];
 
+/* Rewrite a github.com tree URL into the raw.githubusercontent.com
+ * form so the fetcher actually gets JSON instead of HTML. Pattern:
+ *   https://github.com/<org>/<repo>/tree/<branch>/<path...>
+ *     -> https://raw.githubusercontent.com/<org>/<repo>/<branch>/<path...>
+ * Anything that doesn't match is copied through unchanged. The
+ * caller's [out] must be sized for the result (longer than input).
+ */
+static void github_tree_to_raw(const char *src, char *out, unsigned out_cap) {
+    const char *prefix = "https://github.com/";
+    if (!str_starts(src, prefix)) {
+        str_copy(out, src, out_cap);
+        return;
+    }
+    const char *p = src + str_len(prefix);
+    /* Find org and repo segments. */
+    const char *org = p;
+    while (*p && *p != '/') p++;
+    if (*p != '/' || p == org) { str_copy(out, src, out_cap); return; }
+    unsigned org_len = (unsigned)(p - org);
+    p++;
+    const char *repo = p;
+    while (*p && *p != '/') p++;
+    if (*p != '/' || p == repo) { str_copy(out, src, out_cap); return; }
+    unsigned repo_len = (unsigned)(p - repo);
+    p++;
+    /* Expect "tree/" next. */
+    if (!str_starts(p, "tree/")) { str_copy(out, src, out_cap); return; }
+    p += 5;
+    /* Branch + path remainder is everything past "tree/". */
+    str_copy(out, "https://raw.githubusercontent.com/", out_cap);
+    unsigned olen = str_len(out);
+    for (unsigned i = 0; i < org_len && olen < out_cap - 2; i++) {
+        out[olen++] = org[i];
+    }
+    if (olen < out_cap - 1) out[olen++] = '/';
+    for (unsigned i = 0; i < repo_len && olen < out_cap - 2; i++) {
+        out[olen++] = repo[i];
+    }
+    if (olen < out_cap - 1) out[olen++] = '/';
+    out[olen] = '\0';
+    str_cat(out, p, out_cap);
+}
+
 /* Kick off the fetch for sources[fetching_idx]. For URL sources the
  * HTTP request is started via hal_http and polled from module_tick.
  * For local paths we delegate to the host via a
@@ -400,11 +453,13 @@ static void start_current_fetch(void) {
     send_output(msg, "info");
 
     if (source_str_is_url(src)) {
+        char rewritten[512];
+        github_tree_to_raw(src, rewritten, sizeof(rewritten));
         char url[600] = "";
-        str_cat(url, src, sizeof(url));
-        unsigned slen = str_len(src);
-        if (slen < 5 || !str_eq(src + slen - 5, ".json")) {
-            if (src[slen - 1] != '/') str_cat(url, "/", sizeof(url));
+        str_cat(url, rewritten, sizeof(url));
+        unsigned slen = str_len(rewritten);
+        if (slen < 5 || !str_eq(rewritten + slen - 5, ".json")) {
+            if (rewritten[slen - 1] != '/') str_cat(url, "/", sizeof(url));
             str_cat(url, "index.json", sizeof(url));
         }
         pending_req = hal_http_request(0, url, str_len(url), "", 0);
