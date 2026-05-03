@@ -1,9 +1,10 @@
 {
   "id":              "tools.geogram.install",
-  "version":         "1.0.2",
+  "version":         "1.0.3",
   "kind":            "app",
-  "description":     "Wapp Store",
-  "summary":         "Discover, install and update wapps from any repository. The local wapp store for geogram.",
+  "title":           "Wapp Store",
+  "description":     "Browse, install and update wapps from any catalog.",
+  "summary":         "Discover, install and update wapps from any repository. The local wapp store for geogram — points at the official catalog by default and accepts user-defined sources (URLs or local paths) on the Settings tab.",
   "icon":            "media/icons/install.svg",
   "tags":            ["tools", "installer", "shop", "system"],
   "entry_ui":        "screens/home.ui.json",

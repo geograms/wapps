@@ -109,7 +109,8 @@ typedef struct {
     char name[64];              /* folder name, e.g. "maps" */
     char id[128];               /* manifest id */
     char version[32];
-    char description[128];
+    char title[96];             /* short display name, e.g. "Wapp Store" */
+    char description[200];      /* long-form, e.g. "Discover, install ..." */
     char file[128];             /* relative path, e.g. "maps/maps-1.0.0.wapp" */
     uint32_t size;
     char source_raw[256];       /* the raw source URL/path this came from */
@@ -367,9 +368,19 @@ static void parse_index(const char *json, unsigned json_len) {
         json_find_str(obj_start, obj_end, "file", e->file, sizeof(e->file));
         json_find_str(obj_start, obj_end, "id", e->id, sizeof(e->id));
         json_find_str(obj_start, obj_end, "version", e->version, sizeof(e->version));
+        json_find_str(obj_start, obj_end, "title", e->title, sizeof(e->title));
         json_find_str(obj_start, obj_end, "description", e->description, sizeof(e->description));
         json_find_str(obj_start, obj_end, "size", size_str, sizeof(size_str));
         json_find_str(obj_start, obj_end, "publisher_npub", e->publisher_npub, sizeof(e->publisher_npub));
+
+        /* Legacy schema migration: pre-title catalogs put the short
+         * display name in the `description` field and (often) had no
+         * long-form text at all. If we got a description but no title,
+         * promote the description to the title and clear it. */
+        if (e->title[0] == '\0' && e->description[0] != '\0') {
+            str_copy(e->title, e->description, sizeof(e->title));
+            e->description[0] = '\0';
+        }
 
         e->size = (uint32_t)str_to_int(size_str);
         extract_name(e->file, e->name, sizeof(e->name));
@@ -558,9 +569,17 @@ static void show_catalog(void) {
 
         send_output(line, "out");
 
+        /* Title (display name) on its own indented line so the host
+         * can render it instead of falling back to the slug. */
+        if (e->title[0]) {
+            char tline[140] = "    title:";
+            str_cat(tline, e->title, sizeof(tline));
+            send_output(tline, "out");
+        }
+
         /* Description on next line */
         if (e->description[0]) {
-            char desc[200] = "    ";
+            char desc[260] = "    ";
             str_cat(desc, e->description, sizeof(desc));
             send_output(desc, "out");
         }

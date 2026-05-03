@@ -837,8 +837,9 @@ Every `.wapp` must contain a top-level `manifest.json`:
   "id":              "tools.geogram.maps",
   "version":         "1.0.0",
   "kind":            "app|system|addon",
-  "description":     "Short title",
-  "summary":         "Long description",
+  "title":           "Maps",
+  "description":     "One-line explanation, used in list views.",
+  "summary":         "Paragraph-long explanation for detail / about views.",
   "icon":            "media/icons/<name>.svg",
   "entry_ui":        "screens/home.ui.json",
   "tick_interval_ms": 5000,
@@ -865,6 +866,24 @@ The engine must:
   pre-subscribe the wapp to
 - Carry `permissions` through to the user-facing install dialog
   (Stage 3)
+
+### 16.1 Display fields: title vs description vs summary
+
+Three text fields describe the wapp at different verbosity levels.
+They are independent — pick the right field for the right slot.
+
+| Field         | Length        | Where it's used                                                        |
+|---------------|---------------|------------------------------------------------------------------------|
+| `title`       | 1–3 words     | Home grid label, AppBar title, "Open with…" picker primary line.       |
+| `description` | one line      | Catalog row subtitle, file-handler subtitles, list-view explanation.   |
+| `summary`     | one paragraph | Detail / about pages, store cards, long-form previews. Markdown ok.    |
+
+**Legacy migration.** Older manifests had only `description`
+(holding the launcher label) and `summary` (the long form). The
+engine treats the absence of `title` as a legacy schema and uses
+`description` as the title with no separate one-liner. The catalog
+emitter (`build-archive.sh` → `index.json`) applies the same rule
+when packaging old wapps.
 
 ---
 

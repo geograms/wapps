@@ -67,7 +67,8 @@ media/                ← optional, all assets live here
   "id":              "chat.geogram.messenger",
   "version":         "1.0.0",
   "kind":            "app",
-  "description":     "Offline mesh chat with NOSTR signing",
+  "title":           "Messenger",
+  "description":     "Offline mesh chat with NOSTR signing.",
   "summary":         "End-to-end encrypted messaging over BLE, WiFi Direct, and APRS.\nWorks without any internet connection.",
   "icon":            "media/icons/app-icon.svg",
   "screenshots":     ["media/images/screen-home.png", "media/images/screen-settings.png"],
@@ -94,8 +95,9 @@ media/                ← optional, all assets live here
 | `id` | string | yes | Reverse-domain identifier |
 | `version` | string | yes | Semantic version |
 | `kind` | string | yes | `"app"` or `"library"` |
-| `description` | string | yes | One-line summary |
-| `summary` | string | no | Longer description, markdown ok |
+| `title` | string | yes | Short launcher label, 1–3 words (e.g. `"Wapp Store"`). Shown on the home grid and AppBar. |
+| `description` | string | yes | One-line explanation used in list views (catalog rows, "Open with…" picker, file-handler subtitles). |
+| `summary` | string | no | Paragraph-long explanation for detail / about views. Markdown ok. |
 | `icon` | string | no | Path within archive to icon (SVG preferred) |
 | `screenshots` | string[] | no | Paths within archive to screenshots |
 | `tags` | string[] | no | Category tags for discovery |

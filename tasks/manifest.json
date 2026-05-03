@@ -1,8 +1,9 @@
 {
   "id":              "tools.geogram.tasks",
-  "version":         "1.0.0",
+  "version":         "1.0.1",
   "kind":            "system",
-  "description":     "Task Monitor",
+  "title":           "Task Monitor",
+  "description":     "Live view of background tasks; pause, resume, stop.",
   "summary":         "Live view of every running task in geogram. Pause, resume, or stop background tasks. Critical-priority tasks cannot be paused.",
   "icon":            "media/icons/tasks.svg",
   "tags":            ["system", "tools", "debug"],

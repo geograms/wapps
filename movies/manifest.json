@@ -1,8 +1,9 @@
 {
   "id":              "tools.geogram.movies",
-  "version":         "0.1.1",
+  "version":         "0.1.2",
   "kind":            "app",
-  "description":     "Movies",
+  "title":           "Movies",
+  "description":     "Local video player with optional subtitle support.",
   "summary":         "Play local video files (mp4, mkv, webm, mov, avi…) with optional SRT subtitle support. Hands playback to the host's media_kit engine.",
   "icon":            "media/icons/movies.svg",
   "tags":            ["video", "movie", "media", "player"],

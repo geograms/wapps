@@ -111,12 +111,23 @@ generate_index() {
             | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"//;s/"//')
         version=$(echo "$manifest" | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
             | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/"//')
+        title=$(echo "$manifest" | grep -o '"title"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -1 | sed 's/.*"title"[[:space:]]*:[[:space:]]*"//;s/"//')
         description=$(echo "$manifest" | grep -o '"description"[[:space:]]*:[[:space:]]*"[^"]*"' \
             | head -1 | sed 's/.*"description"[[:space:]]*:[[:space:]]*"//;s/"//')
 
+        # Legacy schema migration: pre-title manifests put the launcher
+        # label in `description`. If a manifest lacks `title` but has a
+        # `description`, treat the description as the title and emit no
+        # one-liner so the host doesn't double-print it.
+        if [ -z "$title" ] && [ -n "$description" ]; then
+            title="$description"
+            description=""
+        fi
+
         [ "$first" = 1 ] && first=0 || printf ',\n' >> "$index"
-        printf '  {"file":"%s/%s","id":"%s","version":"%s","size":%s,"description":"%s"}' \
-            "$wapp_dir" "$fname" "$wapp_id" "$version" "$size" "$description" >> "$index"
+        printf '  {"file":"%s/%s","id":"%s","version":"%s","size":%s,"title":"%s","description":"%s"}' \
+            "$wapp_dir" "$fname" "$wapp_id" "$version" "$size" "$title" "$description" >> "$index"
     done
     printf '\n]\n' >> "$index"
 }

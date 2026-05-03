@@ -1,8 +1,9 @@
 {
   "id":              "tools.geogram.widget-demo",
-  "version":         "1.0.0",
+  "version":         "1.0.1",
   "kind":            "system",
-  "description":     "Functionality Demo",
+  "title":           "Functionality Demo",
+  "description":     "Demo wapp providing multiple functionalities for widget requests.",
   "summary":         "Minimal provider wapp that demonstrates one wapp providing multiple functionalities. Responds to widget.request messages for text.greet and text.shout with fixed results.",
   "icon":            "media/icons/widget-demo.svg",
   "tags":            ["system", "demo", "widgets"],
