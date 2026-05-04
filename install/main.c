@@ -101,6 +101,40 @@ static void send_output(const char *text, const char *level) {
 /* Forward declaration — defined later next to the sources state. */
 static void send_sources_list(void);
 
+/* ── Catalog layout (list / grid) ───────────────────────────────────── */
+
+/* Tell the host whether the catalog should render as a vertical list
+ * of wide cards or as a Play-Store-style grid of compact tiles. The
+ * host stores no defaults of its own — it stays on the last value
+ * the wapp sent. KV holds the persisted choice across restarts. */
+static void send_layout(const char *mode) {
+    char buf[160] = "{\"type\":\"ui.layout\",\"target\":\"output-list\",\"mode\":\"";
+    str_cat(buf, mode, sizeof(buf));
+    str_cat(buf, "\"}", sizeof(buf));
+    hal_msg_send(buf, str_len(buf));
+}
+
+static void load_and_send_layout(void) {
+    char saved[16];
+    uint32_t n = hal_kv_get("view_mode", 9, saved, sizeof(saved) - 1);
+    if (n > 0 && n < sizeof(saved)) {
+        saved[n] = '\0';
+    } else {
+        str_copy(saved, "list", sizeof(saved));
+    }
+    /* Sanitise — only honour known modes; anything else falls back. */
+    if (!str_eq(saved, "list") && !str_eq(saved, "grid")) {
+        str_copy(saved, "list", sizeof(saved));
+    }
+    send_layout(saved);
+}
+
+static void set_layout(const char *mode) {
+    if (!str_eq(mode, "list") && !str_eq(mode, "grid")) return;
+    hal_kv_set("view_mode", 9, mode, str_len(mode));
+    send_layout(mode);
+}
+
 /* ── Catalog entry ───────────────────────────────────────────────────── */
 
 #define MAX_ENTRIES 64
@@ -834,6 +868,8 @@ void module_init(void) {
     hal_log(1, "[install] init", 14);
     load_sources();
     send_sources_list();
+    /* Restore the catalog view mode (list/grid) saved last session. */
+    load_and_send_layout();
 
     send_output("Wapp Store v2.0", "info");
     if (source_count > 0) {
@@ -917,6 +953,14 @@ void module_handle_event(void) {
                     action[ai++] = *p++;
                 action[ai] = '\0';
 
+                if (str_eq(action, "view-list")) {
+                    set_layout("list");
+                    return;
+                }
+                if (str_eq(action, "view-grid")) {
+                    set_layout("grid");
+                    return;
+                }
                 if (str_eq(action, "set_sources")) {
                     /* The host already validated each URL and hands
                      * us a pre-joined newline-separated list in the

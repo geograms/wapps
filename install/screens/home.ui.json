@@ -6,6 +6,16 @@
     "children": [
       {
         "$": "group",
+        "$type": "header-actions",
+        "children": [
+          { "$": "action", "name": "view-list", "icon": "view_list",
+            "label": "List view" },
+          { "$": "action", "name": "view-grid", "icon": "grid_view",
+            "label": "Grid view" }
+        ]
+      },
+      {
+        "$": "group",
         "name": "output-list",
         "$type": "output",
         "tip": "@group.output_tip"
