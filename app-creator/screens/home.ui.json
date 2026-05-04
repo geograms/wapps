@@ -1,23 +1,32 @@
 [
   {
     "$": "screen",
-    "name": "@screen.projects",
-    "tip": "@screen.projects_tip",
+    "name": "Projects",
+    "tip": "Pick an installed wapp to edit its metadata, or hit + to start a fresh draft. Selection populates the Code, UI, Translations and Settings tabs.",
     "children": [
+      {
+        "$": "group",
+        "$type": "header-actions",
+        "children": [
+          { "$": "action", "name": "new-project", "icon": "add",
+            "label": "New project" },
+          { "$": "action", "name": "refresh-projects", "icon": "refresh",
+            "label": "Refresh" }
+        ]
+      },
       {
         "$": "group",
         "name": "projects",
         "$type": "cards",
         "layout": "list",
-        "tip": "@group.projects_tip",
-        "empty": "No project yet. Switch to Settings to set the title and id, write code on the Code tab, then click Install."
+        "empty": "No installed wapps yet. Hit + to start a new draft from scratch."
       }
     ]
   },
   {
     "$": "screen",
-    "name": "@screen.code",
-    "tip": "@screen.code_tip",
+    "name": "Code",
+    "tip": "Edit the wapp's main.c. Compile builds it via the bundled wasi-sdk; Install replaces the on-disk archive with the result; Run tests executes tests.wasm against the installed copy.",
     "children": [
       {
         "$": "field",
@@ -25,122 +34,120 @@
         "$type": "code",
         "label": "source.c",
         "language": "c",
-        "tip": "@field.source_tip",
-        "default": "#include \"geogram_wasm_hal.h\"\n\nstatic unsigned str_len(const char *s) {\n    unsigned n = 0;\n    while (s[n]) n++;\n    return n;\n}\n\nvoid module_init(void) {\n    const char *msg = \"[my-first] init\";\n    hal_log(1, msg, str_len(msg));\n}\n\nvoid module_tick(void) {\n    const char *msg = \"[my-first] tick\";\n    hal_log(0, msg, str_len(msg));\n}\n\nvoid module_handle_event(void) { }\nvoid module_destroy(void) { }\n\nuint32_t module_tick_interval_ms(void) {\n    return 5000;\n}\n"
+        "tip": "Plain C against wapps/hal/geogram_wasm_hal.h. No libc.",
+        "default": "#include \"geogram_wasm_hal.h\"\n\nstatic unsigned str_len(const char *s) {\n    unsigned n = 0;\n    while (s[n]) n++;\n    return n;\n}\n\nvoid module_init(void) {\n    const char *msg = \"[my-first] init\";\n    hal_log(1, msg, str_len(msg));\n}\n\nvoid module_tick(void) {}\nvoid module_handle_event(void) {}\nvoid module_destroy(void) {}\n\nuint32_t module_tick_interval_ms(void) { return 5000; }\n"
       },
       {
         "$": "action",
         "name": "compile",
-        "label": "@action.compile",
+        "label": "Compile",
         "style": "primary",
-        "tip": "@action.compile_tip"
+        "tip": "Run the bundled wasm-clang."
       },
       {
         "$": "action",
         "name": "install",
-        "label": "@action.install",
+        "label": "Install",
         "style": "secondary",
-        "tip": "@action.install_tip"
+        "tip": "Write the compiled wapp to the launcher."
       },
       {
         "$": "action",
         "name": "run-tests",
-        "label": "@action.run_tests",
+        "label": "Run tests",
         "style": "secondary",
-        "tip": "@action.run_tests_tip"
+        "tip": "Run tests.wasm against the installed copy."
       },
       {
         "$": "field",
         "name": "output",
         "$type": "log",
-        "label": "@field.compiler_output",
-        "tip": "@field.compiler_output_tip"
+        "label": "Compiler output",
+        "tip": "Compiler stdout/stderr plus host-side progress messages."
       }
     ]
   },
   {
     "$": "screen",
-    "name": "@screen.ui",
-    "tip": "@screen.ui_tip",
+    "name": "UI",
+    "tip": "Edit the wapp's screens/home.ui.json directly. JSON is the canonical format; the visual editor lands later.",
     "children": [
       {
-        "$": "group",
-        "name": "ui",
-        "$type": "ui-editor",
-        "tip": "@group.ui_editor_tip"
+        "$": "field",
+        "name": "source_ui",
+        "$type": "code",
+        "label": "screens/home.ui.json",
+        "language": "json",
+        "tip": "GeoUI JSON tree. See wapps/wapp-interfaces.md §14.",
+        "default": "[\n  {\n    \"$\": \"screen\",\n    \"name\": \"Home\",\n    \"children\": []\n  }\n]\n"
       }
     ]
   },
   {
     "$": "screen",
-    "name": "@screen.translations",
-    "tip": "@screen.translations_tip",
+    "name": "Translations",
+    "tip": "Edit lang/en.json directly. Keys referenced as @key from the UI get translated at runtime.",
     "children": [
       {
-        "$": "group",
-        "name": "translations",
-        "$type": "translations",
-        "tip": "@group.translations_tip"
+        "$": "field",
+        "name": "source_lang",
+        "$type": "code",
+        "label": "lang/en.json",
+        "language": "json",
+        "tip": "Flat JSON object: { \"key\": \"translation\" }.",
+        "default": "{\n}\n"
       }
     ]
   },
   {
     "$": "screen",
-    "name": "@screen.settings",
-    "tip": "@screen.settings_tip",
+    "name": "Settings",
+    "tip": "Manifest fields written to manifest.json on Install. Title is the launcher label; Name is the folder slug.",
     "children": [
       {
         "$": "group",
-        "name": "@group.identity",
-        "tip": "@group.identity_tip",
+        "name": "identity",
+        "tip": "These values end up in the generated manifest.json when you click Install.",
         "children": [
           {
             "$": "field",
             "name": "wapp_title",
             "$type": "string",
-            "label": "@field.title",
-            "default": "My first wapp",
-            "tip": "@field.title_tip"
+            "label": "Title",
+            "default": "",
+            "tip": "Human-readable display name shown in the launcher grid."
           },
           {
             "$": "field",
             "name": "wapp_name",
             "$type": "string",
-            "label": "@field.name",
-            "default": "my-first",
-            "tip": "@field.name_tip"
+            "label": "Name (folder slug)",
+            "default": "",
+            "tip": "Lowercase, no spaces. Folder slug under wapps/."
           },
           {
             "$": "field",
             "name": "wapp_id",
             "$type": "string",
-            "label": "@field.id",
-            "default": "user.geogram.my-first",
-            "tip": "@field.id_tip"
+            "label": "ID (reverse domain)",
+            "default": "",
+            "tip": "Stable identifier for manifest.id."
           },
           {
             "$": "field",
             "name": "wapp_version",
             "$type": "string",
-            "label": "@field.version",
-            "default": "1.0.0",
-            "tip": "@field.version_tip"
+            "label": "Version",
+            "default": "0.1.0",
+            "tip": "Semantic version, e.g. 0.1.0."
           },
           {
             "$": "field",
             "name": "wapp_description",
             "$type": "string",
-            "label": "@field.description",
-            "default": "A wapp I wrote inside geogram.",
-            "tip": "@field.description_tip"
-          },
-          {
-            "$": "field",
-            "name": "wapp_icon",
-            "$type": "icon",
-            "label": "@field.icon",
+            "label": "Description",
             "default": "",
-            "tip": "@field.icon_tip"
+            "tip": "Long-form summary, written to manifest.summary."
           }
         ]
       }

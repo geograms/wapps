@@ -1,19 +1,26 @@
 /*
  * tools.geogram.app-creator — in-app wapp authoring.
  *
- * Phase 2: the wapp now extracts field values from the inbox command
- * message and relays them to the host under dedicated
- * `type:"compile"` and `type:"install"` messages. The host-side
- * WappCompilerService + WappInstallerService then do the real work.
+ * Projects tab lists every installed wapp by asking the host for the
+ * shared archive contents (wapps.list_installed). Picking a card
+ * populates the metadata form via ui.set_field; New project clears
+ * those same fields. Compile / Install / Run tests forward the form
+ * state to the host using the existing compile/install/tests.run
+ * outbox messages.
  *
- * Wire protocol — host → wapp (via hal_msg_recv):
- *   {"command":"compile","fields":{"source":"...", ...}}
- *   {"command":"install","fields":{"wapp_id":"...","wapp_name":"...",
- *                                  "wapp_description":"...", ...}}
+ * Wire protocol — wapp → host:
+ *   {"type":"wapps.list_installed","req_id":1}
+ *   {"type":"ui.set_field","name":"<field>","value":"<v>"}
+ *   {"type":"ui.data","target":"projects","items":[...]}
+ *   {"type":"compile","source":"<escaped>"}
+ *   {"type":"install","id":"...","name":"...",...}
+ *   {"type":"tests.run","req_id":1,"target":"<wapp_id>"}
  *
- * Wire protocol — wapp → host (via hal_msg_send):
- *   {"type":"compile","source":"<escaped source>"}
- *   {"type":"install","id":"...","name":"...","description":"..."}
+ * Wire protocol — host → wapp:
+ *   {"type":"wapps.list_installed.response","items":[...]}
+ *   {"type":"action","action":"<name>"}
+ *   {"type":"tests.case","suite":"...","name":"...","passed":true,...}
+ *   {"type":"tests.complete","error":null}
  *
  * Build: WASI_SDK_PATH=$HOME/wasi-sdk make
  */
@@ -55,39 +62,17 @@ static void append_cstr(char *dst, unsigned max, unsigned *pos, const char *s) {
     append_range(dst, max, pos, s, str_len(s));
 }
 
-/* JSON-escape `s` into dst, advancing *pos. Used by render_projects to
- * embed raw KV-stored field values into a ui.data payload. Strips
- * control bytes < 0x20 instead of \uXXXX-encoding them since the
- * fields users type are plain text. */
-static void append_json_escaped(char *dst, unsigned max,
-                                unsigned *pos, const char *s) {
-    while (*s && *pos + 6 < max) {
-        unsigned char c = (unsigned char)*s++;
-        if (c == '"' || c == '\\') {
-            dst[(*pos)++] = '\\';
-            dst[(*pos)++] = (char)c;
-        } else if (c == '\n') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 'n'; }
-        else if (c == '\r') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 'r'; }
-        else if (c == '\t') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 't'; }
-        else if (c < 0x20) { /* skip */ }
-        else { dst[(*pos)++] = (char)c; }
-    }
-}
-
 /*
- * Find `"<key>":"...value..."` anywhere in the JSON blob [hay, hay+hlen)
- * and copy the ESCAPED value (verbatim JSON characters, including any
- * backslash escapes) into `out`. The copied bytes remain valid JSON so
- * the host will jsonDecode them correctly when we re-embed them in an
- * outgoing message. Returns the number of bytes written, or -1 if the
- * key was not found. The buffer is always null-terminated.
+ * Find `"<key>":"...value..."` in [hay, hay+hlen) and copy the
+ * still-JSON-escaped value into out. Re-embedding it in another JSON
+ * message round-trips correctly. Returns bytes written, or -1 if the
+ * key was not found. Always null-terminates.
  */
 static int extract_json_string_field(
     const char *hay, unsigned hlen,
     const char *key,
     char *out, unsigned outmax
 ) {
-    /* Build the token we search for: `"<key>":"` */
     char token[64];
     unsigned tp = 0;
     token[tp++] = '"';
@@ -111,10 +96,6 @@ static int extract_json_string_field(
     while (i < hlen && op + 1 < outmax) {
         const char c = hay[i];
         if (c == '\\' && i + 1 < hlen) {
-            /* Escape sequence — copy the backslash and the next char
-             * verbatim. JSON only uses single-character escapes and
-             * \uXXXX (six chars); we treat them all as "skip two" for
-             * the purpose of finding the closing quote. */
             if (op + 2 >= outmax) break;
             out[op++] = c;
             out[op++] = hay[i + 1];
@@ -130,59 +111,309 @@ static int extract_json_string_field(
     return (int)op;
 }
 
-/* ── Projects screen ──────────────────────────────────────────────
- * The Settings tab's form fields auto-mirror to the wapp's KV via
- * the host's binding layer (keys: wapp_title, wapp_id,
- * wapp_description). render_projects reads them back and emits a
- * single ui.data card representing the user's current draft. When
- * none of the fields are set, an empty array is emitted and the
- * cards group falls back to its declared empty-state message.
- *
- * Called from module_init and from module_tick so edits the user
- * makes on the Settings tab show up here on the next 2-second
- * tick — without requiring an explicit "save" action. */
-static void render_projects(void) {
+/* Match the matching close brace for an open at start. Tracks string
+ * boundaries so braces inside JSON strings don't throw off the count. */
+static int find_close_brace(const char *hay, unsigned hlen, unsigned start) {
+    int depth = 0;
+    int in_string = 0;
+    for (unsigned i = start; i < hlen; i++) {
+        const char c = hay[i];
+        if (in_string) {
+            if (c == '\\' && i + 1 < hlen) { i++; continue; }
+            if (c == '"') in_string = 0;
+            continue;
+        }
+        if (c == '"') in_string = 1;
+        else if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0) return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* ── Installed-wapps cache ───────────────────────────────────────────
+ * The wapps.list_installed.response is parsed once per refresh and
+ * stored here so action handlers can populate form fields without
+ * re-asking the host. Field strings are kept in their JSON-escaped
+ * form so they can be spliced back into outgoing JSON messages
+ * verbatim. */
+
+#define MAX_WAPPS 32
+#define SLUG_LEN  64
+#define TEXT_LEN  256
+#define LONG_LEN  512
+
+static char wapps_slug   [MAX_WAPPS][SLUG_LEN];
+static char wapps_id     [MAX_WAPPS][TEXT_LEN];
+static char wapps_title  [MAX_WAPPS][TEXT_LEN];
+static char wapps_version[MAX_WAPPS][SLUG_LEN];
+static char wapps_desc   [MAX_WAPPS][LONG_LEN];
+static char wapps_summary[MAX_WAPPS][LONG_LEN];
+static char wapps_icon   [MAX_WAPPS][TEXT_LEN];
+static unsigned wapp_count = 0;
+
+static void copy_field(const char *src, int slen, char *dst, unsigned dmax) {
+    unsigned n = slen > 0 ? (unsigned)slen : 0;
+    if (n >= dmax) n = dmax - 1;
+    for (unsigned i = 0; i < n; i++) dst[i] = src[i];
+    dst[n] = '\0';
+}
+
+/* Parse a wapps.list_installed response into the cache. The items
+ * array is scanned object-by-object using brace matching. Each
+ * object's fields are extracted via the same JSON-string helper used
+ * elsewhere in the file. */
+static void parse_list_response(const char *hay, unsigned hlen) {
+    wapp_count = 0;
+    const int items_at = find_substr(hay, hlen, "\"items\":[");
+    if (items_at < 0) return;
+    unsigned i = (unsigned)items_at + 9;
+    while (i < hlen && wapp_count < MAX_WAPPS) {
+        while (i < hlen && hay[i] != '{' && hay[i] != ']') i++;
+        if (i >= hlen || hay[i] == ']') break;
+        const unsigned obj_start = i;
+        const int close_at = find_close_brace(hay, hlen, obj_start);
+        if (close_at < 0) break;
+        const unsigned obj_len = (unsigned)close_at - obj_start + 1;
+        const char *obj = hay + obj_start;
+
+        char tmp[LONG_LEN];
+        int n;
+        n = extract_json_string_field(obj, obj_len, "id", tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_id[wapp_count], TEXT_LEN);
+        n = extract_json_string_field(obj, obj_len, "name", tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_slug[wapp_count], SLUG_LEN);
+        n = extract_json_string_field(obj, obj_len, "title", tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_title[wapp_count], TEXT_LEN);
+        n = extract_json_string_field(obj, obj_len, "version", tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_version[wapp_count], SLUG_LEN);
+        n = extract_json_string_field(obj, obj_len, "description",
+                                      tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_desc[wapp_count], LONG_LEN);
+        n = extract_json_string_field(obj, obj_len, "summary",
+                                      tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_summary[wapp_count], LONG_LEN);
+        n = extract_json_string_field(obj, obj_len, "icon", tmp, sizeof(tmp));
+        copy_field(tmp, n, wapps_icon[wapp_count], TEXT_LEN);
+
+        wapp_count++;
+        i = (unsigned)close_at + 1;
+    }
+}
+
+static int find_wapp_by_slug(const char *slug, unsigned slen) {
+    for (unsigned k = 0; k < wapp_count; k++) {
+        const unsigned ml = str_len(wapps_slug[k]);
+        if (ml != slen) continue;
+        if (str_eq_n(wapps_slug[k], slug, slen)) return (int)k;
+    }
+    return -1;
+}
+
+/* ── Outbox helpers ───────────────────────────────────────────────── */
+
+static void send_list_installed(void) {
+    const char *m = "{\"type\":\"wapps.list_installed\",\"req_id\":1}";
+    hal_msg_send(m, str_len(m));
+}
+
+/* Push a value into a named form field. The value is expected to be
+ * already JSON-escaped (as it is when extracted from an inbox payload
+ * via extract_json_string_field). */
+static void send_set_field(const char *name, const char *value) {
     static char buf[2048];
-    static char title[160] = {0};
-    static char id[160]    = {0};
-    static char desc[400]  = {0};
-
-    uint32_t n;
-    n = hal_kv_get("wapp_title", 10, title, sizeof(title) - 1);
-    title[n < sizeof(title) ? n : sizeof(title) - 1] = '\0';
-    n = hal_kv_get("wapp_id", 7, id, sizeof(id) - 1);
-    id[n < sizeof(id) ? n : sizeof(id) - 1] = '\0';
-    n = hal_kv_get("wapp_description", 16, desc, sizeof(desc) - 1);
-    desc[n < sizeof(desc) ? n : sizeof(desc) - 1] = '\0';
-
     unsigned op = 0;
-    if (!title[0] && !id[0] && !desc[0]) {
-        /* Empty draft → empty items array; the cards group renders
-         * its declared "empty" message instead. */
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.set_field\",\"name\":\"");
+    append_cstr(buf, sizeof(buf), &op, name);
+    append_cstr(buf, sizeof(buf), &op, "\",\"value\":\"");
+    append_cstr(buf, sizeof(buf), &op, value);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
+/* Render the cached wapps as cards in the projects group. Each card
+ * carries a single "Edit" action whose name is "select:<slug>" so the
+ * inbox handler knows which wapp to populate the form with. */
+static void render_projects(void) {
+    static char buf[16 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+        "{\"type\":\"ui.data\",\"target\":\"projects\",\"items\":[");
+    for (unsigned k = 0; k < wapp_count; k++) {
+        if (k) append_cstr(buf, sizeof(buf), &op, ",");
+        append_cstr(buf, sizeof(buf), &op, "{\"id\":\"");
+        append_cstr(buf, sizeof(buf), &op, wapps_slug[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
+        if (wapps_title[k][0]) {
+            append_cstr(buf, sizeof(buf), &op, wapps_title[k]);
+        } else {
+            append_cstr(buf, sizeof(buf), &op, wapps_slug[k]);
+        }
+        append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"v");
+        append_cstr(buf, sizeof(buf), &op, wapps_version[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"description\":\"");
+        if (wapps_summary[k][0]) {
+            append_cstr(buf, sizeof(buf), &op, wapps_summary[k]);
+        } else {
+            append_cstr(buf, sizeof(buf), &op, wapps_desc[k]);
+        }
+        append_cstr(buf, sizeof(buf), &op, "\",\"icon_path\":\"wapp:");
+        append_cstr(buf, sizeof(buf), &op, wapps_slug[k]);
         append_cstr(buf, sizeof(buf), &op,
-            "{\"type\":\"ui.data\",\"target\":\"projects\","
-            "\"items\":[]}");
-        hal_msg_send(buf, op);
+            "\",\"actions\":[{\"name\":\"select:");
+        append_cstr(buf, sizeof(buf), &op, wapps_slug[k]);
+        append_cstr(buf, sizeof(buf), &op,
+            "\",\"label\":\"Edit\",\"icon\":\"edit\"}]}");
+    }
+    append_cstr(buf, sizeof(buf), &op, "]}");
+    hal_msg_send(buf, op);
+}
+
+/* ── Action dispatch ──────────────────────────────────────────────── */
+
+static void on_select(const char *slug, unsigned slen) {
+    const int idx = find_wapp_by_slug(slug, slen);
+    if (idx < 0) return;
+    send_set_field("wapp_title",       wapps_title[idx]);
+    send_set_field("wapp_name",        wapps_slug[idx]);
+    send_set_field("wapp_id",          wapps_id[idx]);
+    send_set_field("wapp_version",     wapps_version[idx]);
+    /* Prefer summary (longer) over description for the Description
+     * field; fall back to description when summary is empty. */
+    send_set_field("wapp_description",
+                   wapps_summary[idx][0] ? wapps_summary[idx]
+                                         : wapps_desc[idx]);
+}
+
+static void on_new_project(void) {
+    send_set_field("wapp_title",       "");
+    send_set_field("wapp_name",        "");
+    send_set_field("wapp_id",          "");
+    send_set_field("wapp_version",     "0.1.0");
+    send_set_field("wapp_description", "");
+}
+
+/* Read the form state from KV (the host's binding layer mirrors form
+ * fields into the wapp's KV automatically) and emit the host-side
+ * compile / install / tests.run messages. */
+static void do_compile(void) {
+    static char source_buf[24 * 1024];
+    static char out_buf[32 * 1024];
+    uint32_t n = hal_kv_get("source", 6, source_buf, sizeof(source_buf) - 1);
+    if (n == 0) {
+        const char *err = "{\"type\":\"compile\",\"error\":\"no source\"}";
+        hal_msg_send(err, str_len(err));
         return;
     }
+    source_buf[n] = '\0';
+    /* hal_kv_get returns the raw user-typed text (unescaped). The
+     * host's compile handler expects the source field to be a JSON
+     * string value, so we escape on the way out. */
+    unsigned op = 0;
+    append_cstr(out_buf, sizeof(out_buf), &op,
+                "{\"type\":\"compile\",\"source\":\"");
+    for (uint32_t i = 0; i < n && op + 8 < sizeof(out_buf); i++) {
+        unsigned char c = (unsigned char)source_buf[i];
+        if (c == '"' || c == '\\') {
+            out_buf[op++] = '\\'; out_buf[op++] = (char)c;
+        } else if (c == '\n') { out_buf[op++] = '\\'; out_buf[op++] = 'n'; }
+        else if (c == '\r') { out_buf[op++] = '\\'; out_buf[op++] = 'r'; }
+        else if (c == '\t') { out_buf[op++] = '\\'; out_buf[op++] = 't'; }
+        else if (c < 0x20) { /* drop */ }
+        else { out_buf[op++] = (char)c; }
+    }
+    append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
+    hal_msg_send(out_buf, op);
+}
 
+/* Read field at key into out, return bytes written (0 if missing).
+ * Always null-terminates. */
+static uint32_t kv_read(const char *key, char *out, uint32_t omax) {
+    uint32_t n = hal_kv_get(key, str_len(key), out, omax - 1);
+    out[n] = '\0';
+    return n;
+}
+
+/* JSON-escape src into dst at *op. Used by do_install for fields that
+ * came from KV (where they sit in raw form). */
+static void escape_into(char *dst, unsigned dmax, unsigned *op,
+                        const char *src, uint32_t slen) {
+    for (uint32_t i = 0; i < slen && *op + 8 < dmax; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') {
+            dst[(*op)++] = '\\'; dst[(*op)++] = (char)c;
+        } else if (c == '\n') { dst[(*op)++] = '\\'; dst[(*op)++] = 'n'; }
+        else if (c == '\r') { dst[(*op)++] = '\\'; dst[(*op)++] = 'r'; }
+        else if (c == '\t') { dst[(*op)++] = '\\'; dst[(*op)++] = 't'; }
+        else if (c < 0x20) { /* drop */ }
+        else { dst[(*op)++] = (char)c; }
+    }
+}
+
+static void do_install(void) {
+    static char src[24 * 1024];
+    static char buf[1024];
+    static char out_buf[32 * 1024];
+
+    uint32_t id_n    = kv_read("wapp_id",          buf, sizeof(buf));
+    if (id_n == 0) {
+        const char *e = "{\"type\":\"install\",\"error\":\"no wapp_id\"}";
+        hal_msg_send(e, str_len(e));
+        return;
+    }
+    unsigned op = 0;
+    append_cstr(out_buf, sizeof(out_buf), &op,
+                "{\"type\":\"install\",\"id\":\"");
+    escape_into(out_buf, sizeof(out_buf), &op, buf, id_n);
+
+    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"title\":\"");
+    uint32_t n = kv_read("wapp_title", buf, sizeof(buf));
+    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+
+    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"name\":\"");
+    n = kv_read("wapp_name", buf, sizeof(buf));
+    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+
+    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"description\":\"");
+    n = kv_read("wapp_description", buf, sizeof(buf));
+    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+
+    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"source_ui\":\"");
+    n = hal_kv_get("source_ui", 9, src, sizeof(src) - 1);
+    src[n] = '\0';
+    escape_into(out_buf, sizeof(out_buf), &op, src, n);
+
+    append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
+    hal_msg_send(out_buf, op);
+}
+
+static void do_run_tests(void) {
+    static char id_buf[256];
+    uint32_t n = kv_read("wapp_id", id_buf, sizeof(id_buf));
+    if (n == 0) {
+        const char *m = "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                        "\"text\":\"[tests] no wapp_id set — pick a "
+                        "project first.\\n\"}";
+        hal_msg_send(m, str_len(m));
+        return;
+    }
+    static char buf[512];
+    unsigned op = 0;
     append_cstr(buf, sizeof(buf), &op,
-        "{\"type\":\"ui.data\",\"target\":\"projects\","
-        "\"items\":[{\"id\":\"current\",\"title\":\"");
-    if (title[0]) {
-        append_json_escaped(buf, sizeof(buf), &op, title);
-    } else {
-        append_cstr(buf, sizeof(buf), &op, "Untitled draft");
-    }
-    append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"");
-    if (id[0]) {
-        append_json_escaped(buf, sizeof(buf), &op, id);
-    }
-    append_cstr(buf, sizeof(buf), &op, "\",\"description\":\"");
-    if (desc[0]) {
-        append_json_escaped(buf, sizeof(buf), &op, desc);
-    }
-    append_cstr(buf, sizeof(buf), &op, "\",\"icon\":\"edit\"}]}");
+                "{\"type\":\"tests.run\",\"req_id\":1,\"target\":\"");
+    append_range(buf, sizeof(buf), &op, id_buf, n);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+
+    op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                "\"text\":\"[tests] running tests in ");
+    append_range(buf, sizeof(buf), &op, id_buf, n);
+    append_cstr(buf, sizeof(buf), &op, "...\\n\"}");
     hal_msg_send(buf, op);
 }
 
@@ -190,15 +421,13 @@ static void render_projects(void) {
 
 void module_init(void) {
     hal_log(1, "[app-creator] init", 18);
-    render_projects();
+    send_list_installed();
 }
 
 void module_tick(void) {
-    /* Re-render the Projects card so changes the user makes on the
-     * Settings tab become visible without a manual refresh. The
-     * cards primitive is a pure replace — emitting the same content
-     * is a host-side no-op. */
-    render_projects();
+    /* Idle. The projects list refreshes only on explicit Refresh
+     * presses or after Install completes (the user's next tab visit
+     * triggers a fresh wapp boot). */
 }
 
 void module_destroy(void) {
@@ -206,15 +435,11 @@ void module_destroy(void) {
 }
 
 uint32_t module_tick_interval_ms(void) {
-    return 2000;
+    return 0;
 }
 
 void module_handle_event(void) {
-    /* The inbox buffer has to fit the full command envelope plus the
-     * source code payload. 32 KB gives us headroom for ~24 KB of
-     * JSON-escaped C source, which is plenty for a single-file wapp. */
     static char inbox[32 * 1024];
-    static char source_buf[24 * 1024];
     static char field_buf[512];
     static char out_buf[32 * 1024];
 
@@ -223,10 +448,15 @@ void module_handle_event(void) {
         if (n == 0) break;
         inbox[n] = '\0';
 
-        /* Test runner responses arrive as host → wapp messages keyed
-         * on "type", not "command". Detect them first and emit log
-         * lines into the output field; fall through to command
-         * dispatch for everything else. */
+        /* Installed-wapps response → cache + render. */
+        if (find_substr(inbox, n,
+                "\"type\":\"wapps.list_installed.response\"") >= 0) {
+            parse_list_response(inbox, n);
+            render_projects();
+            continue;
+        }
+
+        /* Test runner case results. */
         if (find_substr(inbox, n, "\"type\":\"tests.case\"") >= 0) {
             const int suite_len = extract_json_string_field(
                 inbox, n, "suite", field_buf, sizeof(field_buf));
@@ -238,8 +468,8 @@ void module_handle_event(void) {
 
             const int name_len = extract_json_string_field(
                 inbox, n, "name", field_buf, sizeof(field_buf));
-            const int passed_idx = find_substr(inbox, n, "\"passed\":true");
-            const int has_pass = passed_idx >= 0 ? 1 : 0;
+            const int has_pass =
+                find_substr(inbox, n, "\"passed\":true") >= 0;
 
             unsigned op = 0;
             append_cstr(out_buf, sizeof(out_buf), &op,
@@ -257,11 +487,11 @@ void module_handle_event(void) {
                              (unsigned)name_len);
             }
             if (!has_pass) {
-                /* Append the error message. */
                 const int err_len = extract_json_string_field(
                     inbox, n, "error", field_buf, sizeof(field_buf));
                 if (err_len > 0) {
-                    append_cstr(out_buf, sizeof(out_buf), &op, "\\n         ");
+                    append_cstr(out_buf, sizeof(out_buf), &op,
+                                "\\n         ");
                     append_range(out_buf, sizeof(out_buf), &op, field_buf,
                                  (unsigned)err_len);
                 }
@@ -270,10 +500,8 @@ void module_handle_event(void) {
             hal_msg_send(out_buf, op);
             continue;
         }
+
         if (find_substr(inbox, n, "\"type\":\"tests.complete\"") >= 0) {
-            /* Summary line. The error field on tests.complete is non-null
-             * only when the runner couldn't start (no tests.wasm,
-             * permission denied, etc.). */
             const int err_len = extract_json_string_field(
                 inbox, n, "error", field_buf, sizeof(field_buf));
             unsigned op = 0;
@@ -290,140 +518,42 @@ void module_handle_event(void) {
             continue;
         }
 
-        const int cmd_idx = find_substr(inbox, n, "\"command\"");
-        if (cmd_idx < 0) continue;
+        /* Action messages — extract action name, then dispatch. */
+        const int act_idx = find_substr(inbox, n, "\"action\":\"");
+        if (act_idx < 0) continue;
+        const unsigned vstart = (unsigned)act_idx + 10;
+        unsigned vend = vstart;
+        while (vend < n && inbox[vend] != '"') vend++;
+        if (vend >= n) continue;
+        const char *a = inbox + vstart;
+        const unsigned al = vend - vstart;
 
-        /* Find the opening quote of the value. */
-        int qstart = -1;
-        for (unsigned i = (unsigned)cmd_idx + 9; i < n; i++) {
-            if (inbox[i] == '"') { qstart = (int)i + 1; break; }
+        /* Card-emitted "select:<slug>" actions — populate the form
+         * from the cached wapp metadata. */
+        if (al > 7 && str_eq_n(a, "select:", 7)) {
+            on_select(a + 7, al - 7);
+            continue;
         }
-        if (qstart < 0) continue;
-        int qend = -1;
-        for (unsigned i = (unsigned)qstart; i < n; i++) {
-            if (inbox[i] == '"') { qend = (int)i; break; }
+
+        if (al == 11 && str_eq_n(a, "new-project", 11)) {
+            on_new_project();
+            continue;
         }
-        if (qend < 0) continue;
-
-        const char *cmd = inbox + qstart;
-        const unsigned clen = (unsigned)(qend - qstart);
-
-        if (clen == 9 && str_eq_n(cmd, "run-tests", 9)) {
-            /* Forward {"type":"tests.run","req_id":1,"target":"<wapp_id>"}
-             * to the host. The host loads tests.wasm from the target's
-             * archive, runs module_run_tests, and streams tests.case +
-             * tests.complete messages back into our inbox.
-             *
-             * req_id is a short fixed value; we only run one suite at a
-             * time and the host echoes whatever we send. */
-            const int id_len = extract_json_string_field(
-                inbox, n, "wapp_id", field_buf, sizeof(field_buf));
-            if (id_len < 0) {
-                hal_msg_send(
-                    "{\"type\":\"ui.log.append\",\"name\":\"output\","
-                    "\"text\":\"[tests] no wapp_id set — fill the "
-                    "Settings tab first.\\n\"}", 110);
-                continue;
-            }
-            unsigned op = 0;
-            append_cstr(out_buf, sizeof(out_buf), &op,
-                        "{\"type\":\"tests.run\",\"req_id\":1,"
-                        "\"target\":\"");
-            append_range(out_buf, sizeof(out_buf), &op, field_buf,
-                         (unsigned)id_len);
-            append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
-            hal_msg_send(out_buf, op);
-
-            /* Header line into the log field. */
-            unsigned hop = 0;
-            append_cstr(out_buf, sizeof(out_buf), &hop,
-                        "{\"type\":\"ui.log.append\",\"name\":\"output\","
-                        "\"text\":\"[tests] running tests in ");
-            append_range(out_buf, sizeof(out_buf), &hop, field_buf,
-                         (unsigned)id_len);
-            append_cstr(out_buf, sizeof(out_buf), &hop, "...\\n\"}");
-            hal_msg_send(out_buf, hop);
-        } else if (clen == 7 && str_eq_n(cmd, "compile", 7)) {
-            /* Extract source from fields. */
-            const int src_len = extract_json_string_field(
-                inbox, n, "source", source_buf, sizeof(source_buf));
-            if (src_len < 0) {
-                hal_msg_send(
-                    "{\"type\":\"compile\",\"error\":\"no source field\"}",
-                    42);
-                continue;
-            }
-            /* Build {"type":"compile","source":"<escaped>"}. The source
-             * is already JSON-escaped from the inbound message so we
-             * copy it verbatim. */
-            unsigned op = 0;
-            append_cstr(out_buf, sizeof(out_buf), &op,
-                        "{\"type\":\"compile\",\"source\":\"");
-            append_range(out_buf, sizeof(out_buf), &op, source_buf,
-                         (unsigned)src_len);
-            append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
-            hal_msg_send(out_buf, op);
-        } else if (clen == 7 && str_eq_n(cmd, "install", 7)) {
-            /* Build
-             * {"type":"install","id":"...","title":"...","name":"...",
-             *  "description":"...","source_ui":"..."}. Every field is
-             * already JSON-escaped from the inbound command message so
-             * we copy the extracted bytes verbatim. wapp_name is
-             * required for the folder slug; everything else is
-             * optional. */
-            const int id_len = extract_json_string_field(
-                inbox, n, "wapp_id", field_buf, sizeof(field_buf));
-            if (id_len < 0) {
-                hal_msg_send(
-                    "{\"type\":\"install\",\"error\":\"no wapp_id\"}",
-                    37);
-                continue;
-            }
-            unsigned op = 0;
-            append_cstr(out_buf, sizeof(out_buf), &op,
-                        "{\"type\":\"install\",\"id\":\"");
-            append_range(out_buf, sizeof(out_buf), &op, field_buf,
-                         (unsigned)id_len);
-
-            append_cstr(out_buf, sizeof(out_buf), &op, "\",\"title\":\"");
-            const int title_len = extract_json_string_field(
-                inbox, n, "wapp_title", field_buf, sizeof(field_buf));
-            if (title_len > 0) {
-                append_range(out_buf, sizeof(out_buf), &op, field_buf,
-                             (unsigned)title_len);
-            }
-
-            append_cstr(out_buf, sizeof(out_buf), &op, "\",\"name\":\"");
-            const int name_len = extract_json_string_field(
-                inbox, n, "wapp_name", field_buf, sizeof(field_buf));
-            if (name_len > 0) {
-                append_range(out_buf, sizeof(out_buf), &op, field_buf,
-                             (unsigned)name_len);
-            }
-
-            append_cstr(out_buf, sizeof(out_buf), &op, "\",\"description\":\"");
-            const int desc_len = extract_json_string_field(
-                inbox, n, "wapp_description", field_buf, sizeof(field_buf));
-            if (desc_len > 0) {
-                append_range(out_buf, sizeof(out_buf), &op, field_buf,
-                             (unsigned)desc_len);
-            }
-
-            /* source_ui (home.ui.json) may be multi-kilobyte — reuse
-             * the larger source_buf. */
-            append_cstr(out_buf, sizeof(out_buf), &op, "\",\"source_ui\":\"");
-            const int ui_len = extract_json_string_field(
-                inbox, n, "source_ui", source_buf, sizeof(source_buf));
-            if (ui_len > 0) {
-                append_range(out_buf, sizeof(out_buf), &op, source_buf,
-                             (unsigned)ui_len);
-            }
-
-            append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
-            hal_msg_send(out_buf, op);
+        if (al == 16 && str_eq_n(a, "refresh-projects", 16)) {
+            send_list_installed();
+            continue;
         }
-        /* No other commands: project switching happens entirely
-         * host-side via the $type:"projects" screen renderer in
-         * wapp_page.dart. Nothing to forward from the wapp. */
+        if (al == 7 && str_eq_n(a, "compile", 7)) {
+            do_compile();
+            continue;
+        }
+        if (al == 7 && str_eq_n(a, "install", 7)) {
+            do_install();
+            continue;
+        }
+        if (al == 9 && str_eq_n(a, "run-tests", 9)) {
+            do_run_tests();
+            continue;
+        }
     }
 }
