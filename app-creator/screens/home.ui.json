@@ -6,9 +6,11 @@
     "children": [
       {
         "$": "group",
-        "name": "@group.projects",
-        "$type": "projects",
-        "tip": "@group.projects_tip"
+        "name": "projects",
+        "$type": "cards",
+        "layout": "list",
+        "tip": "@group.projects_tip",
+        "empty": "@empty.projects"
       }
     ]
   },

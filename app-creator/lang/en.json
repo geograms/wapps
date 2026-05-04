@@ -46,5 +46,7 @@
   "action.install": "Install",
   "action.install_tip": "Write the compiled wapp into the launcher's installed-apps folder. If no fresh compile is available this reuses the existing app.wasm (edit metadata / UI only).",
   "action.run_tests": "Run tests",
-  "action.run_tests_tip": "Run the unit tests bundled in the installed wapp's tests.wasm. Results stream into the log view below."
+  "action.run_tests_tip": "Run the unit tests bundled in the installed wapp's tests.wasm. Results stream into the log view below.",
+
+  "empty.projects": "No project yet. Switch to Settings to set the title and id, write code on the Code tab, then click Install."
 }

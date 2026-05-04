@@ -55,6 +55,25 @@ static void append_cstr(char *dst, unsigned max, unsigned *pos, const char *s) {
     append_range(dst, max, pos, s, str_len(s));
 }
 
+/* JSON-escape `s` into dst, advancing *pos. Used by render_projects to
+ * embed raw KV-stored field values into a ui.data payload. Strips
+ * control bytes < 0x20 instead of \uXXXX-encoding them since the
+ * fields users type are plain text. */
+static void append_json_escaped(char *dst, unsigned max,
+                                unsigned *pos, const char *s) {
+    while (*s && *pos + 6 < max) {
+        unsigned char c = (unsigned char)*s++;
+        if (c == '"' || c == '\\') {
+            dst[(*pos)++] = '\\';
+            dst[(*pos)++] = (char)c;
+        } else if (c == '\n') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 'n'; }
+        else if (c == '\r') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 'r'; }
+        else if (c == '\t') { dst[(*pos)++] = '\\'; dst[(*pos)++] = 't'; }
+        else if (c < 0x20) { /* skip */ }
+        else { dst[(*pos)++] = (char)c; }
+    }
+}
+
 /*
  * Find `"<key>":"...value..."` anywhere in the JSON blob [hay, hay+hlen)
  * and copy the ESCAPED value (verbatim JSON characters, including any
@@ -111,14 +130,75 @@ static int extract_json_string_field(
     return (int)op;
 }
 
+/* ── Projects screen ──────────────────────────────────────────────
+ * The Settings tab's form fields auto-mirror to the wapp's KV via
+ * the host's binding layer (keys: wapp_title, wapp_id,
+ * wapp_description). render_projects reads them back and emits a
+ * single ui.data card representing the user's current draft. When
+ * none of the fields are set, an empty array is emitted and the
+ * cards group falls back to its declared empty-state message.
+ *
+ * Called from module_init and from module_tick so edits the user
+ * makes on the Settings tab show up here on the next 2-second
+ * tick — without requiring an explicit "save" action. */
+static void render_projects(void) {
+    static char buf[2048];
+    static char title[160] = {0};
+    static char id[160]    = {0};
+    static char desc[400]  = {0};
+
+    uint32_t n;
+    n = hal_kv_get("wapp_title", 10, title, sizeof(title) - 1);
+    title[n < sizeof(title) ? n : sizeof(title) - 1] = '\0';
+    n = hal_kv_get("wapp_id", 7, id, sizeof(id) - 1);
+    id[n < sizeof(id) ? n : sizeof(id) - 1] = '\0';
+    n = hal_kv_get("wapp_description", 16, desc, sizeof(desc) - 1);
+    desc[n < sizeof(desc) ? n : sizeof(desc) - 1] = '\0';
+
+    unsigned op = 0;
+    if (!title[0] && !id[0] && !desc[0]) {
+        /* Empty draft → empty items array; the cards group renders
+         * its declared "empty" message instead. */
+        append_cstr(buf, sizeof(buf), &op,
+            "{\"type\":\"ui.data\",\"target\":\"projects\","
+            "\"items\":[]}");
+        hal_msg_send(buf, op);
+        return;
+    }
+
+    append_cstr(buf, sizeof(buf), &op,
+        "{\"type\":\"ui.data\",\"target\":\"projects\","
+        "\"items\":[{\"id\":\"current\",\"title\":\"");
+    if (title[0]) {
+        append_json_escaped(buf, sizeof(buf), &op, title);
+    } else {
+        append_cstr(buf, sizeof(buf), &op, "Untitled draft");
+    }
+    append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"");
+    if (id[0]) {
+        append_json_escaped(buf, sizeof(buf), &op, id);
+    }
+    append_cstr(buf, sizeof(buf), &op, "\",\"description\":\"");
+    if (desc[0]) {
+        append_json_escaped(buf, sizeof(buf), &op, desc);
+    }
+    append_cstr(buf, sizeof(buf), &op, "\",\"icon\":\"edit\"}]}");
+    hal_msg_send(buf, op);
+}
+
 /* ── Module lifecycle ─────────────────────────────────────────────── */
 
 void module_init(void) {
     hal_log(1, "[app-creator] init", 18);
+    render_projects();
 }
 
 void module_tick(void) {
-    /* No periodic work — everything runs from button-click commands. */
+    /* Re-render the Projects card so changes the user makes on the
+     * Settings tab become visible without a manual refresh. The
+     * cards primitive is a pure replace — emitting the same content
+     * is a host-side no-op. */
+    render_projects();
 }
 
 void module_destroy(void) {
