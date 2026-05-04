@@ -10,7 +10,7 @@
         "$type": "cards",
         "layout": "list",
         "tip": "@group.projects_tip",
-        "empty": "@empty.projects"
+        "empty": "No project yet. Switch to Settings to set the title and id, write code on the Code tab, then click Install."
       }
     ]
   },
