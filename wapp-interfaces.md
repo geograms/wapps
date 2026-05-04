@@ -894,8 +894,121 @@ The engine reads the active profile's NOSTR identity (`npub`,
 - Stamp social entries (reactions, comments) inside the wapp's
   `social.sqlite3`
 
-A wapp never sees the `nsec` directly. It can ask the host to sign
-on its behalf via a future `sign.request` message (Stage 3).
+A wapp never sees the `nsec` directly. It asks the host to sign on
+its behalf via the `sign.schnorr` outbox message (see §15.1 below).
+
+### 15.1 Outbox protocol — profile, identity, sign
+
+Wapps that need encrypted-profile-aware file access, the active
+identity, or NOSTR signing do not get a new HAL function — they
+send an outbox message and receive the response on `module_handle_event`.
+Going through the outbox keeps the WASM/Rust ABI synchronous while
+the host side stays free to await `ProfileStorage`, prompt for
+credentials, etc.
+
+Permission tokens declared in `manifest.permissions` gate every
+sensitive call:
+
+| Token                    | Unlocks                                     |
+|--------------------------|---------------------------------------------|
+| `collection.<id>.read`   | `profile.read/list/exists/size` under `collections/<id>/...` |
+| `collection.<id>.write`  | adds `profile.write/mkdir/remove` under that root            |
+| `identity.read`          | `identity.get` (callsign + npub)            |
+| `sign`                   | `sign.schnorr` over a 32-byte digest        |
+
+Path scoping: `path` is relative to the granted root. The host
+prepends `collections/<id>/`. Anything that escapes the root (`..`,
+absolute paths) is rejected with status `-1`. Reads and writes flow
+through `AppService().profileStorage`, so encrypted profiles work
+identically.
+
+Every message carries a wapp-allocated `req_id`; the host echoes it
+in the response so the wapp can correlate outstanding requests.
+
+#### Request shapes (wapp → host)
+
+```json
+{ "type": "profile.read",   "req_id": 1, "scope": "collection.forum",
+  "path": "<section>/thread-foo.txt" }
+
+{ "type": "profile.write",  "req_id": 2, "scope": "collection.forum",
+  "path": "<section>/thread-foo.txt", "mode": "write|append",
+  "data": "<utf-8 contents>" }
+
+{ "type": "profile.list",   "req_id": 3, "scope": "collection.forum",
+  "path": "<section>" }
+
+{ "type": "profile.exists", "req_id": 4, "scope": "collection.forum",
+  "path": "<section>/thread-foo.txt" }
+
+{ "type": "profile.size",   "req_id": 5, "scope": "collection.forum",
+  "path": "<section>/thread-foo.txt" }
+
+{ "type": "profile.mkdir",  "req_id": 6, "scope": "collection.forum",
+  "path": "<section>" }
+
+{ "type": "profile.remove", "req_id": 7, "scope": "collection.forum",
+  "path": "<section>/thread-foo.txt" }
+
+{ "type": "identity.get",   "req_id": 8 }
+
+{ "type": "sign.schnorr",   "req_id": 9,
+  "message_hex": "<64 hex chars = SHA-256 digest>" }
+```
+
+#### Response shapes (host → wapp)
+
+Each response uses `<request-type>.response` and carries `req_id` +
+`status`. `status: 0` is success; non-zero is failure with a human
+`error` string.
+
+| status | Meaning                                                  |
+|--------|----------------------------------------------------------|
+| 0      | OK                                                       |
+| -1     | Permission denied / missing token / invalid scope        |
+| -2     | Path not found                                           |
+| -3     | Other failure (storage error, bad input, no profile yet) |
+
+```json
+{ "type": "profile.read.response",   "req_id": 1, "status": 0,
+  "data": "<file contents>" }
+
+{ "type": "profile.write.response",  "req_id": 2, "status": 0 }
+
+{ "type": "profile.list.response",   "req_id": 3, "status": 0,
+  "entries": [ {"name":"foo","is_dir":true},
+               {"name":"thread-x.txt","is_dir":false,"size":1234} ] }
+
+{ "type": "profile.exists.response", "req_id": 4, "status": 0,
+  "exists": true,  "is_dir": false }
+
+{ "type": "profile.size.response",   "req_id": 5, "status": 0,
+  "size":   1234,  "exists": true }
+
+{ "type": "profile.mkdir.response",  "req_id": 6, "status": 0 }
+{ "type": "profile.remove.response", "req_id": 7, "status": 0 }
+
+{ "type": "identity.get.response",   "req_id": 8, "status": 0,
+  "callsign": "X1SU86", "npub": "npub1..." }
+
+{ "type": "sign.schnorr.response",   "req_id": 9, "status": 0,
+  "signature_hex": "<128 hex chars = 64-byte BIP-340 sig>" }
+```
+
+#### Engine notes
+
+- The host validates `manifest.permissions` *before* dispatching the
+  request. A missing token short-circuits to `status: -1` without
+  touching storage.
+- `sign.schnorr` requires the active profile to carry an `nsec`. The
+  nsec never leaves the host; the wapp only ever supplies a 32-byte
+  digest and receives a 64-byte signature.
+- `profile.write` defaults to `mode: "write"` (truncate). Use
+  `"append"` for race-free reply writes when two posts could land in
+  the same tick.
+- Engines that want a generic viewer wapp can omit
+  `collection.<id>.write`; the read-only handlers (`profile.read`,
+  `list`, `exists`, `size`) still work.
 
 ---
 
