@@ -701,7 +701,8 @@ Group `$type` values reserved for host-side rendering:
 | `map` | Tiled map (FlutterMap or equivalent) |
 | `menu` | Popup menu (icon button → list of action children) |
 | `header-actions` | Hoists icon-actions / menus into the host AppBar |
-| `output` | Wapp store catalog list |
+| `cards` | Generic data-driven list/grid of cards (icon + text + actions) — the wapp pushes rows via `ui.data` |
+| `output` | Wapp store catalog list (deprecated — use `cards` instead) |
 | `sources` | Wapp store repository manager |
 | `projects` | App Creator project picker |
 | `tasks` | Task monitor |
@@ -809,6 +810,76 @@ fall back to `Icons.menu`. The `<action>` elements inside
 `header-actions` are icon-only — `label` is used as the fallback
 tooltip but is not rendered next to the icon, since AppBar real
 estate is tight.
+
+### 14.3 `$type="cards"`
+
+A generic data-driven list/grid of cards. The wapp pushes rows
+via `ui.data`; the host renders each row as a card with icon,
+title, subtitle, description, chips and action buttons. The host
+knows nothing about what the rows mean — wapps own the data and
+the visual hints.
+
+UI declaration:
+
+```json
+{
+  "$": "group",
+  "name": "catalog",
+  "$type": "cards",
+  "layout": "list",
+  "empty": "No items yet."
+}
+```
+
+`name` (required) — the data target. The wapp sends `ui.data`
+messages with `target` matching this name to populate the group.
+
+`layout` (optional, default `"list"`) — `"list"` for a vertical
+ListView, `"grid"` for a responsive GridView (2/3/4 columns by
+viewport width). The wapp can flip the value at runtime via
+`ui.attr`:
+```
+{"type":"ui.attr","target":"<name>","attr":"layout","value":"grid"}
+```
+
+`empty` (optional) — text shown when no items have been pushed
+yet.
+
+Wapp-pushed item schema (every field optional):
+
+```json
+{
+  "type": "ui.data",
+  "target": "<group-name>",
+  "items": [
+    {
+      "id":          "<stable identifier>",
+      "icon_path":   "wapp:<slug>"   ⏐ "/abs/path.svg" ⏐ "rel/path.png",
+      "title":       "<heading>",
+      "subtitle":    "<small line under title>",
+      "description": "<body, max ~2 lines>",
+      "chips":       [{"label":"…","icon":"folder|cloud|…"}],
+      "actions":     [
+        {"name":"<action-id>", "label":"<button>", "icon":"<icon>",
+         "disabled": false}
+      ]
+    }
+  ]
+}
+```
+
+`icon_path` resolution:
+- `wapp:<slug>` — host resolves to the named installed wapp's
+  `manifest.icon` SVG. Useful for catalogs of other wapps.
+- Anything else — taken as a filesystem path. Absolute paths are
+  used as-is; relative paths are resolved against the wapp's
+  package base.
+
+Tapping an action button emits the standard
+`{"type":"action","action":"<name>"}` message the wapp already
+handles. Action names can use any prefix scheme the wapp likes
+(e.g. `"install:maps"`, `"delete:43"`); the wapp dispatches in
+`module_handle_event`.
 
 ---
 

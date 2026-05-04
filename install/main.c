@@ -101,40 +101,6 @@ static void send_output(const char *text, const char *level) {
 /* Forward declaration — defined later next to the sources state. */
 static void send_sources_list(void);
 
-/* ── Catalog layout (list / grid) ───────────────────────────────────── */
-
-/* Tell the host whether the catalog should render as a vertical list
- * of wide cards or as a Play-Store-style grid of compact tiles. The
- * host stores no defaults of its own — it stays on the last value
- * the wapp sent. KV holds the persisted choice across restarts. */
-static void send_layout(const char *mode) {
-    char buf[160] = "{\"type\":\"ui.layout\",\"target\":\"output-list\",\"mode\":\"";
-    str_cat(buf, mode, sizeof(buf));
-    str_cat(buf, "\"}", sizeof(buf));
-    hal_msg_send(buf, str_len(buf));
-}
-
-static void load_and_send_layout(void) {
-    char saved[16];
-    uint32_t n = hal_kv_get("view_mode", 9, saved, sizeof(saved) - 1);
-    if (n > 0 && n < sizeof(saved)) {
-        saved[n] = '\0';
-    } else {
-        str_copy(saved, "list", sizeof(saved));
-    }
-    /* Sanitise — only honour known modes; anything else falls back. */
-    if (!str_eq(saved, "list") && !str_eq(saved, "grid")) {
-        str_copy(saved, "list", sizeof(saved));
-    }
-    send_layout(saved);
-}
-
-static void set_layout(const char *mode) {
-    if (!str_eq(mode, "list") && !str_eq(mode, "grid")) return;
-    hal_kv_set("view_mode", 9, mode, str_len(mode));
-    send_layout(mode);
-}
-
 /* ── Catalog entry ───────────────────────────────────────────────────── */
 
 #define MAX_ENTRIES 64
@@ -547,91 +513,200 @@ static void begin_fetch_all(void) {
 
 /* ── Display ─────────────────────────────────────────────────────────── */
 
-static void show_catalog(void) {
-    if (catalog_count == 0) {
-        send_output("No wapps found across the configured repositories.", "info");
-        return;
+/* Append a JSON-escaped string literal to buf. The caller already wrote
+ * the opening quote; this writes the body and the closing quote. */
+static unsigned append_json_string(char *buf, unsigned len, unsigned cap,
+                                   const char *s) {
+    for (unsigned i = 0; s[i] && len < cap - 8; i++) {
+        char c = s[i];
+        if      (c == '"')  { buf[len++] = '\\'; buf[len++] = '"'; }
+        else if (c == '\\') { buf[len++] = '\\'; buf[len++] = '\\'; }
+        else if (c == '\n') { buf[len++] = '\\'; buf[len++] = 'n'; }
+        else if (c == '\r') { buf[len++] = '\\'; buf[len++] = 'r'; }
+        else if (c == '\t') { buf[len++] = '\\'; buf[len++] = 't'; }
+        else                { buf[len++] = c; }
     }
+    if (len < cap - 1) buf[len++] = '"';
+    buf[len] = '\0';
+    return len;
+}
 
-    char hdr[32];
-    u64_to_str((uint64_t)catalog_count, hdr, sizeof(hdr));
-    char msg[96] = "";
-    str_cat(msg, hdr, sizeof(msg));
-    str_cat(msg, " wapp(s) available across ", sizeof(msg));
-    char src_hdr[16];
-    u64_to_str((uint64_t)source_count, src_hdr, sizeof(src_hdr));
-    str_cat(msg, src_hdr, sizeof(msg));
-    str_cat(msg, " repo(s):", sizeof(msg));
-    send_output(msg, "info");
+/* Buffer for the catalog ui.data emission. ~16KB handles ~50 entries
+ * with all fields populated. */
+static char catalog_buf[16384];
+
+/* Emit the catalog as a structured `ui.data` message that the host's
+ * generic `$type="cards"` group renders. The host knows nothing about
+ * catalogs — it just renders the list of items the wapp pushes. */
+static void show_catalog(void) {
+    unsigned len = 0;
+    str_copy(catalog_buf,
+             "{\"type\":\"ui.data\",\"target\":\"catalog\",\"items\":[",
+             sizeof(catalog_buf));
+    len = str_len(catalog_buf);
 
     for (int i = 0; i < catalog_count; i++) {
         CatalogEntry *e = &catalog[i];
         char inst_ver[32];
         get_installed_version(e->name, inst_ver, sizeof(inst_ver));
 
-        char line[384] = "  ";
-        str_cat(line, e->name, sizeof(line));
+        if (i > 0 && len < sizeof(catalog_buf) - 2) {
+            catalog_buf[len++] = ',';
+        }
 
-        /* Pad name to 16 chars */
-        unsigned pad = str_len(line);
-        while (pad < 18) { line[pad++] = ' '; line[pad] = '\0'; }
+        /* {"id":"<slug>","title":"<title>", */
+        if (len < sizeof(catalog_buf) - 16) catalog_buf[len++] = '{';
+        str_copy(catalog_buf + len, "\"id\":\"", sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), e->name);
 
-        str_cat(line, "v", sizeof(line));
-        str_cat(line, e->version, sizeof(line));
+        str_copy(catalog_buf + len, ",\"title\":\"", sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
+                                 e->title[0] ? e->title : e->name);
 
-        /* Size */
-        char sz[16];
+        /* subtitle: "v<version>" + size + status */
+        char subtitle[128] = "v";
+        str_cat(subtitle, e->version, sizeof(subtitle));
         if (e->size >= 1024) {
+            char sz[16];
             u64_to_str((uint64_t)(e->size / 1024), sz, sizeof(sz));
-            str_cat(line, "  (", sizeof(line));
-            str_cat(line, sz, sizeof(line));
-            str_cat(line, "KB)", sizeof(line));
+            str_cat(subtitle, " · ", sizeof(subtitle));
+            str_cat(subtitle, sz, sizeof(subtitle));
+            str_cat(subtitle, " KB", sizeof(subtitle));
         }
-
-        /* Status */
-        if (inst_ver[0]) {
-            if (str_eq(inst_ver, e->version)) {
-                str_cat(line, "  [installed]", sizeof(line));
-            } else {
-                str_cat(line, "  [update: ", sizeof(line));
-                str_cat(line, inst_ver, sizeof(line));
-                str_cat(line, " -> ", sizeof(line));
-                str_cat(line, e->version, sizeof(line));
-                str_cat(line, "]", sizeof(line));
-            }
+        if (inst_ver[0] && !str_eq(inst_ver, e->version)) {
+            str_cat(subtitle, " · update v", sizeof(subtitle));
+            str_cat(subtitle, inst_ver, sizeof(subtitle));
         }
+        str_copy(catalog_buf + len, ",\"subtitle\":\"",
+                 sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), subtitle);
 
-        send_output(line, "out");
-
-        /* Title (display name) on its own indented line so the host
-         * can render it instead of falling back to the slug. */
-        if (e->title[0]) {
-            char tline[140] = "    title:";
-            str_cat(tline, e->title, sizeof(tline));
-            send_output(tline, "out");
-        }
-
-        /* Description on next line */
+        /* description */
         if (e->description[0]) {
-            char desc[260] = "    ";
-            str_cat(desc, e->description, sizeof(desc));
-            send_output(desc, "out");
+            str_copy(catalog_buf + len, ",\"description\":\"",
+                     sizeof(catalog_buf) - len);
+            len = str_len(catalog_buf);
+            len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
+                                     e->description);
         }
 
-        /* Source host chip: "    @host.example.com" */
-        if (e->source_host[0]) {
-            char host_line[160] = "    @";
-            str_cat(host_line, e->source_host, sizeof(host_line));
-            send_output(host_line, "out");
+        /* icon_path: "wapp:<slug>" — host resolves to the installed
+         * wapp's manifest.icon path. Falls back to a generic icon
+         * when the wapp isn't installed yet. */
+        char icon_ref[80] = "wapp:";
+        str_cat(icon_ref, e->name, sizeof(icon_ref));
+        str_copy(catalog_buf + len, ",\"icon_path\":\"",
+                 sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), icon_ref);
+
+        /* chips: source host + publisher */
+        int chip_count = 0;
+        if (e->source_host[0] || e->publisher_npub[0]) {
+            str_copy(catalog_buf + len, ",\"chips\":[",
+                     sizeof(catalog_buf) - len);
+            len = str_len(catalog_buf);
+            if (e->source_host[0]) {
+                str_copy(catalog_buf + len, "{\"label\":\"",
+                         sizeof(catalog_buf) - len);
+                len = str_len(catalog_buf);
+                len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
+                                         e->source_host);
+                const char *icn = str_eq(e->source_host, "local") ?
+                    ",\"icon\":\"folder\"}" : ",\"icon\":\"cloud\"}";
+                str_copy(catalog_buf + len, icn, sizeof(catalog_buf) - len);
+                len = str_len(catalog_buf);
+                chip_count++;
+            }
+            if (e->publisher_npub[0]) {
+                if (chip_count > 0 && len < sizeof(catalog_buf) - 2) {
+                    catalog_buf[len++] = ',';
+                }
+                str_copy(catalog_buf + len, "{\"label\":\"",
+                         sizeof(catalog_buf) - len);
+                len = str_len(catalog_buf);
+                len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
+                                         e->publisher_npub);
+                str_copy(catalog_buf + len, "}", sizeof(catalog_buf) - len);
+                len = str_len(catalog_buf);
+            }
+            if (len < sizeof(catalog_buf) - 2) catalog_buf[len++] = ']';
         }
 
-        /* Publisher chip: "    by:npub1..." */
-        if (e->publisher_npub[0]) {
-            char pub_line[128] = "    by:";
-            str_cat(pub_line, e->publisher_npub, sizeof(pub_line));
-            send_output(pub_line, "out");
+        /* actions: one button — Install / Installed / Update.
+         * Action name "install:<slug>" so the host's generic action
+         * dispatch reaches the install command. */
+        char act[96] = "install:";
+        str_cat(act, e->name, sizeof(act));
+        str_copy(catalog_buf + len, ",\"actions\":[{\"name\":\"",
+                 sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), act);
+
+        const char *label, *icon;
+        int disabled = 0;
+        if (inst_ver[0] && str_eq(inst_ver, e->version)) {
+            label = "Installed"; icon = "check"; disabled = 1;
+        } else if (inst_ver[0]) {
+            label = "Update"; icon = "upgrade";
+        } else {
+            label = "Install"; icon = "download";
         }
+        str_copy(catalog_buf + len, ",\"label\":\"",
+                 sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), label);
+
+        str_copy(catalog_buf + len, ",\"icon\":\"",
+                 sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
+        len = append_json_string(catalog_buf, len, sizeof(catalog_buf), icon);
+
+        if (disabled) {
+            str_copy(catalog_buf + len, ",\"disabled\":true",
+                     sizeof(catalog_buf) - len);
+            len = str_len(catalog_buf);
+        }
+        str_copy(catalog_buf + len, "}]}", sizeof(catalog_buf) - len);
+        len = str_len(catalog_buf);
     }
+
+    if (len < sizeof(catalog_buf) - 2) catalog_buf[len++] = ']';
+    if (len < sizeof(catalog_buf) - 2) catalog_buf[len++] = '}';
+    catalog_buf[len] = '\0';
+    hal_msg_send(catalog_buf, len);
+}
+
+/* Emit a layout-attribute change for the catalog. Called by the
+ * view-list / view-grid action handlers. The host's generic ui.attr
+ * mechanism flips the cards group's `layout` attribute live. */
+static void send_layout(const char *mode) {
+    char buf[160] =
+        "{\"type\":\"ui.attr\",\"target\":\"catalog\","
+        "\"attr\":\"layout\",\"value\":\"";
+    str_cat(buf, mode, sizeof(buf));
+    str_cat(buf, "\"}", sizeof(buf));
+    hal_msg_send(buf, str_len(buf));
+}
+
+static void load_and_send_layout(void) {
+    char saved[16];
+    uint32_t n = hal_kv_get("view_mode", 9, saved, sizeof(saved) - 1);
+    if (n > 0 && n < sizeof(saved)) saved[n] = '\0';
+    else str_copy(saved, "list", sizeof(saved));
+    if (!str_eq(saved, "list") && !str_eq(saved, "grid")) {
+        str_copy(saved, "list", sizeof(saved));
+    }
+    send_layout(saved);
+}
+
+static void set_layout(const char *mode) {
+    if (!str_eq(mode, "list") && !str_eq(mode, "grid")) return;
+    hal_kv_set("view_mode", 9, mode, str_len(mode));
+    send_layout(mode);
 }
 
 /* ── Find catalog entry by name ──────────────────────────────────────── */
@@ -868,15 +943,12 @@ void module_init(void) {
     hal_log(1, "[install] init", 14);
     load_sources();
     send_sources_list();
-    /* Restore the catalog view mode (list/grid) saved last session. */
+    /* Emit the saved view mode so the host renders the catalog in
+     * the user's last-chosen layout. */
     load_and_send_layout();
 
-    send_output("Wapp Store v2.0", "info");
     if (source_count > 0) {
         begin_fetch_all();
-    } else {
-        send_output("No repositories configured.", "info");
-        send_output("Open Settings to add a URL or local path.", "info");
     }
 }
 
@@ -959,6 +1031,13 @@ void module_handle_event(void) {
                 }
                 if (str_eq(action, "view-grid")) {
                     set_layout("grid");
+                    return;
+                }
+                /* Generic action prefix: "install:<slug>" → run
+                 * the catalog's install for that wapp. The card's
+                 * action button emits this when tapped. */
+                if (str_starts(action, "install:")) {
+                    do_install(action + 8);
                     return;
                 }
                 if (str_eq(action, "set_sources")) {
