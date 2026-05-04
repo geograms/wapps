@@ -39,7 +39,7 @@ LDFLAGS := \
 
 OUTPUT := $(MODULE_NAME).wasm
 
-.PHONY: all clean
+.PHONY: all clean tests
 
 all: $(OUTPUT)
 
@@ -47,5 +47,49 @@ $(OUTPUT): $(MODULE_SRCS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 	@echo "Built $(OUTPUT) ($$(wc -c < $(OUTPUT)) bytes)"
 
+# ── Tests build ────────────────────────────────────────────────
+# Wapps may ship a runnable test suite alongside app.wasm. See
+# wapps/wapp-interfaces.md §20 for the spec.
+#
+# Layout:
+#   tests/test_*.c        — auto-discovered case files
+#   wapps/sdk/wapp_test.h — assertion macros (#include "wapp_test.h")
+#   wapps/sdk/wapp_test.c — runner; linked in by this target
+#
+# Test files typically `#include "../main.c"` to reach static helpers.
+# Only one test file may include main.c in the same link (the rest
+# rely on extern declarations or focus on already-public APIs).
+
+SDK_DIR      := $(dir $(lastword $(MAKEFILE_LIST)))
+TEST_RUNNER  := $(SDK_DIR)wapp_test.c
+TEST_SRCS    := $(wildcard tests/*.c)
+TEST_OUTPUT  := tests.wasm
+
+TEST_CFLAGS  := \
+	--target=wasm32-wasi \
+	-O2 -flto \
+	-I$(HAL_DIR) -I$(SDK_DIR) \
+	-Wall -Wextra \
+	-fno-exceptions \
+	-DNDEBUG -DWAPP_TESTING
+
+TEST_LDFLAGS := \
+	--target=wasm32-wasi \
+	-flto \
+	-Wl,--no-entry \
+	-Wl,--export=module_run_tests \
+	-Wl,--strip-all \
+	-nostartfiles
+
+tests: $(TEST_OUTPUT)
+
+$(TEST_OUTPUT): $(TEST_SRCS) $(TEST_RUNNER)
+	@if [ -z "$(TEST_SRCS)" ]; then \
+		echo "[$(MODULE_NAME)] no tests/*.c found — skipping" >&2; \
+		exit 1; \
+	fi
+	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ $^
+	@echo "Built $(TEST_OUTPUT) ($$(wc -c < $(TEST_OUTPUT)) bytes)"
+
 clean:
-	rm -f $(OUTPUT)
+	rm -f $(OUTPUT) $(TEST_OUTPUT)

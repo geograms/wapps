@@ -136,6 +136,14 @@ Reserved message types the engine **must** handle:
 | host → wapp | `action` | GeoUI action button fired |
 | host → wapp | `wapp.index` | Reply to `wapp.fetch_index` |
 | host → wapp | `wapp.installed` | Confirmation for `wapp.install` |
+| wapp → host | `profile.read` / `write` / `list` / `exists` / `size` / `mkdir` / `remove` | Permission-gated access to a profile-scoped path — see §15.1 |
+| host → wapp | `profile.<op>.response` | Response to a `profile.<op>` request — see §15.1 |
+| wapp → host | `identity.get` | Read the active profile's callsign + npub — see §15.1 |
+| host → wapp | `identity.get.response` | Reply to `identity.get` — see §15.1 |
+| wapp → host | `sign.schnorr` | BIP-340 Schnorr signature over a 32-byte digest — see §15.1 |
+| host → wapp | `sign.schnorr.response` | Reply with the 64-byte signature — see §15.1 |
+| wapp → host | `tests.run` | Run the test suite of a wapp — see §20 |
+| host → wapp | `tests.case` / `tests.complete` | Test runner progress and summary — see §20 |
 
 Anything else is wapp-specific and routed unchanged.
 
@@ -1027,7 +1035,9 @@ Every `.wapp` must contain a top-level `manifest.json`:
   "icon":            "media/icons/<name>.svg",
   "entry_ui":        "screens/home.ui.json",
   "tick_interval_ms": 5000,
-  "permissions":     ["network", "storage"],
+  "permissions":     ["network", "storage",
+                      "collection.<id>.read", "collection.<id>.write",
+                      "identity.read", "sign", "tests.invoke"],
   "provides": {
     "functionalities": [
       "text.greet",
@@ -1050,6 +1060,11 @@ The engine must:
   pre-subscribe the wapp to
 - Carry `permissions` through to the user-facing install dialog
   (Stage 3)
+- Accept the scoped permission tokens defined in §15.1
+  (`collection.<id>.read`, `collection.<id>.write`, `identity.read`,
+  `sign`) and `tests.invoke` (§20). Unrecognised tokens are kept
+  verbatim — newer engines may add new tokens without breaking
+  older catalogs.
 
 ### 16.1 Display fields: title vs description vs summary
 
@@ -1077,6 +1092,7 @@ when packaging old wapps.
 my-wapp.wapp (zip)
 ├── manifest.json
 ├── app.wasm                   ← compiled WASM module
+├── tests.wasm                 ← optional, runnable test suite (see §20)
 ├── signature.json             ← optional NIP-78 NostrEvent
 ├── permissions.json           ← optional NDF access control
 ├── social.sqlite3             ← optional reactions+comments DB
@@ -1087,6 +1103,8 @@ my-wapp.wapp (zip)
 ├── lang/
 │   ├── en.json
 │   └── <locale>.json
+├── tests/                     ← optional, source for tests.wasm (folder mode)
+│   └── test_*.c
 └── store/
     ├── description.json       ← multi-lingual store metadata
     └── screenshots/           ← bundled images
@@ -1406,3 +1424,199 @@ A minimum-viable engine implementation must:
 
 A full engine additionally provides the functionality broker, the
 cross-wapp event bus, signing/verification, and the social store.
+
+---
+
+## 20. Unit tests
+
+A wapp may ship a runnable test suite alongside the production
+build. The goal is a tight authoring loop: edit code, hit
+**Run tests** in the App Creator wapp, see green or red within
+seconds — without leaving the host.
+
+Tests are **opt-in**. A wapp without a `tests/` folder or a
+shipped `tests.wasm` is fully valid; the engine simply reports
+"no tests" when asked to run them.
+
+### 20.1 Source layout
+
+Tests live in a top-level `tests/` directory next to `main.c`:
+
+```
+my-wapp/
+├── main.c
+├── manifest.json
+├── tests/
+│   ├── test_parse.c
+│   └── test_render.c
+└── ...
+```
+
+Each `test_*.c` file declares one or more cases using the SDK
+header `wapps/sdk/wapp_test.h`:
+
+```c
+#include "wapp_test.h"
+#include "../main.c"   // pull in the units under test
+
+WAPP_TEST(parse_thread_minimal) {
+    Thread t;
+    int ok = parse_thread("# THREAD: Hi\nbody\n", 19, &t);
+    WAPP_EXPECT_INT_EQ(ok, 1);
+    WAPP_EXPECT_STR_EQ(t.title, "Hi");
+}
+
+WAPP_TEST(sanitise_title_trims) {
+    char out[64];
+    sanitise_title("  Hello, world!  ", out, sizeof(out));
+    WAPP_EXPECT_STR_EQ(out, "hello-world");
+}
+```
+
+Macros provided by `wapp_test.h`:
+
+| Macro | Behaviour |
+|-------|-----------|
+| `WAPP_TEST(name) { ... }` | Register a case under the file's suite name |
+| `WAPP_EXPECT_TRUE(expr)` | Pass when `expr` is non-zero |
+| `WAPP_EXPECT_FALSE(expr)` | Pass when `expr` is zero |
+| `WAPP_EXPECT_INT_EQ(a, b)` | Both ints equal |
+| `WAPP_EXPECT_STR_EQ(a, b)` | Two `char*` strings equal byte-for-byte |
+| `WAPP_EXPECT_MEM_EQ(a, b, n)` | First `n` bytes equal |
+| `WAPP_FAIL(msg)` | Force-fail the case with `msg` |
+
+A failing expectation captures `__FILE__` / `__LINE__` and a short
+human message, attaches it to the case, and returns from the test
+body — siblings continue to run.
+
+### 20.2 Build
+
+The SDK Makefile (`wapps/sdk/Makefile.common`) gains a `tests`
+target. From any wapp folder:
+
+```sh
+make           # builds app.wasm (production)
+make tests     # builds tests.wasm (production sources + tests/* + runner)
+```
+
+The test build links:
+1. `MODULE_SRCS` (the same source files as production)
+2. `tests/test_*.c` (auto-discovered by the makefile)
+3. `wapps/sdk/wapp_test.c` (the runner)
+
+…into a single `tests.wasm` that exports `module_run_tests` (in
+addition to the usual lifecycle exports). Production `app.wasm`
+never links the runner.
+
+### 20.3 Distribution
+
+The packager (`wapps/build-archive.sh`) includes `tests.wasm` and
+the `tests/` source folder in the `.wapp` archive **only when they
+exist** in the source folder. There is no requirement for
+`tests.wasm` to be present in a published wapp — production
+distributions can omit it to save bytes; debug/dev builds keep it
+so consumers can verify functionality after install.
+
+Both folder mode and ZIP mode follow the same rule: the engine
+looks for `tests.wasm` next to `app.wasm` in the runtime archive
+(`<baseDir>/wapps/<wappId>/tests.wasm`) and reports "no tests"
+when absent.
+
+### 20.4 Invocation protocol
+
+Any wapp can ask the engine to run another wapp's tests by
+sending a `tests.run` outbox message:
+
+```json
+{ "type":  "tests.run",
+  "req_id": 17,
+  "target": "tools.geogram.forum"   // optional; defaults to the sender
+}
+```
+
+When `target` is omitted (or equals the sender's own ID), the
+request is a **self-test** and is always allowed. When `target`
+points at a different wapp, the requester must declare the
+`tests.invoke` permission in its manifest — otherwise the engine
+replies with `tests.complete` carrying `status: -1`.
+
+The engine then:
+1. Resolves the target wapp's archive folder.
+2. Loads `tests.wasm` from that folder. If missing, replies
+   `tests.complete` with `status: -2` (no tests).
+3. Wires the same HAL surface as `app.wasm` (KV, msg, log, file —
+   the test runner needs `hal_msg_send` to emit results).
+4. Calls `module_run_tests`. The runner walks the registered
+   cases, emits one `tests.case` per case as it finishes, and a
+   single `tests.complete` summary at the end.
+5. Forwards every `tests.case` and `tests.complete` from the test
+   module back to the original requester's inbox, preserving the
+   `req_id`.
+6. Disposes the test module after `tests.complete` fires.
+
+Streaming results lets the App Creator render a live progress
+list rather than waiting for the whole suite to finish.
+
+### 20.5 Result message shapes
+
+`tests.case` — one per case as it completes:
+
+```json
+{ "type":     "tests.case",
+  "req_id":   17,
+  "suite":    "test_parse",
+  "name":     "parse_thread_minimal",
+  "passed":   true,
+  "duration_ms": 0,
+  "error":    null
+}
+```
+
+On failure `passed` is `false` and `error` is a short string
+formatted as `<file>:<line>: <message>` (e.g.
+`tests/test_parse.c:42: expected 'Hi' got 'Hello'`).
+
+`tests.complete` — single message after the last case:
+
+```json
+{ "type":   "tests.complete",
+  "req_id": 17,
+  "status": 0,
+  "passed": 4,
+  "failed": 1,
+  "duration_ms": 12,
+  "error":  null
+}
+```
+
+`status` codes mirror the §15.1 convention: `0` ran successfully
+(may still have failed cases — see `failed`); `-1` permission
+denied; `-2` no tests in target; `-3` other failure (load error,
+runner crashed). When `status != 0`, `error` carries a human
+message and `passed` / `failed` are both 0.
+
+### 20.6 Permissions
+
+| Token          | Required for                                |
+|----------------|---------------------------------------------|
+| (none)         | Self-test (`target` omitted or = sender)    |
+| `tests.invoke` | Running tests on a different wapp           |
+
+The App Creator wapp declares `tests.invoke` so it can run tests
+on the wapp the user is editing.
+
+### 20.7 Engine notes
+
+- `tests.wasm` runs in its own isolated WASM instance — separate
+  module state from the live `app.wasm` of the same wapp. This
+  prevents tests from corrupting production KV.
+- The test instance receives a **scratch KV namespace** (e.g.
+  `<wappId>::tests`) so production KV stays untouched. The wapp's
+  own files (`hal_file_*`) remain isolated to a temp dir for the
+  test run.
+- Test runs have a hard timeout (default 10 s). On timeout the
+  engine kills the test instance and emits `tests.complete` with
+  `status: -3` and `error: "timeout"`.
+- The runner emits messages synchronously inside `module_run_tests`;
+  the engine drains the outbox after the call returns and forwards
+  each message in order.

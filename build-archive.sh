@@ -71,19 +71,35 @@ build_wapp() {
 
     [ -f "$dir/app.wasm" ] || { echo "[$name] no app.wasm after build"; return 1; }
 
+    # Build tests.wasm if a tests/ folder is present. Test failures
+    # don't break the package — they leave tests.wasm out so the
+    # consumer just gets "no tests" when running them. See
+    # wapp-interfaces.md §20.
+    if [ -d "$dir/tests" ]; then
+        echo "[$name] compiling tests..."
+        if ! make -C "$dir" --no-print-directory tests 2>&1; then
+            echo "[$name] tests FAILED — packaging without tests.wasm"
+            rm -f "$dir/tests.wasm"
+        fi
+    fi
+
     mkdir -p "$OUTPUT_DIR/$name"
     wapp_file="$OUTPUT_DIR/$name/$name-$version.wapp"
     echo "[$name] packaging $name-$version.wapp..."
     rm -f "$wapp_file"
 
-    # ZIP from inside the wapp dir so paths are at the root
+    # ZIP from inside the wapp dir so paths are at the root.
+    # tests.wasm and tests/ source go in only when present.
     (
         cd "$dir"
         zip -q -r "$wapp_file" \
             app.wasm \
             manifest.json \
             $([ -d screens ] && echo screens) \
-            $([ -d media ] && echo media)
+            $([ -d media ] && echo media) \
+            $([ -d lang ] && echo lang) \
+            $([ -f tests.wasm ] && echo tests.wasm) \
+            $([ -d tests ] && echo tests)
     )
 
     size=$(wc -c < "$wapp_file" | tr -d ' ')

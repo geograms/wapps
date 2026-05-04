@@ -41,6 +41,13 @@
         "tip": "@action.install_tip"
       },
       {
+        "$": "action",
+        "name": "run-tests",
+        "label": "@action.run_tests",
+        "style": "secondary",
+        "tip": "@action.run_tests_tip"
+      },
+      {
         "$": "field",
         "name": "output",
         "$type": "log",

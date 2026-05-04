@@ -143,6 +143,73 @@ void module_handle_event(void) {
         if (n == 0) break;
         inbox[n] = '\0';
 
+        /* Test runner responses arrive as host → wapp messages keyed
+         * on "type", not "command". Detect them first and emit log
+         * lines into the output field; fall through to command
+         * dispatch for everything else. */
+        if (find_substr(inbox, n, "\"type\":\"tests.case\"") >= 0) {
+            const int suite_len = extract_json_string_field(
+                inbox, n, "suite", field_buf, sizeof(field_buf));
+            char suite_copy[80];
+            int sc = suite_len;
+            if (sc > 79) sc = 79;
+            for (int i = 0; i < sc; i++) suite_copy[i] = field_buf[i];
+            suite_copy[sc < 0 ? 0 : sc] = '\0';
+
+            const int name_len = extract_json_string_field(
+                inbox, n, "name", field_buf, sizeof(field_buf));
+            const int passed_idx = find_substr(inbox, n, "\"passed\":true");
+            const int has_pass = passed_idx >= 0 ? 1 : 0;
+
+            unsigned op = 0;
+            append_cstr(out_buf, sizeof(out_buf), &op,
+                        "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                        "\"text\":\"[tests] ");
+            append_cstr(out_buf, sizeof(out_buf), &op,
+                        has_pass ? "PASS  " : "FAIL  ");
+            if (sc > 0) {
+                append_range(out_buf, sizeof(out_buf), &op, suite_copy,
+                             (unsigned)sc);
+                append_cstr(out_buf, sizeof(out_buf), &op, ".");
+            }
+            if (name_len > 0) {
+                append_range(out_buf, sizeof(out_buf), &op, field_buf,
+                             (unsigned)name_len);
+            }
+            if (!has_pass) {
+                /* Append the error message. */
+                const int err_len = extract_json_string_field(
+                    inbox, n, "error", field_buf, sizeof(field_buf));
+                if (err_len > 0) {
+                    append_cstr(out_buf, sizeof(out_buf), &op, "\\n         ");
+                    append_range(out_buf, sizeof(out_buf), &op, field_buf,
+                                 (unsigned)err_len);
+                }
+            }
+            append_cstr(out_buf, sizeof(out_buf), &op, "\\n\"}");
+            hal_msg_send(out_buf, op);
+            continue;
+        }
+        if (find_substr(inbox, n, "\"type\":\"tests.complete\"") >= 0) {
+            /* Summary line. The error field on tests.complete is non-null
+             * only when the runner couldn't start (no tests.wasm,
+             * permission denied, etc.). */
+            const int err_len = extract_json_string_field(
+                inbox, n, "error", field_buf, sizeof(field_buf));
+            unsigned op = 0;
+            append_cstr(out_buf, sizeof(out_buf), &op,
+                        "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                        "\"text\":\"[tests] complete");
+            if (err_len > 0) {
+                append_cstr(out_buf, sizeof(out_buf), &op, " — ");
+                append_range(out_buf, sizeof(out_buf), &op, field_buf,
+                             (unsigned)err_len);
+            }
+            append_cstr(out_buf, sizeof(out_buf), &op, "\\n\"}");
+            hal_msg_send(out_buf, op);
+            continue;
+        }
+
         const int cmd_idx = find_substr(inbox, n, "\"command\"");
         if (cmd_idx < 0) continue;
 
@@ -161,7 +228,42 @@ void module_handle_event(void) {
         const char *cmd = inbox + qstart;
         const unsigned clen = (unsigned)(qend - qstart);
 
-        if (clen == 7 && str_eq_n(cmd, "compile", 7)) {
+        if (clen == 9 && str_eq_n(cmd, "run-tests", 9)) {
+            /* Forward {"type":"tests.run","req_id":1,"target":"<wapp_id>"}
+             * to the host. The host loads tests.wasm from the target's
+             * archive, runs module_run_tests, and streams tests.case +
+             * tests.complete messages back into our inbox.
+             *
+             * req_id is a short fixed value; we only run one suite at a
+             * time and the host echoes whatever we send. */
+            const int id_len = extract_json_string_field(
+                inbox, n, "wapp_id", field_buf, sizeof(field_buf));
+            if (id_len < 0) {
+                hal_msg_send(
+                    "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                    "\"text\":\"[tests] no wapp_id set — fill the "
+                    "Settings tab first.\\n\"}", 110);
+                continue;
+            }
+            unsigned op = 0;
+            append_cstr(out_buf, sizeof(out_buf), &op,
+                        "{\"type\":\"tests.run\",\"req_id\":1,"
+                        "\"target\":\"");
+            append_range(out_buf, sizeof(out_buf), &op, field_buf,
+                         (unsigned)id_len);
+            append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
+            hal_msg_send(out_buf, op);
+
+            /* Header line into the log field. */
+            unsigned hop = 0;
+            append_cstr(out_buf, sizeof(out_buf), &hop,
+                        "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                        "\"text\":\"[tests] running tests in ");
+            append_range(out_buf, sizeof(out_buf), &hop, field_buf,
+                         (unsigned)id_len);
+            append_cstr(out_buf, sizeof(out_buf), &hop, "...\\n\"}");
+            hal_msg_send(out_buf, hop);
+        } else if (clen == 7 && str_eq_n(cmd, "compile", 7)) {
             /* Extract source from fields. */
             const int src_len = extract_json_string_field(
                 inbox, n, "source", source_buf, sizeof(source_buf));
