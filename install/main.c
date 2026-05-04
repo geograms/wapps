@@ -795,6 +795,15 @@ static void do_install(const char *name) {
         return;
     }
 
+    /* Resolve GitHub tree URLs to raw.githubusercontent.com so the
+     * host's plain http.get retrieves the .wapp ZIP, not the HTML
+     * tree view. Tree URLs (the default config form) 404 or serve
+     * HTML when concatenated with the file path; raw URLs serve the
+     * actual bytes. Non-github / already-raw URLs and local paths
+     * pass through unchanged. */
+    char src[256];
+    github_tree_to_raw(e->source_raw, src, sizeof(src));
+
     /* Build install message for the renderer. The source is whatever
      * repository THIS entry came from, not a global — that way a
      * multi-repo catalog can still install each wapp from its own
@@ -802,7 +811,7 @@ static void do_install(const char *name) {
      *   {"type":"wapp.install","source":"<source>","file":"<file>",
      *    "name":"<name>","version":"<version>"} */
     char msg[1024] = "{\"type\":\"wapp.install\",\"source\":\"";
-    str_cat(msg, e->source_raw, sizeof(msg));
+    str_cat(msg, src, sizeof(msg));
     str_cat(msg, "\",\"file\":\"", sizeof(msg));
     str_cat(msg, e->file, sizeof(msg));
     str_cat(msg, "\",\"name\":\"", sizeof(msg));
