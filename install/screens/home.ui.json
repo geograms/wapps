@@ -8,10 +8,16 @@
         "$": "group",
         "$type": "header-actions",
         "children": [
-          { "$": "action", "name": "view-list", "icon": "view_list",
-            "label": "List view" },
-          { "$": "action", "name": "view-grid", "icon": "grid_view",
-            "label": "Grid view" }
+          {
+            "$": "group",
+            "$type": "menu",
+            "icon": "apps",
+            "tip": "View",
+            "children": [
+              { "$": "action", "name": "view-list", "label": "List view" },
+              { "$": "action", "name": "view-grid", "label": "Grid view" }
+            ]
+          }
         ]
       },
       {
