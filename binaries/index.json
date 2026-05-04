@@ -1,7 +1,7 @@
 [
   {"file":"app-creator/app-creator-0.1.1.wapp","id":"tools.geogram.app-creator","version":"0.1.1","size":4362,"title":"App Creator","description":"Write, compile and install C wapps without leaving geogram."},
   {"file":"functionalities/functionalities-1.0.1.wapp","id":"tools.geogram.functionalities","version":"1.0.1","size":8633,"title":"Functionalities","description":"Browse registered functionalities and pick default providers."},
-  {"file":"install/install-1.1.0.wapp","id":"tools.geogram.install","version":"1.1.0","size":14923,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
+  {"file":"install/install-1.1.1.wapp","id":"tools.geogram.install","version":"1.1.1","size":16201,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
   {"file":"maps/maps-1.0.1.wapp","id":"tools.geogram.maps","version":"1.0.1","size":7711,"title":"Maps","description":"Satellite maps with offline tile cache."},
   {"file":"movies/movies-0.1.2.wapp","id":"tools.geogram.movies","version":"0.1.2","size":4645,"title":"Movies","description":"Local video player with optional subtitle support."},
   {"file":"tasks/tasks-1.0.1.wapp","id":"tools.geogram.tasks","version":"1.0.1","size":3071,"title":"Task Monitor","description":"Live view of background tasks; pause, resume, stop."},

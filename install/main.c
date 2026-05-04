@@ -396,6 +396,8 @@ static void parse_index(const char *json, unsigned json_len) {
 /* Forward declarations */
 static void show_catalog(void);
 static void advance_fetch_queue(void);
+static void push_status_card(const char *id, const char *title,
+                             const char *subtitle);
 
 /* ── Fetch index ─────────────────────────────────────────────────────── */
 
@@ -473,9 +475,15 @@ static void start_current_fetch(void) {
             if (rewritten[slen - 1] != '/') str_cat(url, "/", sizeof(url));
             str_cat(url, "index.json", sizeof(url));
         }
+        hal_log(1, "[install] http GET", 18);
+        hal_log(1, url, str_len(url));
         pending_req = hal_http_request(0, url, str_len(url), "", 0);
         if (pending_req < 0) {
             send_output("  failed to start HTTP request", "err");
+            hal_log(2, "[install] http_request returned <0", 34);
+            push_status_card("__http_err",
+                             "Could not start HTTP request",
+                             fetch_current_host);
             advance_fetch_queue();
         }
     } else {
@@ -504,14 +512,61 @@ static void advance_fetch_queue(void) {
 static void begin_fetch_all(void) {
     if (source_count == 0) {
         send_output("No repositories configured. Add at least one URL or path in Settings.", "err");
+        push_status_card("__no_sources",
+                         "No repositories configured",
+                         "Add a source in Settings to populate the catalog.");
         return;
     }
     catalog_count = 0;
     fetching_idx = 0;
+    /* Show an immediate placeholder so the user knows we're working —
+     * the empty-state placeholder is misleading while a fetch is in
+     * flight. show_catalog() replaces this card when the queue
+     * finishes. */
+    push_status_card("__loading",
+                     "Loading catalog…",
+                     "Fetching available wapps");
+    hal_log(1, "[install] begin fetch", 21);
     start_current_fetch();
 }
 
 /* ── Display ─────────────────────────────────────────────────────────── */
+
+/* Emit a single-card ui.data payload as a visible status placeholder.
+ * The user sees this in the catalog area while fetching, instead of
+ * the bare "No wapps found yet" empty-state which is misleading
+ * during normal startup. */
+static void push_status_card(const char *id,
+                             const char *title,
+                             const char *subtitle) {
+    char buf[640];
+    str_copy(buf,
+             "{\"type\":\"ui.data\",\"target\":\"catalog\",\"items\":[{",
+             sizeof(buf));
+    unsigned len = str_len(buf);
+    str_copy(buf + len, "\"id\":\"", sizeof(buf) - len);
+    len = str_len(buf);
+    for (unsigned i = 0; id[i] && len < sizeof(buf) - 8; i++) buf[len++] = id[i];
+    str_copy(buf + len, "\",\"title\":\"", sizeof(buf) - len);
+    len = str_len(buf);
+    for (unsigned i = 0; title[i] && len < sizeof(buf) - 8; i++) {
+        char c = title[i];
+        if (c == '"' || c == '\\') buf[len++] = '\\';
+        buf[len++] = c;
+    }
+    if (subtitle && subtitle[0]) {
+        str_copy(buf + len, "\",\"subtitle\":\"", sizeof(buf) - len);
+        len = str_len(buf);
+        for (unsigned i = 0; subtitle[i] && len < sizeof(buf) - 8; i++) {
+            char c = subtitle[i];
+            if (c == '"' || c == '\\') buf[len++] = '\\';
+            buf[len++] = c;
+        }
+    }
+    str_copy(buf + len, "\"}]}", sizeof(buf) - len);
+    len = str_len(buf);
+    hal_msg_send(buf, len);
+}
 
 /* Append a JSON-escaped string literal to buf. The caller already wrote
  * the opening quote; this writes the body and the closing quote. */
@@ -677,6 +732,16 @@ static void show_catalog(void) {
     if (len < sizeof(catalog_buf) - 2) catalog_buf[len++] = ']';
     if (len < sizeof(catalog_buf) - 2) catalog_buf[len++] = '}';
     catalog_buf[len] = '\0';
+    char dbg[80] = "[install] show_catalog ";
+    char nb[16];
+    u64_to_str((uint64_t)catalog_count, nb, sizeof(nb));
+    str_cat(dbg, nb, sizeof(dbg));
+    str_cat(dbg, " entries, ", sizeof(dbg));
+    char lb[16];
+    u64_to_str((uint64_t)len, lb, sizeof(lb));
+    str_cat(dbg, lb, sizeof(dbg));
+    str_cat(dbg, " bytes", sizeof(dbg));
+    hal_log(1, dbg, str_len(dbg));
     hal_msg_send(catalog_buf, len);
 }
 
@@ -962,6 +1027,10 @@ void module_tick(void) {
             char msg[96] = "HTTP request failed for ";
             str_cat(msg, fetch_current_host, sizeof(msg));
             send_output(msg, "err");
+            hal_log(2, "[install] http poll <0", 22);
+            push_status_card("__http_err",
+                             "HTTP request failed",
+                             fetch_current_host);
             hal_http_free(pending_req);
             pending_req = -1;
             advance_fetch_queue();
@@ -977,6 +1046,8 @@ void module_tick(void) {
             str_cat(msg, " from ", sizeof(msg));
             str_cat(msg, fetch_current_host, sizeof(msg));
             send_output(msg, "err");
+            hal_log(2, msg, str_len(msg));
+            push_status_card("__http_err", msg, fetch_current_host);
             hal_http_free(pending_req);
             pending_req = -1;
             advance_fetch_queue();
@@ -990,11 +1061,23 @@ void module_tick(void) {
 
         if (n <= 0) {
             send_output("  empty response", "err");
+            hal_log(2, "[install] http empty body", 25);
+            push_status_card("__http_err",
+                             "Empty response from source",
+                             fetch_current_host);
             advance_fetch_queue();
             return;
         }
         index_buf[n] = '\0';
+        int prev = catalog_count;
         parse_index(index_buf, (unsigned)n);
+        char done[96] = "[install] parsed ";
+        char nbuf[16];
+        u64_to_str((uint64_t)(catalog_count - prev), nbuf, sizeof(nbuf));
+        str_cat(done, nbuf, sizeof(done));
+        str_cat(done, " entries from ", sizeof(done));
+        str_cat(done, fetch_current_host, sizeof(done));
+        hal_log(1, done, str_len(done));
         advance_fetch_queue();
     }
 }

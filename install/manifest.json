@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.install",
-  "version":         "1.1.0",
+  "version":         "1.1.1",
   "kind":            "app",
   "title":           "Wapp Store",
   "description":     "Browse, install and update wapps from any catalog.",
