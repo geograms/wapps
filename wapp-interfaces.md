@@ -131,6 +131,7 @@ Reserved message types the engine **must** handle:
 | wapp → host | `notify` | Show a notification (level, title, body, scope) |
 | wapp → host | `ui.append` | Append a structured line to a host-rendered output group |
 | wapp → host | `ui.log.append` | Append text to a `$type="log"` field |
+| wapp → host | `ui.snackbar` | Show a transient floating toast (level: info/success/warn/error) |
 | wapp → host | `widget.request` | Call a functionality on another wapp |
 | wapp → host | `widget.response` | Reply to a `widget.request` |
 | wapp → host | `wapp.fetch_index` | Ask the host to fetch a remote wapp index |

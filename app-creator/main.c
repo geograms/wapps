@@ -399,6 +399,19 @@ static void emit_log(const char *text, unsigned tlen) {
     append_cstr(buf, sizeof(buf), &op, "\\n\"}");
     hal_msg_send(buf, op);
 }
+
+/* Show a transient toast via the generic ui.snackbar primitive. level
+ * is one of "info" / "success" / "warn" / "error". */
+static void emit_snackbar(const char *text, const char *level) {
+    static char buf[2048];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op, "{\"type\":\"ui.snackbar\",\"text\":\"");
+    escape_into(buf, sizeof(buf), &op, text, str_len(text));
+    append_cstr(buf, sizeof(buf), &op, "\",\"level\":\"");
+    append_cstr(buf, sizeof(buf), &op, level);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
 static void emit_log_cstr(const char *text) {
     emit_log(text, str_len(text));
 }
@@ -744,8 +757,10 @@ static void poll_active_task(void) {
     if (kind == TASK_COMPILE) {
         if (state == 1 && code == 0) {
             emit_log_cstr("compile: OK");
+            emit_snackbar("Compile succeeded", "success");
         } else {
             emit_log_cstr("compile: FAILED");
+            emit_snackbar("Compile failed — see log", "error");
         }
     } else if (kind == TASK_INSTALL_ZIP) {
         if (state == 1 && code == 0) {
@@ -753,6 +768,7 @@ static void poll_active_task(void) {
             send_local_wapp_install();
         } else {
             emit_log_cstr("install: zip FAILED");
+            emit_snackbar("Install failed — see log", "error");
         }
     }
 }
@@ -1008,6 +1024,7 @@ void module_handle_event(void) {
                 append_range(buf, sizeof(buf), &bp, ver, (unsigned)vn);
             }
             emit_log(buf, bp);
+            emit_snackbar("Install succeeded", "success");
             send_list_installed();
             continue;
         }
