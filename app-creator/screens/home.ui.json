@@ -58,6 +58,8 @@
                 "$type": "code",
                 "label": "Editor",
                 "language": "c",
+                "font_size": 18,
+                "line_height": 1.5,
                 "tip": "Edits are kept in memory across file switches. Hit Install to persist."
               },
               {
@@ -79,6 +81,8 @@
                 "name": "output",
                 "$type": "log",
                 "label": "Compiler output",
+                "font_size": 15,
+                "line_height": 1.5,
                 "tip": "Compiler stdout / stderr plus host-side progress messages."
               }
             ]
@@ -98,6 +102,8 @@
         "$type": "code",
         "label": "lang/en.json",
         "language": "json",
+        "font_size": 18,
+        "line_height": 1.5,
         "tip": "Flat JSON object: { \"key\": \"translation\" }."
       }
     ]
@@ -173,6 +179,8 @@
         "name": "output",
         "$type": "log",
         "label": "Test output",
+        "font_size": 15,
+        "line_height": 1.5,
         "tip": "Streams tests.case + tests.complete from the runner."
       }
     ]
