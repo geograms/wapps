@@ -25,8 +25,74 @@
   },
   {
     "$": "screen",
-    "name": "Editor",
-    "tip": "Edit the selected wapp. Compile → builds via the bundled wasi-sdk. Install → replaces the on-disk archive. Run tests → executes tests.wasm against the installed copy.",
+    "name": "Files",
+    "tip": "Source files for the current wapp. Pick one in the file list to edit it.",
+    "children": [
+      {
+        "$": "group",
+        "name": "files",
+        "$type": "cards",
+        "layout": "list",
+        "empty": "No files."
+      },
+      {
+        "$": "field",
+        "name": "active_file_label",
+        "$type": "string",
+        "label": "Editing",
+        "default": "main.c",
+        "tip": "Which file the editor below is showing."
+      },
+      {
+        "$": "field",
+        "name": "source",
+        "$type": "code",
+        "label": "Editor",
+        "language": "c",
+        "tip": "Edits are kept in memory across file switches. Hit Install to persist."
+      },
+      {
+        "$": "action",
+        "name": "compile",
+        "label": "Compile",
+        "style": "primary",
+        "tip": "Run the bundled wasm-clang against the C source."
+      },
+      {
+        "$": "action",
+        "name": "install",
+        "label": "Install",
+        "style": "secondary",
+        "tip": "Write the compiled wapp to the launcher."
+      },
+      {
+        "$": "field",
+        "name": "output",
+        "$type": "log",
+        "label": "Compiler output",
+        "tip": "Compiler stdout / stderr plus host-side progress messages."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Translations",
+    "tip": "Edit lang/en.json directly. Keys referenced as @key from the UI are translated at runtime.",
+    "children": [
+      {
+        "$": "field",
+        "name": "source_lang",
+        "$type": "code",
+        "label": "lang/en.json",
+        "language": "json",
+        "tip": "Flat JSON object: { \"key\": \"translation\" }."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Settings",
+    "tip": "Manifest fields written to manifest.json on Install.",
     "children": [
       {
         "$": "group",
@@ -74,61 +140,27 @@
             "tip": "Long-form summary, written to manifest.summary."
           }
         ]
-      },
-      {
-        "$": "field",
-        "name": "source",
-        "$type": "code",
-        "label": "source.c",
-        "language": "c",
-        "tip": "Plain C against wapps/hal/geogram_wasm_hal.h. No libc.",
-        "default": "#include \"geogram_wasm_hal.h\"\n\nvoid module_init(void) {}\nvoid module_tick(void) {}\nvoid module_handle_event(void) {}\nvoid module_destroy(void) {}\nuint32_t module_tick_interval_ms(void) { return 0; }\n"
-      },
-      {
-        "$": "field",
-        "name": "source_ui",
-        "$type": "code",
-        "label": "screens/home.ui.json",
-        "language": "json",
-        "tip": "GeoUI JSON tree. See wapps/wapp-interfaces.md.",
-        "default": "[\n  {\n    \"$\": \"screen\",\n    \"name\": \"Home\",\n    \"children\": []\n  }\n]\n"
-      },
-      {
-        "$": "field",
-        "name": "source_lang",
-        "$type": "code",
-        "label": "lang/en.json",
-        "language": "json",
-        "tip": "Flat JSON object: { \"key\": \"translation\" }.",
-        "default": "{\n}\n"
-      },
-      {
-        "$": "action",
-        "name": "compile",
-        "label": "Compile",
-        "style": "primary",
-        "tip": "Run the bundled wasm-clang."
-      },
-      {
-        "$": "action",
-        "name": "install",
-        "label": "Install",
-        "style": "secondary",
-        "tip": "Write the compiled wapp to the launcher."
-      },
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Tests",
+    "tip": "Run the wapp's bundled test suite.",
+    "children": [
       {
         "$": "action",
         "name": "run-tests",
         "label": "Run tests",
-        "style": "secondary",
+        "style": "primary",
         "tip": "Run tests.wasm against the installed copy."
       },
       {
         "$": "field",
         "name": "output",
         "$type": "log",
-        "label": "Compiler output",
-        "tip": "Compiler stdout/stderr plus host-side progress messages."
+        "label": "Test output",
+        "tip": "Streams tests.case + tests.complete from the runner."
       }
     ]
   }

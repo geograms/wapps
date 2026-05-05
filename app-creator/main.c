@@ -275,10 +275,35 @@ static void render_projects(void) {
 
 /* ── Action dispatch ──────────────────────────────────────────────── */
 
-/* Forward declarations — defined further down in the lifecycle
- * section but called from on_select / on_new_project. */
+/* Forward declarations — defined further down. */
 static void select_screen(const char *name);
 static void send_read_source(const char *slug, unsigned slen);
+static void render_files_tree(void);
+static void load_active_file_into_editor(void);
+
+/* Files tab state. Two source files are listed and switchable: main.c
+ * and screens/home.ui.json. Each has a shadow KV slot so edits
+ * survive switching between files. en.json lives on the Translations
+ * tab and stays bound to its own source_lang field. */
+static const char *FILE_MAIN = "main.c";
+static const char *FILE_UI   = "screens/home.ui.json";
+static const char *KV_BUF_MAIN = "_buf_main";
+static const char *KV_BUF_UI   = "_buf_ui";
+
+/* Save whatever is currently in the source field into the shadow
+ * KV slot owned by the active file. Called before flipping which
+ * file the editor shows so the user's in-progress edits survive. */
+static void persist_editor_to_active_buffer(void) {
+    static char active[64];
+    uint32_t an = hal_kv_get("active_file", 11, active, sizeof(active) - 1);
+    active[an] = '\0';
+    static char src[24 * 1024];
+    uint32_t sn = hal_kv_get("source", 6, src, sizeof(src) - 1);
+    src[sn] = '\0';
+    const char *slot = (an > 0 && str_eq_n(active, FILE_UI, an))
+                       ? KV_BUF_UI : KV_BUF_MAIN;
+    hal_kv_set(slot, str_len(slot), src, sn);
+}
 
 static void on_select(const char *slug, unsigned slen) {
     const int idx = find_wapp_by_slug(slug, slen);
@@ -287,17 +312,14 @@ static void on_select(const char *slug, unsigned slen) {
     send_set_field("wapp_name",        wapps_slug[idx]);
     send_set_field("wapp_id",          wapps_id[idx]);
     send_set_field("wapp_version",     wapps_version[idx]);
-    /* Prefer summary (longer) over description for the Description
-     * field; fall back to description when summary is empty. */
     send_set_field("wapp_description",
                    wapps_summary[idx][0] ? wapps_summary[idx]
                                          : wapps_desc[idx]);
-    /* Pull the on-disk source files asynchronously — the response
-     * arrives as wapps.read_source.response and triggers another
-     * round of ui.set_field for source / source_ui / source_lang. */
+    /* Pull the on-disk source files. The response arrives as
+     * wapps.read_source.response → fills the shadow buffers and
+     * the editor for the active file. */
     send_read_source(wapps_slug[idx], str_len(wapps_slug[idx]));
-    /* Switch to the Editor screen. */
-    select_screen("Editor");
+    select_screen("Files");
 }
 
 static void on_new_project(void) {
@@ -306,10 +328,29 @@ static void on_new_project(void) {
     send_set_field("wapp_id",          "");
     send_set_field("wapp_version",     "0.1.0");
     send_set_field("wapp_description", "");
-    send_set_field("source",           "");
-    send_set_field("source_ui",        "");
     send_set_field("source_lang",      "");
-    select_screen("Editor");
+    /* Clear shadow buffers + the editor; default active = main.c. */
+    hal_kv_set(KV_BUF_MAIN, str_len(KV_BUF_MAIN), "", 0);
+    hal_kv_set(KV_BUF_UI,   str_len(KV_BUF_UI),   "", 0);
+    hal_kv_set("active_file", 11, FILE_MAIN, str_len(FILE_MAIN));
+    send_set_field("source", "");
+    send_set_field("active_file_label", FILE_MAIN);
+    render_files_tree();
+    select_screen("Files");
+}
+
+/* Switch which file the editor shows. Persists the current editor
+ * content first, then loads the new file's shadow buffer. */
+static void on_pick_file(const char *path, unsigned plen) {
+    persist_editor_to_active_buffer();
+    hal_kv_set("active_file", 11, path, plen);
+    static char label[80];
+    unsigned ln = plen < sizeof(label) - 1 ? plen : sizeof(label) - 1;
+    for (unsigned i = 0; i < ln; i++) label[i] = path[i];
+    label[ln] = '\0';
+    send_set_field("active_file_label", label);
+    load_active_file_into_editor();
+    render_files_tree();
 }
 
 /* Read the form state from KV (the host's binding layer mirrors form
@@ -318,7 +359,12 @@ static void on_new_project(void) {
 static void do_compile(void) {
     static char source_buf[24 * 1024];
     static char out_buf[32 * 1024];
-    uint32_t n = hal_kv_get("source", 6, source_buf, sizeof(source_buf) - 1);
+    /* Always sync the editor's content into the active buffer first
+     * so we compile what the user just typed, regardless of which
+     * file they have visible. */
+    persist_editor_to_active_buffer();
+    uint32_t n = hal_kv_get(KV_BUF_MAIN, str_len(KV_BUF_MAIN),
+                            source_buf, sizeof(source_buf) - 1);
     if (n == 0) {
         const char *err = "{\"type\":\"compile\",\"error\":\"no source\"}";
         hal_msg_send(err, str_len(err));
@@ -374,7 +420,11 @@ static void do_install(void) {
     static char buf[1024];
     static char out_buf[32 * 1024];
 
-    uint32_t id_n    = kv_read("wapp_id",          buf, sizeof(buf));
+    /* Sync the editor content into its file's shadow before
+     * gathering install fields, so unsaved edits go in too. */
+    persist_editor_to_active_buffer();
+
+    uint32_t id_n = kv_read("wapp_id", buf, sizeof(buf));
     if (id_n == 0) {
         const char *e = "{\"type\":\"install\",\"error\":\"no wapp_id\"}";
         hal_msg_send(e, str_len(e));
@@ -398,7 +448,7 @@ static void do_install(void) {
     escape_into(out_buf, sizeof(out_buf), &op, buf, n);
 
     append_cstr(out_buf, sizeof(out_buf), &op, "\",\"source_ui\":\"");
-    n = hal_kv_get("source_ui", 9, src, sizeof(src) - 1);
+    n = hal_kv_get(KV_BUF_UI, str_len(KV_BUF_UI), src, sizeof(src) - 1);
     src[n] = '\0';
     escape_into(out_buf, sizeof(out_buf), &op, src, n);
 
@@ -443,6 +493,62 @@ static void select_screen(const char *name) {
     append_cstr(buf, sizeof(buf), &op, name);
     append_cstr(buf, sizeof(buf), &op, "\"}");
     hal_msg_send(buf, op);
+}
+
+/* Files cards: one card per source file. The active file gets a
+ * highlighted icon. Tapping a card emits action "file:<path>" which
+ * the wapp dispatches to switch the editor's content. */
+static void render_files_tree(void) {
+    static char active[64];
+    uint32_t an = hal_kv_get("active_file", 11, active, sizeof(active) - 1);
+    active[an] = '\0';
+    if (an == 0) {
+        const char *def = FILE_MAIN;
+        for (unsigned i = 0; def[i]; i++) active[i] = def[i];
+        active[str_len(def)] = '\0';
+        an = str_len(def);
+    }
+
+    static char buf[2048];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+        "{\"type\":\"ui.data\",\"target\":\"files\",\"items\":[");
+    const char *paths[] = { FILE_MAIN, FILE_UI };
+    const char *labels[] = { "main.c", "screens/home.ui.json" };
+    for (int i = 0; i < 2; i++) {
+        if (i) append_cstr(buf, sizeof(buf), &op, ",");
+        const int is_active = (str_len(paths[i]) == an &&
+                               str_eq_n(paths[i], active, an));
+        append_cstr(buf, sizeof(buf), &op, "{\"id\":\"");
+        append_cstr(buf, sizeof(buf), &op, paths[i]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
+        append_cstr(buf, sizeof(buf), &op, labels[i]);
+        append_cstr(buf, sizeof(buf), &op,
+                    is_active ? "\",\"subtitle\":\"editing\","
+                              : "\",\"subtitle\":\"\",");
+        append_cstr(buf, sizeof(buf), &op,
+                    "\"actions\":[{\"name\":\"file:");
+        append_cstr(buf, sizeof(buf), &op, paths[i]);
+        append_cstr(buf, sizeof(buf), &op,
+                    "\",\"label\":\"Open\",\"icon\":\"edit\"}]}");
+    }
+    append_cstr(buf, sizeof(buf), &op, "]}");
+    hal_msg_send(buf, op);
+}
+
+/* Read active_file from KV → load the matching shadow buffer into
+ * the source field via ui.set_field. */
+static void load_active_file_into_editor(void) {
+    static char active[64];
+    uint32_t an = hal_kv_get("active_file", 11, active, sizeof(active) - 1);
+    active[an] = '\0';
+    const char *slot = (an > 0 && str_eq_n(active, FILE_UI, an))
+                       ? KV_BUF_UI : KV_BUF_MAIN;
+    static char content[24 * 1024];
+    uint32_t cn = hal_kv_get(slot, str_len(slot), content,
+                             sizeof(content) - 1);
+    content[cn] = '\0';
+    send_set_field("source", content);
 }
 
 static void send_read_source(const char *slug, unsigned slen) {
@@ -500,23 +606,36 @@ void module_handle_event(void) {
             continue;
         }
 
-        /* Source-files response → push into the editor fields. The
-         * extracted bytes are still JSON-escaped, so we splice them
-         * straight back into ui.set_field whose value field is a
-         * JSON string. */
+        /* Source-files response → save raw file content into shadow
+         * KV slots, push the active file into the editor, and push
+         * en.json into the Translations tab field. The extracted
+         * bytes are still JSON-escaped — when the host's jsonDecode
+         * sees them inside another JSON message it un-escapes back
+         * to the original UTF-8. */
         if (find_substr(inbox, n,
                 "\"type\":\"wapps.read_source.response\"") >= 0) {
             static char big_buf[24 * 1024];
             int sl;
             sl = extract_json_string_field(inbox, n, "source",
                                            big_buf, sizeof(big_buf));
-            if (sl >= 0) send_set_field("source", big_buf);
+            if (sl >= 0) {
+                hal_kv_set(KV_BUF_MAIN, str_len(KV_BUF_MAIN),
+                           big_buf, (uint32_t)sl);
+            }
             sl = extract_json_string_field(inbox, n, "source_ui",
                                            big_buf, sizeof(big_buf));
-            if (sl >= 0) send_set_field("source_ui", big_buf);
+            if (sl >= 0) {
+                hal_kv_set(KV_BUF_UI, str_len(KV_BUF_UI),
+                           big_buf, (uint32_t)sl);
+            }
             sl = extract_json_string_field(inbox, n, "source_lang",
                                            big_buf, sizeof(big_buf));
             if (sl >= 0) send_set_field("source_lang", big_buf);
+            /* Default the editor to main.c. */
+            hal_kv_set("active_file", 11, FILE_MAIN, str_len(FILE_MAIN));
+            send_set_field("active_file_label", FILE_MAIN);
+            load_active_file_into_editor();
+            render_files_tree();
             continue;
         }
 
@@ -596,6 +715,13 @@ void module_handle_event(void) {
          * from the cached wapp metadata. */
         if (al > 7 && str_eq_n(a, "select:", 7)) {
             on_select(a + 7, al - 7);
+            continue;
+        }
+
+        /* "file:<path>" — switch the editor to a different source
+         * file. Path is one of FILE_MAIN, FILE_UI. */
+        if (al > 5 && str_eq_n(a, "file:", 5)) {
+            on_pick_file(a + 5, al - 5);
             continue;
         }
 
