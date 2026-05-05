@@ -90,11 +90,16 @@ build_wapp() {
 
     # ZIP from inside the wapp dir so paths are at the root.
     # tests.wasm and tests/ source go in only when present.
+    # main.c is bundled too — it lets the App Creator load existing
+    # wapps for editing (read_source primitive) and keeps install
+    # archives self-describing.
     (
         cd "$dir"
         zip -q -r "$wapp_file" \
             app.wasm \
             manifest.json \
+            $([ -f main.c ] && echo main.c) \
+            $([ -f Makefile ] && echo Makefile) \
             $([ -d screens ] && echo screens) \
             $([ -d media ] && echo media) \
             $([ -d lang ] && echo lang) \

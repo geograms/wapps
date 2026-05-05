@@ -223,7 +223,8 @@ static void send_list_installed(void) {
  * already JSON-escaped (as it is when extracted from an inbox payload
  * via extract_json_string_field). */
 static void send_set_field(const char *name, const char *value) {
-    static char buf[2048];
+    /* Sized for source.c payloads; metadata fields fit easily. */
+    static char buf[32 * 1024];
     unsigned op = 0;
     append_cstr(buf, sizeof(buf), &op,
                 "{\"type\":\"ui.set_field\",\"name\":\"");
@@ -274,6 +275,11 @@ static void render_projects(void) {
 
 /* ── Action dispatch ──────────────────────────────────────────────── */
 
+/* Forward declarations — defined further down in the lifecycle
+ * section but called from on_select / on_new_project. */
+static void select_screen(const char *name);
+static void send_read_source(const char *slug, unsigned slen);
+
 static void on_select(const char *slug, unsigned slen) {
     const int idx = find_wapp_by_slug(slug, slen);
     if (idx < 0) return;
@@ -286,6 +292,12 @@ static void on_select(const char *slug, unsigned slen) {
     send_set_field("wapp_description",
                    wapps_summary[idx][0] ? wapps_summary[idx]
                                          : wapps_desc[idx]);
+    /* Pull the on-disk source files asynchronously — the response
+     * arrives as wapps.read_source.response and triggers another
+     * round of ui.set_field for source / source_ui / source_lang. */
+    send_read_source(wapps_slug[idx], str_len(wapps_slug[idx]));
+    /* Switch to the Editor screen. */
+    select_screen("Editor");
 }
 
 static void on_new_project(void) {
@@ -294,6 +306,10 @@ static void on_new_project(void) {
     send_set_field("wapp_id",          "");
     send_set_field("wapp_version",     "0.1.0");
     send_set_field("wapp_description", "");
+    send_set_field("source",           "");
+    send_set_field("source_ui",        "");
+    send_set_field("source_lang",      "");
+    select_screen("Editor");
 }
 
 /* Read the form state from KV (the host's binding layer mirrors form
@@ -419,8 +435,32 @@ static void do_run_tests(void) {
 
 /* ── Module lifecycle ─────────────────────────────────────────────── */
 
+static void select_screen(const char *name) {
+    static char buf[128];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.select_screen\",\"name\":\"");
+    append_cstr(buf, sizeof(buf), &op, name);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
+static void send_read_source(const char *slug, unsigned slen) {
+    static char buf[256];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"wapps.read_source\",\"req_id\":2,\"slug\":\"");
+    append_range(buf, sizeof(buf), &op, slug, slen);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
 void module_init(void) {
     hal_log(1, "[app-creator] init", 18);
+    /* Tell the host we want stack-style navigation (no tab bar).
+     * The host will render only the named screen and provide a
+     * back-arrow when on a non-entry screen. */
+    select_screen("Projects");
     send_list_installed();
 }
 
@@ -439,7 +479,11 @@ uint32_t module_tick_interval_ms(void) {
 }
 
 void module_handle_event(void) {
-    static char inbox[32 * 1024];
+    /* Inbox sized for wapps.read_source.response payloads — they
+     * carry source.c + screens/home.ui.json + lang/en.json from
+     * the selected project. Larger wapps (Forum, Wapp Store) push
+     * us past 32 KB. */
+    static char inbox[96 * 1024];
     static char field_buf[512];
     static char out_buf[32 * 1024];
 
@@ -453,6 +497,26 @@ void module_handle_event(void) {
                 "\"type\":\"wapps.list_installed.response\"") >= 0) {
             parse_list_response(inbox, n);
             render_projects();
+            continue;
+        }
+
+        /* Source-files response → push into the editor fields. The
+         * extracted bytes are still JSON-escaped, so we splice them
+         * straight back into ui.set_field whose value field is a
+         * JSON string. */
+        if (find_substr(inbox, n,
+                "\"type\":\"wapps.read_source.response\"") >= 0) {
+            static char big_buf[24 * 1024];
+            int sl;
+            sl = extract_json_string_field(inbox, n, "source",
+                                           big_buf, sizeof(big_buf));
+            if (sl >= 0) send_set_field("source", big_buf);
+            sl = extract_json_string_field(inbox, n, "source_ui",
+                                           big_buf, sizeof(big_buf));
+            if (sl >= 0) send_set_field("source_ui", big_buf);
+            sl = extract_json_string_field(inbox, n, "source_lang",
+                                           big_buf, sizeof(big_buf));
+            if (sl >= 0) send_set_field("source_lang", big_buf);
             continue;
         }
 

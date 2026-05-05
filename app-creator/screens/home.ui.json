@@ -2,7 +2,7 @@
   {
     "$": "screen",
     "name": "Projects",
-    "tip": "Pick an installed wapp to edit its metadata, or hit + to start a fresh draft. Selection populates the Code, UI, Translations and Settings tabs.",
+    "tip": "Pick an installed wapp to edit it, or hit + to start a fresh draft.",
     "children": [
       {
         "$": "group",
@@ -25,89 +25,13 @@
   },
   {
     "$": "screen",
-    "name": "Code",
-    "tip": "Edit the wapp's main.c. Compile builds it via the bundled wasi-sdk; Install replaces the on-disk archive with the result; Run tests executes tests.wasm against the installed copy.",
-    "children": [
-      {
-        "$": "field",
-        "name": "source",
-        "$type": "code",
-        "label": "source.c",
-        "language": "c",
-        "tip": "Plain C against wapps/hal/geogram_wasm_hal.h. No libc.",
-        "default": "#include \"geogram_wasm_hal.h\"\n\nstatic unsigned str_len(const char *s) {\n    unsigned n = 0;\n    while (s[n]) n++;\n    return n;\n}\n\nvoid module_init(void) {\n    const char *msg = \"[my-first] init\";\n    hal_log(1, msg, str_len(msg));\n}\n\nvoid module_tick(void) {}\nvoid module_handle_event(void) {}\nvoid module_destroy(void) {}\n\nuint32_t module_tick_interval_ms(void) { return 5000; }\n"
-      },
-      {
-        "$": "action",
-        "name": "compile",
-        "label": "Compile",
-        "style": "primary",
-        "tip": "Run the bundled wasm-clang."
-      },
-      {
-        "$": "action",
-        "name": "install",
-        "label": "Install",
-        "style": "secondary",
-        "tip": "Write the compiled wapp to the launcher."
-      },
-      {
-        "$": "action",
-        "name": "run-tests",
-        "label": "Run tests",
-        "style": "secondary",
-        "tip": "Run tests.wasm against the installed copy."
-      },
-      {
-        "$": "field",
-        "name": "output",
-        "$type": "log",
-        "label": "Compiler output",
-        "tip": "Compiler stdout/stderr plus host-side progress messages."
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "UI",
-    "tip": "Edit the wapp's screens/home.ui.json directly. JSON is the canonical format; the visual editor lands later.",
-    "children": [
-      {
-        "$": "field",
-        "name": "source_ui",
-        "$type": "code",
-        "label": "screens/home.ui.json",
-        "language": "json",
-        "tip": "GeoUI JSON tree. See wapps/wapp-interfaces.md §14.",
-        "default": "[\n  {\n    \"$\": \"screen\",\n    \"name\": \"Home\",\n    \"children\": []\n  }\n]\n"
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "Translations",
-    "tip": "Edit lang/en.json directly. Keys referenced as @key from the UI get translated at runtime.",
-    "children": [
-      {
-        "$": "field",
-        "name": "source_lang",
-        "$type": "code",
-        "label": "lang/en.json",
-        "language": "json",
-        "tip": "Flat JSON object: { \"key\": \"translation\" }.",
-        "default": "{\n}\n"
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "Settings",
-    "tip": "Manifest fields written to manifest.json on Install. Title is the launcher label; Name is the folder slug.",
+    "name": "Editor",
+    "tip": "Edit the selected wapp. Compile → builds via the bundled wasi-sdk. Install → replaces the on-disk archive. Run tests → executes tests.wasm against the installed copy.",
     "children": [
       {
         "$": "group",
         "name": "identity",
-        "tip": "These values end up in the generated manifest.json when you click Install.",
+        "label": "Identity",
         "children": [
           {
             "$": "field",
@@ -150,6 +74,61 @@
             "tip": "Long-form summary, written to manifest.summary."
           }
         ]
+      },
+      {
+        "$": "field",
+        "name": "source",
+        "$type": "code",
+        "label": "source.c",
+        "language": "c",
+        "tip": "Plain C against wapps/hal/geogram_wasm_hal.h. No libc.",
+        "default": "#include \"geogram_wasm_hal.h\"\n\nvoid module_init(void) {}\nvoid module_tick(void) {}\nvoid module_handle_event(void) {}\nvoid module_destroy(void) {}\nuint32_t module_tick_interval_ms(void) { return 0; }\n"
+      },
+      {
+        "$": "field",
+        "name": "source_ui",
+        "$type": "code",
+        "label": "screens/home.ui.json",
+        "language": "json",
+        "tip": "GeoUI JSON tree. See wapps/wapp-interfaces.md.",
+        "default": "[\n  {\n    \"$\": \"screen\",\n    \"name\": \"Home\",\n    \"children\": []\n  }\n]\n"
+      },
+      {
+        "$": "field",
+        "name": "source_lang",
+        "$type": "code",
+        "label": "lang/en.json",
+        "language": "json",
+        "tip": "Flat JSON object: { \"key\": \"translation\" }.",
+        "default": "{\n}\n"
+      },
+      {
+        "$": "action",
+        "name": "compile",
+        "label": "Compile",
+        "style": "primary",
+        "tip": "Run the bundled wasm-clang."
+      },
+      {
+        "$": "action",
+        "name": "install",
+        "label": "Install",
+        "style": "secondary",
+        "tip": "Write the compiled wapp to the launcher."
+      },
+      {
+        "$": "action",
+        "name": "run-tests",
+        "label": "Run tests",
+        "style": "secondary",
+        "tip": "Run tests.wasm against the installed copy."
+      },
+      {
+        "$": "field",
+        "name": "output",
+        "$type": "log",
+        "label": "Compiler output",
+        "tip": "Compiler stdout/stderr plus host-side progress messages."
       }
     ]
   }
