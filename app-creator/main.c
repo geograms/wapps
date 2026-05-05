@@ -236,8 +236,10 @@ static void send_list_installed(void) {
  * already JSON-escaped (as it is when extracted from an inbox payload
  * via extract_json_string_field). */
 static void send_set_field(const char *name, const char *value) {
-    /* Sized for source.c payloads; metadata fields fit easily. */
-    static char buf[32 * 1024];
+    /* Sized for source.c payloads; metadata fields fit easily.
+     * Forum's main.c is ~46 KB; install's is ~40 KB; widen to 128 KB
+     * so any wapp's source rounds-trips through the editor. */
+    static char buf[128 * 1024];
     unsigned op = 0;
     append_cstr(buf, sizeof(buf), &op,
                 "{\"type\":\"ui.set_field\",\"name\":\"");
@@ -313,7 +315,7 @@ static void persist_editor_to_active_buffer(void) {
     static char active[64];
     uint32_t an = hal_kv_get("active_file", 11, active, sizeof(active) - 1);
     active[an] = '\0';
-    static char src[24 * 1024];
+    static char src[96 * 1024];
     uint32_t sn = hal_kv_get("source", 6, src, sizeof(src) - 1);
     src[sn] = '\0';
     const char *slot = (an > 0 && str_eq_n(active, FILE_UI, an))
@@ -477,7 +479,7 @@ static void do_compile(void) {
         emit_log_cstr("compile: another task is still running");
         return;
     }
-    static char source_buf[24 * 1024];
+    static char source_buf[96 * 1024];
     static char slug_buf[80];
     persist_editor_to_active_buffer();
     uint32_t n = hal_kv_get(KV_BUF_MAIN, str_len(KV_BUF_MAIN),
@@ -637,7 +639,7 @@ static void do_install(void) {
     if (!stage_file(slug, slug_n, "manifest.json", manifest, mp)) return;
 
     /* screens/home.ui.json — read from KV shadow buffer. */
-    static char ui[24 * 1024];
+    static char ui[96 * 1024];
     uint32_t ui_n = hal_kv_get(KV_BUF_UI, str_len(KV_BUF_UI),
                                ui, sizeof(ui) - 1);
     if (ui_n == 0) {
@@ -648,7 +650,7 @@ static void do_install(void) {
     if (!stage_file(slug, slug_n, "screens/home.ui.json", ui, ui_n)) return;
 
     /* lang/en.json — read from the source_lang field. */
-    static char lang[24 * 1024];
+    static char lang[96 * 1024];
     uint32_t lang_n = kv_read("source_lang", lang, sizeof(lang));
     if (lang_n == 0) {
         const char *def = "{\n}\n";
@@ -843,7 +845,7 @@ static void load_active_file_into_editor(void) {
     active[an] = '\0';
     const char *slot = (an > 0 && str_eq_n(active, FILE_UI, an))
                        ? KV_BUF_UI : KV_BUF_MAIN;
-    static char content[24 * 1024];
+    static char content[96 * 1024];
     uint32_t cn = hal_kv_get(slot, str_len(slot), content,
                              sizeof(content) - 1);
     content[cn] = '\0';
@@ -917,7 +919,7 @@ void module_handle_event(void) {
          * to the original UTF-8. */
         if (find_substr(inbox, n,
                 "\"type\":\"wapps.read_source.response\"") >= 0) {
-            static char big_buf[24 * 1024];
+            static char big_buf[96 * 1024];
             int sl;
             sl = extract_json_string_field(inbox, n, "source",
                                            big_buf, sizeof(big_buf));
