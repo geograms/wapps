@@ -30,6 +30,14 @@
     "children": [
       {
         "$": "group",
+        "$type": "header-actions",
+        "children": [
+          { "$": "action", "name": "editor-settings", "icon": "settings",
+            "label": "Editor settings" }
+        ]
+      },
+      {
+        "$": "group",
         "$type": "split",
         "ratio": 0.28,
         "children": [
@@ -157,6 +165,33 @@
             "label": "Description",
             "default": "",
             "tip": "Long-form summary, written to manifest.summary."
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "editor_prefs",
+        "label": "Editor",
+        "children": [
+          {
+            "$": "field",
+            "name": "pref_editor_font_size",
+            "$type": "int",
+            "label": "Editor font size",
+            "default": 18,
+            "min": 10,
+            "max": 36,
+            "tip": "Font size for the code editor. Takes effect immediately."
+          },
+          {
+            "$": "field",
+            "name": "pref_log_font_size",
+            "$type": "int",
+            "label": "Log font size",
+            "default": 15,
+            "min": 10,
+            "max": 28,
+            "tip": "Font size for compiler / test output. Takes effect immediately."
           }
         ]
       }

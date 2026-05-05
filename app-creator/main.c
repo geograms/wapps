@@ -880,11 +880,21 @@ static void send_read_source(const char *slug, unsigned slen) {
 
 void module_init(void) {
     hal_log(1, "[app-creator] init", 18);
-    /* Tell the host we want stack-style navigation (no tab bar).
-     * The host will render only the named screen and provide a
-     * back-arrow when on a non-entry screen. */
     select_screen("Projects");
     send_list_installed();
+
+    /* Restore font-size prefs from KV. Seed defaults if not yet saved. */
+    char pref_buf[16];
+    uint32_t pn;
+    pn = hal_kv_get("pref_editor_font_size", 20,
+                    pref_buf, sizeof(pref_buf) - 1);
+    pref_buf[pn < sizeof(pref_buf) ? pn : sizeof(pref_buf) - 1] = '\0';
+    send_set_field("pref_editor_font_size", pn > 0 ? pref_buf : "18");
+
+    pn = hal_kv_get("pref_log_font_size", 18,
+                    pref_buf, sizeof(pref_buf) - 1);
+    pref_buf[pn < sizeof(pref_buf) ? pn : sizeof(pref_buf) - 1] = '\0';
+    send_set_field("pref_log_font_size", pn > 0 ? pref_buf : "15");
 }
 
 void module_tick(void) {
@@ -1088,6 +1098,10 @@ void module_handle_event(void) {
         }
         if (al == 9 && str_eq_n(a, "run-tests", 9)) {
             do_run_tests();
+            continue;
+        }
+        if (al == 15 && str_eq_n(a, "editor-settings", 15)) {
+            select_screen("Settings");
             continue;
         }
     }
