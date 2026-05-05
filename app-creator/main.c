@@ -4,21 +4,34 @@
  * Projects tab lists every installed wapp by asking the host for the
  * shared archive contents (wapps.list_installed). Picking a card
  * populates the metadata form via ui.set_field; New project clears
- * those same fields. Compile / Install / Run tests forward the form
- * state to the host using the existing compile/install/tests.run
- * outbox messages.
+ * those same fields.
+ *
+ * Compile and Install run entirely inside the wapp using only generic
+ * HAL primitives:
+ *   - hal_file_open / hal_file_write — stage source files to a build
+ *     directory under /tmp/geogram-wapp-build/<slug>/.
+ *   - hal_process_exec — spawn /bin/sh to resolve WASI_SDK_PATH and
+ *     run clang against the staged main.c, then later spawn zip to
+ *     pack the build dir into a .wapp ZIP.
+ *   - {"type":"wapp.install"} message — the same generic install
+ *     primitive the Wapp Store uses, pointed at the local ZIP.
+ *
+ * Run tests forwards a tests.run outbox message and surfaces the
+ * tests.case + tests.complete echoes back into the output log.
  *
  * Wire protocol — wapp → host:
  *   {"type":"wapps.list_installed","req_id":1}
  *   {"type":"ui.set_field","name":"<field>","value":"<v>"}
  *   {"type":"ui.data","target":"projects","items":[...]}
- *   {"type":"compile","source":"<escaped>"}
- *   {"type":"install","id":"...","name":"...",...}
+ *   {"type":"ui.log.append","name":"output","text":"..."}
+ *   {"type":"wapp.install","source":"<dir>","file":"<slug>.wapp",
+ *    "name":"<slug>","version":"<v>"}
  *   {"type":"tests.run","req_id":1,"target":"<wapp_id>"}
  *
  * Wire protocol — host → wapp:
  *   {"type":"wapps.list_installed.response","items":[...]}
  *   {"type":"action","action":"<name>"}
+ *   {"type":"wapp.installed","name":"...","version":"..."}
  *   {"type":"tests.case","suite":"...","name":"...","passed":true,...}
  *   {"type":"tests.complete","error":null}
  *
@@ -280,6 +293,9 @@ static void select_screen(const char *name);
 static void send_read_source(const char *slug, unsigned slen);
 static void render_files_tree(void);
 static void load_active_file_into_editor(void);
+static uint32_t kv_read(const char *key, char *out, uint32_t omax);
+static void escape_into(char *dst, unsigned dmax, unsigned *op,
+                        const char *src, uint32_t slen);
 
 /* Files tab state. Two source files are listed and switchable: main.c
  * and screens/home.ui.json. Each has a shadow KV slot so edits
@@ -354,41 +370,179 @@ static void on_pick_file(const char *path, unsigned plen) {
 }
 
 /* Read the form state from KV (the host's binding layer mirrors form
- * fields into the wapp's KV automatically) and emit the host-side
- * compile / install / tests.run messages. */
+ * fields into the wapp's KV automatically) and orchestrate the
+ * compile / install pipeline locally via hal_file_* and
+ * hal_process_exec. */
+
+#define BUILD_ROOT "/tmp/geogram-wapp-build"
+
+/* Active host-process state for compile / install. The wapp polls
+ * these in module_tick once a task is in flight. */
+enum { TASK_NONE = 0, TASK_COMPILE = 1, TASK_INSTALL_ZIP = 2 };
+static int  active_kind   = TASK_NONE;
+static int32_t active_handle = -1;
+static char active_slug[80] = "";
+static char active_version[32] = "";
+
+/* Append a single line of text to the wapp's output log via the
+ * generic ui.log.append primitive. text is plain (not JSON-escaped);
+ * we escape on the way out. */
+static void emit_log(const char *text, unsigned tlen) {
+    static char buf[8 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                "\"text\":\"");
+    escape_into(buf, sizeof(buf), &op, text, tlen);
+    append_cstr(buf, sizeof(buf), &op, "\\n\"}");
+    hal_msg_send(buf, op);
+}
+static void emit_log_cstr(const char *text) {
+    emit_log(text, str_len(text));
+}
+
+/* Append raw bytes from a process pipe straight into the log. The
+ * pipe output already contains its own newlines, so we don't add one;
+ * we still JSON-escape so embedded quotes / backslashes round-trip. */
+static void emit_log_raw(const char *bytes, unsigned blen) {
+    if (blen == 0) return;
+    static char buf[16 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.log.append\",\"name\":\"output\","
+                "\"text\":\"");
+    escape_into(buf, sizeof(buf), &op, bytes, blen);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
+/* Build directory path: BUILD_ROOT "/" slug "/" tail. tail may be empty
+ * for just the dir itself. Returns bytes written (excluding NUL). */
+static unsigned build_path(char *out, unsigned omax,
+                           const char *slug, unsigned slen,
+                           const char *tail) {
+    unsigned op = 0;
+    append_cstr(out, omax, &op, BUILD_ROOT "/");
+    append_range(out, omax, &op, slug, slen);
+    if (tail && tail[0]) {
+        append_cstr(out, omax, &op, "/");
+        append_cstr(out, omax, &op, tail);
+    }
+    if (op < omax) out[op] = '\0';
+    return op;
+}
+
+/* Stage one file under BUILD_ROOT/<slug>/<rel> with the given byte
+ * content. Returns 1 on success, 0 on failure (logs the error). */
+static int stage_file(const char *slug, unsigned slen,
+                      const char *rel,
+                      const char *content, uint32_t clen) {
+    char path[320];
+    build_path(path, sizeof(path), slug, slen, rel);
+    int32_t h = hal_file_open(path, str_len(path), 1 /* write */);
+    if (h < 0) {
+        char msg[400] = "compile: cannot open ";
+        unsigned mp = str_len(msg);
+        append_cstr(msg, sizeof(msg), &mp, path);
+        append_cstr(msg, sizeof(msg), &mp, " for write");
+        emit_log(msg, mp);
+        return 0;
+    }
+    if (clen > 0) {
+        hal_file_write(h, content, clen);
+    }
+    hal_file_close(h);
+    return 1;
+}
+
+/* Spawn /bin/sh -c <script>, return the handle or -1. The script
+ * argument is JSON-escaped on the way into argv_json. */
+static int32_t spawn_shell(const char *script) {
+    static char argv_json[16 * 1024];
+    unsigned op = 0;
+    append_cstr(argv_json, sizeof(argv_json), &op,
+                "[\"/bin/sh\",\"-c\",\"");
+    escape_into(argv_json, sizeof(argv_json), &op,
+                script, str_len(script));
+    append_cstr(argv_json, sizeof(argv_json), &op, "\"]");
+    return hal_process_exec(argv_json, op, "", 0);
+}
+
+/* Persist the editor + read source/slug, then stage main.c and kick
+ * off clang via /bin/sh so the shell can resolve $WASI_SDK_PATH and
+ * locate wapps/hal/. State machine in module_tick streams output and
+ * picks up the exit code. */
 static void do_compile(void) {
+    if (active_kind != TASK_NONE) {
+        emit_log_cstr("compile: another task is still running");
+        return;
+    }
     static char source_buf[24 * 1024];
-    static char out_buf[32 * 1024];
-    /* Always sync the editor's content into the active buffer first
-     * so we compile what the user just typed, regardless of which
-     * file they have visible. */
+    static char slug_buf[80];
     persist_editor_to_active_buffer();
     uint32_t n = hal_kv_get(KV_BUF_MAIN, str_len(KV_BUF_MAIN),
                             source_buf, sizeof(source_buf) - 1);
     if (n == 0) {
-        const char *err = "{\"type\":\"compile\",\"error\":\"no source\"}";
-        hal_msg_send(err, str_len(err));
+        emit_log_cstr("compile: source is empty");
         return;
     }
     source_buf[n] = '\0';
-    /* hal_kv_get returns the raw user-typed text (unescaped). The
-     * host's compile handler expects the source field to be a JSON
-     * string value, so we escape on the way out. */
-    unsigned op = 0;
-    append_cstr(out_buf, sizeof(out_buf), &op,
-                "{\"type\":\"compile\",\"source\":\"");
-    for (uint32_t i = 0; i < n && op + 8 < sizeof(out_buf); i++) {
-        unsigned char c = (unsigned char)source_buf[i];
-        if (c == '"' || c == '\\') {
-            out_buf[op++] = '\\'; out_buf[op++] = (char)c;
-        } else if (c == '\n') { out_buf[op++] = '\\'; out_buf[op++] = 'n'; }
-        else if (c == '\r') { out_buf[op++] = '\\'; out_buf[op++] = 'r'; }
-        else if (c == '\t') { out_buf[op++] = '\\'; out_buf[op++] = 't'; }
-        else if (c < 0x20) { /* drop */ }
-        else { out_buf[op++] = (char)c; }
+    uint32_t sn = kv_read("wapp_name", slug_buf, sizeof(slug_buf));
+    if (sn == 0) {
+        emit_log_cstr("compile: set the folder slug (Settings → Name) first");
+        return;
     }
-    append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
-    hal_msg_send(out_buf, op);
+    if (!stage_file(slug_buf, sn, "main.c", source_buf, n)) return;
+
+    /* Build the compile script. Resolves the SDK and HAL include
+     * directory, then execs clang. The wapp doesn't know $HOME or
+     * the user's geogram checkout location, so the shell does the
+     * lookup. */
+    static char build_dir[256];
+    build_path(build_dir, sizeof(build_dir), slug_buf, sn, "");
+
+    static char script[4096];
+    unsigned op = 0;
+    append_cstr(script, sizeof(script), &op,
+        "set -e; "
+        "SDK=\"${WASI_SDK_PATH:-$HOME/wasi-sdk}\"; "
+        "[ -x \"$SDK/bin/clang\" ] || { "
+        "  echo \"clang not found at $SDK/bin/clang\" >&2; exit 1; }; "
+        "HAL=\"\"; "
+        "for d in \"$HOME/code/geogram/wapps/hal\" "
+        "         \"/usr/local/share/geogram/wapps/hal\" "
+        "         \"/opt/geogram/wapps/hal\"; do "
+        "  [ -f \"$d/geogram_wasm_hal.h\" ] && HAL=\"$d\" && break; "
+        "done; "
+        "[ -n \"$HAL\" ] || { "
+        "  echo \"geogram_wasm_hal.h not found on any known path\" >&2; "
+        "  exit 1; }; "
+        "BUILD=\"");
+    append_cstr(script, sizeof(script), &op, build_dir);
+    append_cstr(script, sizeof(script), &op,
+        "\"; "
+        "echo \"clang $BUILD/main.c (HAL=$HAL)\"; "
+        "exec \"$SDK/bin/clang\" --target=wasm32-wasi -O2 -flto "
+        "-I \"$HAL\" -Wall -Wextra -Werror -fno-exceptions -DNDEBUG "
+        "-Wl,--no-entry "
+        "-Wl,--export=module_init -Wl,--export=module_tick "
+        "-Wl,--export=module_handle_event -Wl,--export=module_destroy "
+        "-Wl,--export=module_tick_interval_ms "
+        "-Wl,--strip-all -nostartfiles "
+        "-o \"$BUILD/app.wasm\" \"$BUILD/main.c\"");
+
+    int32_t h = spawn_shell(script);
+    if (h < 0) {
+        emit_log_cstr("compile: hal_process_exec returned -1");
+        return;
+    }
+    active_kind   = TASK_COMPILE;
+    active_handle = h;
+    /* Remember slug so module_tick's exit handler can log paths. */
+    unsigned cn = sn < sizeof(active_slug) - 1 ? sn : sizeof(active_slug) - 1;
+    for (unsigned i = 0; i < cn; i++) active_slug[i] = slug_buf[i];
+    active_slug[cn] = '\0';
+    emit_log_cstr("compile: starting...");
 }
 
 /* Read field at key into out, return bytes written (0 if missing).
@@ -415,45 +569,190 @@ static void escape_into(char *dst, unsigned dmax, unsigned *op,
     }
 }
 
+/* Stage all install artefacts under BUILD_ROOT/<slug>/, generate the
+ * manifest.json from the form fields, then spawn zip to pack the
+ * directory into BUILD_ROOT/<slug>.wapp. The state machine in
+ * module_tick takes over once zip is running and ultimately sends
+ * the generic wapp.install message at the end of this pipeline. */
 static void do_install(void) {
-    static char src[24 * 1024];
-    static char buf[1024];
-    static char out_buf[32 * 1024];
+    if (active_kind != TASK_NONE) {
+        emit_log_cstr("install: another task is still running");
+        return;
+    }
 
     /* Sync the editor content into its file's shadow before
      * gathering install fields, so unsaved edits go in too. */
     persist_editor_to_active_buffer();
 
-    uint32_t id_n = kv_read("wapp_id", buf, sizeof(buf));
-    if (id_n == 0) {
-        const char *e = "{\"type\":\"install\",\"error\":\"no wapp_id\"}";
-        hal_msg_send(e, str_len(e));
+    static char id[256], title[256], slug[80], desc[1024], version[64];
+    uint32_t id_n   = kv_read("wapp_id",          id,      sizeof(id));
+    uint32_t tit_n  = kv_read("wapp_title",       title,   sizeof(title));
+    uint32_t slug_n = kv_read("wapp_name",        slug,    sizeof(slug));
+    uint32_t desc_n = kv_read("wapp_description", desc,    sizeof(desc));
+    uint32_t ver_n  = kv_read("wapp_version",     version, sizeof(version));
+    if (id_n == 0)   { emit_log_cstr("install: missing id");      return; }
+    if (slug_n == 0) { emit_log_cstr("install: missing name");    return; }
+    if (ver_n == 0)  {
+        const char *def = "0.1.0";
+        for (unsigned i = 0; i < 5; i++) version[i] = def[i];
+        version[5] = '\0';
+        ver_n = 5;
+    }
+    if (tit_n == 0)  {
+        for (unsigned i = 0; i < slug_n; i++) title[i] = slug[i];
+        title[slug_n] = '\0';
+        tit_n = slug_n;
+    }
+
+    /* Verify app.wasm exists (compile must have run). */
+    static char wasm_path[320];
+    build_path(wasm_path, sizeof(wasm_path), slug, slug_n, "app.wasm");
+    int32_t wf = hal_file_open(wasm_path, str_len(wasm_path), 0);
+    if (wf < 0) {
+        emit_log_cstr("install: app.wasm missing — hit Compile first");
         return;
     }
+    hal_file_close(wf);
+
+    /* manifest.json — derived from the form fields. */
+    static char manifest[4096];
+    unsigned mp = 0;
+    append_cstr(manifest, sizeof(manifest), &mp, "{\n  \"id\": \"");
+    escape_into(manifest, sizeof(manifest), &mp, id, id_n);
+    append_cstr(manifest, sizeof(manifest), &mp, "\",\n  \"version\": \"");
+    escape_into(manifest, sizeof(manifest), &mp, version, ver_n);
+    append_cstr(manifest, sizeof(manifest), &mp, "\",\n  \"kind\": \"app\",\n  \"title\": \"");
+    escape_into(manifest, sizeof(manifest), &mp, title, tit_n);
+    append_cstr(manifest, sizeof(manifest), &mp, "\",\n  \"description\": \"");
+    escape_into(manifest, sizeof(manifest), &mp, desc, desc_n);
+    append_cstr(manifest, sizeof(manifest), &mp, "\",\n  \"summary\": \"");
+    escape_into(manifest, sizeof(manifest), &mp, desc, desc_n);
+    append_cstr(manifest, sizeof(manifest), &mp,
+        "\",\n  \"entry_ui\": \"screens/home.ui.json\",\n"
+        "  \"tick_interval_ms\": 0,\n  \"permissions\": [],\n"
+        "  \"provides\": {\"functions\":[],\"events\":[],"
+        "\"variables\":[],\"widgets\":[]},\n"
+        "  \"requires\": {\"hal\":[\"log\",\"kv\",\"msg\"],"
+        "\"events\":[],\"libraries\":[],\"variables\":[]}\n}\n");
+    if (!stage_file(slug, slug_n, "manifest.json", manifest, mp)) return;
+
+    /* screens/home.ui.json — read from KV shadow buffer. */
+    static char ui[24 * 1024];
+    uint32_t ui_n = hal_kv_get(KV_BUF_UI, str_len(KV_BUF_UI),
+                               ui, sizeof(ui) - 1);
+    if (ui_n == 0) {
+        const char *def = "[]\n";
+        for (unsigned i = 0; i < 3; i++) ui[i] = def[i];
+        ui_n = 3;
+    }
+    if (!stage_file(slug, slug_n, "screens/home.ui.json", ui, ui_n)) return;
+
+    /* lang/en.json — read from the source_lang field. */
+    static char lang[24 * 1024];
+    uint32_t lang_n = kv_read("source_lang", lang, sizeof(lang));
+    if (lang_n == 0) {
+        const char *def = "{\n}\n";
+        for (unsigned i = 0; i < 4; i++) lang[i] = def[i];
+        lang_n = 4;
+    }
+    if (!stage_file(slug, slug_n, "lang/en.json", lang, lang_n)) return;
+
+    /* Pack the build dir into <slug>.wapp via /usr/bin/zip wrapped in
+     * /bin/sh so we don't have to know zip's absolute path. */
+    static char build_dir[256];
+    build_path(build_dir, sizeof(build_dir), slug, slug_n, "");
+
+    static char script[1024];
     unsigned op = 0;
-    append_cstr(out_buf, sizeof(out_buf), &op,
-                "{\"type\":\"install\",\"id\":\"");
-    escape_into(out_buf, sizeof(out_buf), &op, buf, id_n);
+    append_cstr(script, sizeof(script), &op,
+                "set -e; cd \"");
+    append_cstr(script, sizeof(script), &op, build_dir);
+    append_cstr(script, sizeof(script), &op,
+                "\"; rm -f \"../");
+    append_range(script, sizeof(script), &op, slug, slug_n);
+    append_cstr(script, sizeof(script), &op,
+                ".wapp\"; zip -q -r \"../");
+    append_range(script, sizeof(script), &op, slug, slug_n);
+    append_cstr(script, sizeof(script), &op,
+                ".wapp\" .");
 
-    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"title\":\"");
-    uint32_t n = kv_read("wapp_title", buf, sizeof(buf));
-    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+    int32_t h = spawn_shell(script);
+    if (h < 0) {
+        emit_log_cstr("install: hal_process_exec returned -1");
+        return;
+    }
+    active_kind   = TASK_INSTALL_ZIP;
+    active_handle = h;
+    unsigned cn = slug_n < sizeof(active_slug) - 1
+                  ? slug_n : sizeof(active_slug) - 1;
+    for (unsigned i = 0; i < cn; i++) active_slug[i] = slug[i];
+    active_slug[cn] = '\0';
+    unsigned vn = ver_n < sizeof(active_version) - 1
+                  ? ver_n : sizeof(active_version) - 1;
+    for (unsigned i = 0; i < vn; i++) active_version[i] = version[i];
+    active_version[vn] = '\0';
+    emit_log_cstr("install: packaging .wapp...");
+}
 
-    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"name\":\"");
-    n = kv_read("wapp_name", buf, sizeof(buf));
-    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+/* Send the generic wapp.install message pointing at the local ZIP
+ * the install pipeline just produced. The host's existing handler
+ * (used by the Wapp Store) reads the ZIP via installFromBytes. */
+static void send_local_wapp_install(void) {
+    static char msg[1024];
+    unsigned op = 0;
+    append_cstr(msg, sizeof(msg), &op,
+                "{\"type\":\"wapp.install\",\"source\":\""
+                BUILD_ROOT "/\",\"file\":\"");
+    append_cstr(msg, sizeof(msg), &op, active_slug);
+    append_cstr(msg, sizeof(msg), &op, ".wapp\",\"name\":\"");
+    append_cstr(msg, sizeof(msg), &op, active_slug);
+    append_cstr(msg, sizeof(msg), &op, "\",\"version\":\"");
+    append_cstr(msg, sizeof(msg), &op, active_version);
+    append_cstr(msg, sizeof(msg), &op, "\"}");
+    hal_msg_send(msg, op);
+}
 
-    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"description\":\"");
-    n = kv_read("wapp_description", buf, sizeof(buf));
-    escape_into(out_buf, sizeof(out_buf), &op, buf, n);
+/* Drain a process pipe into the wapp's output log until empty. */
+static void drain_pipe_to_log(uint32_t (*fn)(int32_t, char *, uint32_t)) {
+    static char buf[4096];
+    for (;;) {
+        uint32_t n = fn(active_handle, buf, sizeof(buf));
+        if (n == 0) return;
+        emit_log_raw(buf, n);
+    }
+}
 
-    append_cstr(out_buf, sizeof(out_buf), &op, "\",\"source_ui\":\"");
-    n = hal_kv_get(KV_BUF_UI, str_len(KV_BUF_UI), src, sizeof(src) - 1);
-    src[n] = '\0';
-    escape_into(out_buf, sizeof(out_buf), &op, src, n);
+/* Called from module_tick when a host process is in flight. Drains
+ * stdout / stderr each tick and advances the state machine when the
+ * process exits. */
+static void poll_active_task(void) {
+    if (active_kind == TASK_NONE || active_handle < 0) return;
+    drain_pipe_to_log(hal_process_read_stdout);
+    drain_pipe_to_log(hal_process_read_stderr);
 
-    append_cstr(out_buf, sizeof(out_buf), &op, "\"}");
-    hal_msg_send(out_buf, op);
+    int32_t state = hal_process_poll(active_handle);
+    if (state == 0) return; /* still running */
+
+    int32_t code = hal_process_exit_code(active_handle);
+    hal_process_free(active_handle);
+    int kind = active_kind;
+    active_kind   = TASK_NONE;
+    active_handle = -1;
+
+    if (kind == TASK_COMPILE) {
+        if (state == 1 && code == 0) {
+            emit_log_cstr("compile: OK");
+        } else {
+            emit_log_cstr("compile: FAILED");
+        }
+    } else if (kind == TASK_INSTALL_ZIP) {
+        if (state == 1 && code == 0) {
+            emit_log_cstr("install: archive built, handing to host...");
+            send_local_wapp_install();
+        } else {
+            emit_log_cstr("install: zip FAILED");
+        }
+    }
 }
 
 static void do_run_tests(void) {
@@ -571,9 +870,10 @@ void module_init(void) {
 }
 
 void module_tick(void) {
-    /* Idle. The projects list refreshes only on explicit Refresh
-     * presses or after Install completes (the user's next tab visit
-     * triggers a fresh wapp boot). */
+    /* Drive the compile / install state machine. While a task is in
+     * flight we drain its stdout/stderr each tick and advance to the
+     * next stage on exit. */
+    poll_active_task();
 }
 
 void module_destroy(void) {
@@ -581,7 +881,10 @@ void module_destroy(void) {
 }
 
 uint32_t module_tick_interval_ms(void) {
-    return 0;
+    /* 200 ms gives the compile / install state machine in
+     * poll_active_task crisp output without burning CPU when idle
+     * (poll_active_task short-circuits when TASK_NONE). */
+    return 200;
 }
 
 void module_handle_event(void) {
@@ -681,6 +984,29 @@ void module_handle_event(void) {
             }
             append_cstr(out_buf, sizeof(out_buf), &op, "\\n\"}");
             hal_msg_send(out_buf, op);
+            continue;
+        }
+
+        /* Host echo confirming a wapp.install completed. Surface to
+         * the log and trigger a Projects refresh so the new wapp
+         * appears the next time the user goes back. */
+        if (find_substr(inbox, n, "\"type\":\"wapp.installed\"") >= 0) {
+            char ver[64];
+            int vn = extract_json_string_field(
+                inbox, n, "version", ver, sizeof(ver));
+            char nm[80];
+            int nmn = extract_json_string_field(
+                inbox, n, "name", nm, sizeof(nm));
+            static char buf[256] = "install: OK — ";
+            unsigned bp = str_len(buf);
+            if (nmn > 0) append_range(buf, sizeof(buf), &bp, nm,
+                                      (unsigned)nmn);
+            if (vn > 0) {
+                append_cstr(buf, sizeof(buf), &bp, " v");
+                append_range(buf, sizeof(buf), &bp, ver, (unsigned)vn);
+            }
+            emit_log(buf, bp);
+            send_list_installed();
             continue;
         }
 

@@ -90,9 +90,19 @@ __attribute__((import_module("hal"), import_name("i18n_get")))
 uint32_t hal_i18n_get(const char *key, uint32_t key_len,
                       char *out, uint32_t out_cap);
 
-/* ── Storage (file, scoped per module ID) ───────────────────────────── */
+/* ── Storage (host filesystem, no sandbox) ──────────────────────────
+ *
+ * Absolute paths only. Same trust model as hal_process_exec — wapps
+ * have full filesystem access at the privilege level of the geogram
+ * process.
+ *
+ * Reads slurp the whole file at open and serve from a buffer; writes
+ * accumulate in memory and flush at close. The host creates parent
+ * directories automatically on write/append open as a convenience.
+ */
 
-/* Open file. mode: 0=read, 1=write, 2=append. Returns handle or -1. */
+/* Open file. mode: 0=read, 1=write, 2=append. Returns handle or -1.
+ * Path must be absolute. */
 __attribute__((import_module("hal"), import_name("file_open")))
 int32_t hal_file_open(const char *path, uint32_t path_len, int32_t mode);
 
@@ -132,6 +142,64 @@ int32_t hal_http_status(int32_t request_id);
 /* Free request resources. */
 __attribute__((import_module("hal"), import_name("http_free")))
 void hal_http_free(int32_t request_id);
+
+/* ── Process (host subprocess) ──────────────────────────────────────
+ *
+ * Generic host-process primitive. The wapp asks the host to run a
+ * binary — the host runs it as-is, with no sandbox and no allow
+ * list. argv is a JSON array of strings, e.g.
+ *
+ *   ["/usr/bin/clang", "-O2", "-o", "/tmp/a.wasm", "/tmp/main.c"]
+ *
+ * cwd is an absolute working directory or empty for the host's CWD.
+ * Always use absolute paths in argv. The host's PATH is not searched
+ * for argv[0].
+ *
+ * Async polling, mirrors hal_http_*. After hal_process_exec returns
+ * a handle, the wapp polls hal_process_poll each tick, drains
+ * stdout/stderr with hal_process_read_*, and finally calls
+ * hal_process_free to release the handle.
+ *
+ * Output buffers are unbounded host-side — the wapp can drain on
+ * its own cadence without losing data, but should drain regularly
+ * for long-running processes to keep host memory in check.
+ */
+
+/* Spawn a subprocess. Returns handle (>=0) or -1 on error. */
+__attribute__((import_module("hal"), import_name("process_exec")))
+int32_t hal_process_exec(const char *argv_json, uint32_t argv_json_len,
+                         const char *cwd, uint32_t cwd_len);
+
+/* Poll process state. Returns:
+ *    0 = still running
+ *    1 = exited (call hal_process_exit_code for the code)
+ *   -1 = error or unknown handle
+ */
+__attribute__((import_module("hal"), import_name("process_poll")))
+int32_t hal_process_poll(int32_t handle);
+
+/* Exit code of a finished process. Returns -1 if the process is
+ * still running or the handle is unknown. */
+__attribute__((import_module("hal"), import_name("process_exit_code")))
+int32_t hal_process_exit_code(int32_t handle);
+
+/* Drain buffered stdout into buf. Returns bytes written, 0 if no
+ * output is currently buffered. Output is raw bytes — caller owns
+ * line splitting. */
+__attribute__((import_module("hal"), import_name("process_read_stdout")))
+uint32_t hal_process_read_stdout(int32_t handle,
+                                 char *buf, uint32_t buf_len);
+
+/* Drain buffered stderr into buf. Same semantics as
+ * hal_process_read_stdout. */
+__attribute__((import_module("hal"), import_name("process_read_stderr")))
+uint32_t hal_process_read_stderr(int32_t handle,
+                                 char *buf, uint32_t buf_len);
+
+/* Release the handle. Kills the process if still running, drops any
+ * unread buffered output. */
+__attribute__((import_module("hal"), import_name("process_free")))
+void hal_process_free(int32_t handle);
 
 /* ── LoRa ───────────────────────────────────────────────────────────── */
 

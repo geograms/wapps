@@ -85,11 +85,15 @@ The engine must:
 - Work transparently on top of an encrypted backend (the parent's
   `EncryptedProfileStorage`) when the active profile is encrypted
 
-### 2.2 Per-wapp file I/O (`hal.file`)
+### 2.2 Host filesystem I/O (`hal.file`)
 
-Bulk binary I/O scoped to the wapp's data folder. Handles are
-opaque integers; out-of-range reads return zero, writes fail with
-`-1`.
+Bulk binary I/O against the host filesystem. **Absolute paths only,
+no sandbox** — same trust model as `hal.process` (§7.1a). Reads
+slurp the whole file at open and serve from a buffer; writes
+accumulate in memory and flush at close. Parent directories are
+created automatically on write/append open. Handles are opaque
+integers; out-of-range reads return `0`, writes on a closed handle
+fail with `-1`.
 
 ```c
 int32_t hal_file_open (path, path_len, mode);   // mode: 0=R 1=W 2=A
@@ -446,6 +450,34 @@ int32_t hal_http_read_response(request_id, buf, buf_len);
 int32_t hal_http_status       (request_id);
 void    hal_http_free         (request_id);
 ```
+
+### 7.1a Host subprocess (`hal.process`)
+
+```c
+int32_t  hal_process_exec        (argv_json, argv_len, cwd, cwd_len);
+int32_t  hal_process_poll        (handle);   // 0=running 1=exited -1=err
+int32_t  hal_process_exit_code   (handle);
+uint32_t hal_process_read_stdout (handle, buf, buf_len);
+uint32_t hal_process_read_stderr (handle, buf, buf_len);
+void     hal_process_free        (handle);
+```
+
+Generic primitive for spawning a host process. `argv_json` is a JSON
+array of strings (e.g. `["/usr/bin/clang","-O2","-o","/tmp/a.wasm",
+"/tmp/main.c"]`). `cwd` is an absolute working directory or empty
+for the host's CWD. argv\[0\] must be an absolute path — the host's
+PATH is **not** searched. There is **no sandbox and no allow list**;
+wapps run with the same privileges as the geogram process.
+
+Lifecycle mirrors `hal.http`: `exec` returns a handle immediately
+while the process spins up in the background; the wapp polls each
+tick, drains stdout/stderr buffers as they fill, and calls
+`process_free` when finished. Calling `process_free` on a still
+running process best-effort kills it and discards any unread output.
+
+Stub on platforms where `dart:io.Process` is unavailable (web):
+`hal_process_exec` returns `-1` and the wapp's poll loop never sees
+a handle to advance.
 
 ### 7.2 LoRa (`hal.lora`)
 
