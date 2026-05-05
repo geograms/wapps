@@ -102,17 +102,90 @@
   {
     "$": "screen",
     "name": "Translations",
-    "tip": "Edit lang/en.json directly. Keys referenced as @key from the UI are translated at runtime.",
+    "tip": "Manage translation keys. Select a language on the left, pick a key from the reference column, edit the translation on the right.",
     "children": [
       {
-        "$": "field",
-        "name": "source_lang",
-        "$type": "code",
-        "label": "lang/en.json",
-        "language": "json",
-        "font_size": 18,
-        "line_height": 1.5,
-        "tip": "Flat JSON object: { \"key\": \"translation\" }."
+        "$": "group",
+        "$type": "header-actions",
+        "children": [
+          { "$": "action", "name": "add-lang", "icon": "add", "label": "Add language" }
+        ]
+      },
+      {
+        "$": "group",
+        "$type": "split",
+        "ratio": 0.18,
+        "children": [
+          {
+            "$": "group",
+            "name": "lang_files",
+            "$type": "cards",
+            "layout": "list",
+            "empty": "No lang files."
+          },
+          {
+            "$": "group",
+            "$type": "split",
+            "ratio": 0.42,
+            "children": [
+              {
+                "$": "group",
+                "name": "trans_ref",
+                "$type": "cards",
+                "layout": "list",
+                "empty": "No keys yet."
+              },
+              {
+                "$": "group",
+                "$type": "pane",
+                "children": [
+                  {
+                    "$": "field",
+                    "name": "new_lang_code",
+                    "$type": "string",
+                    "label": "New language code (e.g. fr)",
+                    "default": "",
+                    "tip": "Type a BCP-47 code and hit Add language in the toolbar."
+                  },
+                  {
+                    "$": "field",
+                    "name": "trans_key",
+                    "$type": "string",
+                    "label": "Key",
+                    "default": "",
+                    "tip": "Click a row in the reference column to pick a key."
+                  },
+                  {
+                    "$": "field",
+                    "name": "trans_value",
+                    "$type": "string",
+                    "label": "Translation",
+                    "default": ""
+                  },
+                  {
+                    "$": "action",
+                    "name": "upsert-trans",
+                    "label": "Save",
+                    "style": "primary"
+                  },
+                  {
+                    "$": "action",
+                    "name": "delete-trans",
+                    "label": "Delete key",
+                    "style": "secondary"
+                  },
+                  {
+                    "$": "group",
+                    "name": "translations",
+                    "$type": "cards",
+                    "layout": "list",
+                    "empty": "No translations yet."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
       }
     ]
   },

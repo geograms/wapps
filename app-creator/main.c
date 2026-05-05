@@ -293,6 +293,7 @@ static void render_projects(void) {
 /* Forward declarations — defined further down. */
 static void select_screen(const char *name);
 static void send_read_source(const char *slug, unsigned slen);
+static void trans_load(const char *slug, unsigned slen);
 static void render_files_tree(void);
 static void load_active_file_into_editor(void);
 static uint32_t kv_read(const char *key, char *out, uint32_t omax);
@@ -333,10 +334,8 @@ static void on_select(const char *slug, unsigned slen) {
     send_set_field("wapp_description",
                    wapps_summary[idx][0] ? wapps_summary[idx]
                                          : wapps_desc[idx]);
-    /* Pull the on-disk source files. The response arrives as
-     * wapps.read_source.response → fills the shadow buffers and
-     * the editor for the active file. */
     send_read_source(wapps_slug[idx], str_len(wapps_slug[idx]));
+    trans_load(wapps_slug[idx], str_len(wapps_slug[idx]));
     select_screen("Files");
 }
 
@@ -878,6 +877,455 @@ static void send_read_source(const char *slug, unsigned slen) {
     hal_msg_send(buf, op);
 }
 
+/* ── Translation editor ───────────────────────────────────────────────
+ * Manages lang/<code>.json files for the currently edited wapp.
+ * The UI shows a three-pane layout: language selector | reference (en)
+ * list | editing form + active-lang list. */
+
+#define MAX_TRANS   64
+#define TKEY_LEN    80
+#define TVAL_LEN   256
+#define MAX_LANGS    8
+#define LANG_LEN    16
+
+static char trans_edit_slug[SLUG_LEN];
+static char trans_active_lang[LANG_LEN];   /* e.g. "fr"              */
+static char trans_lang_codes[MAX_LANGS][LANG_LEN];
+static int  trans_lang_count;
+
+static char trans_ref_key[MAX_TRANS][TKEY_LEN];
+static char trans_ref_val[MAX_TRANS][TVAL_LEN];
+static int  trans_ref_count;
+
+static char trans_tgt_key[MAX_TRANS][TKEY_LEN];
+static char trans_tgt_val[MAX_TRANS][TVAL_LEN];
+static int  trans_tgt_count;
+
+/* Convert an int to a decimal string; returns chars written. */
+static unsigned trans_itoa(int n, char *out, unsigned max) {
+    if (max < 2) return 0;
+    if (n <= 0) { out[0] = '0'; out[1] = '\0'; return 1; }
+    char tmp[12]; unsigned tp = 0;
+    while (n > 0 && tp < sizeof(tmp)) { tmp[tp++] = '0' + (n % 10); n /= 10; }
+    unsigned op = 0;
+    for (int j = (int)tp - 1; j >= 0 && op + 1 < max; j--) out[op++] = tmp[j];
+    out[op] = '\0';
+    return op;
+}
+
+/* Decode escape sequences produced by extract_json_string_field
+ * (which copies `\` verbatim) into actual chars for a proper parser. */
+static unsigned trans_decode(const char *src, unsigned slen,
+                              char *dst, unsigned dmax) {
+    unsigned op = 0;
+    for (unsigned i = 0; i < slen && op + 1 < dmax; i++) {
+        if (src[i] == '\\' && i + 1 < slen) {
+            char e = src[i + 1]; i++;
+            if      (e == 'n')  dst[op++] = '\n';
+            else if (e == 't')  dst[op++] = '\t';
+            else if (e == 'r')  dst[op++] = '\r';
+            else if (e == '"')  dst[op++] = '"';
+            else if (e == '\\') dst[op++] = '\\';
+            else                dst[op++] = e;
+        } else {
+            dst[op++] = src[i];
+        }
+    }
+    dst[op] = '\0';
+    return op;
+}
+
+/* Parse a flat JSON object into parallel key/value arrays.
+ * Values are stored as plain (unescaped) strings. Returns count. */
+static int trans_parse_flat(const char *json, unsigned n,
+                             char keys[][TKEY_LEN], char vals[][TVAL_LEN],
+                             int max_kv) {
+    int count = 0;
+    unsigned i = 0;
+    while (i < n && json[i] != '{') i++;
+    if (i >= n) return 0;
+    i++;
+    while (i < n && count < max_kv) {
+        while (i < n && (json[i]==' '||json[i]=='\t'||json[i]=='\n'||
+                         json[i]=='\r'||json[i]==',')) i++;
+        if (i >= n || json[i] == '}') break;
+        if (json[i] != '"') break;
+        i++;
+        unsigned kp = 0;
+        while (i < n && json[i] != '"') {
+            if (json[i]=='\\' && i+1<n) { i++; }
+            if (kp + 1 < TKEY_LEN) keys[count][kp++] = json[i];
+            i++;
+        }
+        keys[count][kp] = '\0';
+        if (i < n) i++;
+        while (i < n && (json[i]==' '||json[i]=='\t'||json[i]==':')) i++;
+        if (i >= n || json[i] != '"') break;
+        i++;
+        unsigned vp = 0;
+        while (i < n && json[i] != '"') {
+            if (json[i]=='\\' && i+1<n) {
+                char e = json[i+1]; i += 2;
+                if      (e == 'n')  { if (vp+1<TVAL_LEN) vals[count][vp++]='\n'; }
+                else if (e == 't')  { if (vp+1<TVAL_LEN) vals[count][vp++]='\t'; }
+                else if (e == 'r')  { if (vp+1<TVAL_LEN) vals[count][vp++]='\r'; }
+                else if (e == '"')  { if (vp+1<TVAL_LEN) vals[count][vp++]='"'; }
+                else if (e == '\\') { if (vp+1<TVAL_LEN) vals[count][vp++]='\\'; }
+                else                { if (vp+1<TVAL_LEN) vals[count][vp++]=e; }
+            } else {
+                if (vp + 1 < TVAL_LEN) vals[count][vp++] = json[i];
+                i++;
+            }
+        }
+        vals[count][vp] = '\0';
+        if (i < n) i++;
+        count++;
+    }
+    return count;
+}
+
+static void trans_render_lang_files(void) {
+    static char buf[2 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"ui.data\",\"target\":\"lang_files\",\"items\":[");
+    for (int k = 0; k < trans_lang_count; k++) {
+        if (k) append_cstr(buf, sizeof(buf), &op, ",");
+        const int active = (str_len(trans_lang_codes[k]) ==
+                            str_len(trans_active_lang) &&
+                            str_eq_n(trans_lang_codes[k], trans_active_lang,
+                                     str_len(trans_active_lang)));
+        append_cstr(buf, sizeof(buf), &op, "{\"id\":\"lang-select:");
+        append_cstr(buf, sizeof(buf), &op, trans_lang_codes[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
+        append_cstr(buf, sizeof(buf), &op, trans_lang_codes[k]);
+        append_cstr(buf, sizeof(buf), &op, active ? "\",\"subtitle\":\"editing\"}"
+                                                  : "\",\"subtitle\":\"\"}");
+    }
+    append_cstr(buf, sizeof(buf), &op, "]}");
+    hal_msg_send(buf, op);
+}
+
+static void trans_render_ref(void) {
+    static char buf[32 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+        "{\"type\":\"ui.data\",\"target\":\"trans_ref\","
+        "\"label\":\"English (reference)\",\"items\":[");
+    for (int k = 0; k < trans_ref_count; k++) {
+        if (k) append_cstr(buf, sizeof(buf), &op, ",");
+        char eid[8]; trans_itoa(k, eid, sizeof(eid));
+        char vesc[TVAL_LEN * 2]; unsigned vep = 0;
+        escape_into(vesc, sizeof(vesc), &vep,
+                    trans_ref_val[k], str_len(trans_ref_val[k]));
+        vesc[vep] = '\0';
+        append_cstr(buf, sizeof(buf), &op, "{\"id\":\"ref-select:");
+        append_cstr(buf, sizeof(buf), &op, eid);
+        append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
+        append_cstr(buf, sizeof(buf), &op, trans_ref_key[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"");
+        append_cstr(buf, sizeof(buf), &op, vesc);
+        append_cstr(buf, sizeof(buf), &op, "\"}");
+    }
+    append_cstr(buf, sizeof(buf), &op, "]}");
+    hal_msg_send(buf, op);
+}
+
+static void trans_render_tgt(void) {
+    static char buf[32 * 1024];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+        "{\"type\":\"ui.data\",\"target\":\"translations\",\"items\":[");
+    for (int k = 0; k < trans_tgt_count; k++) {
+        if (k) append_cstr(buf, sizeof(buf), &op, ",");
+        char eid[8]; trans_itoa(k, eid, sizeof(eid));
+        char vesc[TVAL_LEN * 2]; unsigned vep = 0;
+        escape_into(vesc, sizeof(vesc), &vep,
+                    trans_tgt_val[k], str_len(trans_tgt_val[k]));
+        vesc[vep] = '\0';
+        append_cstr(buf, sizeof(buf), &op, "{\"id\":\"trans-select:");
+        append_cstr(buf, sizeof(buf), &op, eid);
+        append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
+        append_cstr(buf, sizeof(buf), &op, trans_tgt_key[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"");
+        append_cstr(buf, sizeof(buf), &op, vesc);
+        append_cstr(buf, sizeof(buf), &op, "\",\"actions\":[{\"name\":\"trans-select:");
+        append_cstr(buf, sizeof(buf), &op, eid);
+        append_cstr(buf, sizeof(buf), &op, "\",\"label\":\"Edit\",\"icon\":\"edit\"}]}");
+    }
+    append_cstr(buf, sizeof(buf), &op, "]}");
+    hal_msg_send(buf, op);
+}
+
+static void trans_write_active(void) {
+    /* Build JSON content */
+    static char json_content[16 * 1024];
+    unsigned jop = 0;
+    append_cstr(json_content, sizeof(json_content), &jop, "{");
+    for (int k = 0; k < trans_tgt_count; k++) {
+        if (k) append_cstr(json_content, sizeof(json_content), &jop, ",");
+        append_cstr(json_content, sizeof(json_content), &jop, "\n  \"");
+        append_cstr(json_content, sizeof(json_content), &jop, trans_tgt_key[k]);
+        append_cstr(json_content, sizeof(json_content), &jop, "\": \"");
+        escape_into(json_content, sizeof(json_content), &jop,
+                    trans_tgt_val[k], str_len(trans_tgt_val[k]));
+        append_cstr(json_content, sizeof(json_content), &jop, "\"");
+    }
+    append_cstr(json_content, sizeof(json_content), &jop, "\n}");
+
+    /* Embed content as JSON-escaped string inside the write_lang message */
+    static char msg[48 * 1024];
+    unsigned mp = 0;
+    append_cstr(msg, sizeof(msg), &mp,
+                "{\"type\":\"wapps.write_lang\",\"req_id\":13,\"slug\":\"");
+    append_cstr(msg, sizeof(msg), &mp, trans_edit_slug);
+    append_cstr(msg, sizeof(msg), &mp, "\",\"lang\":\"");
+    append_cstr(msg, sizeof(msg), &mp, trans_active_lang);
+    append_cstr(msg, sizeof(msg), &mp, "\",\"content\":\"");
+    escape_into(msg, sizeof(msg), &mp, json_content, jop);
+    append_cstr(msg, sizeof(msg), &mp, "\"}");
+    hal_msg_send(msg, mp);
+}
+
+static void trans_request_list(void) {
+    static char buf[256];
+    unsigned op = 0;
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"wapps.list_lang\",\"req_id\":10,\"slug\":\"");
+    append_cstr(buf, sizeof(buf), &op, trans_edit_slug);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
+static void trans_request_read(const char *lang, int req_id) {
+    static char buf[256];
+    unsigned op = 0;
+    const char *rid = (req_id == 11) ? "11" : "12";
+    append_cstr(buf, sizeof(buf), &op,
+                "{\"type\":\"wapps.read_lang\",\"req_id\":");
+    append_cstr(buf, sizeof(buf), &op, rid);
+    append_cstr(buf, sizeof(buf), &op, ",\"slug\":\"");
+    append_cstr(buf, sizeof(buf), &op, trans_edit_slug);
+    append_cstr(buf, sizeof(buf), &op, "\",\"lang\":\"");
+    append_cstr(buf, sizeof(buf), &op, lang);
+    append_cstr(buf, sizeof(buf), &op, "\"}");
+    hal_msg_send(buf, op);
+}
+
+/* Load translation data for the selected wapp (called from on_select). */
+static void trans_load(const char *slug, unsigned slen) {
+    unsigned n = slen < SLUG_LEN - 1 ? slen : SLUG_LEN - 1;
+    for (unsigned i = 0; i < n; i++) trans_edit_slug[i] = slug[i];
+    trans_edit_slug[n] = '\0';
+    /* Reset to "en" as default active lang */
+    trans_active_lang[0] = 'e'; trans_active_lang[1] = 'n';
+    trans_active_lang[2] = '\0';
+    trans_lang_count = 0;
+    trans_ref_count = 0;
+    trans_tgt_count = 0;
+    trans_request_list();
+}
+
+/* Handle wapps.list_lang.response */
+static void trans_on_list(const char *inbox, unsigned n) {
+    trans_lang_count = 0;
+    /* Parse ["en","fr",...] from langs field */
+    const int arr_at = find_substr(inbox, n, "\"langs\":[");
+    if (arr_at < 0) return;
+    unsigned i = (unsigned)arr_at + 9;
+    while (i < n && trans_lang_count < MAX_LANGS) {
+        while (i < n && inbox[i] != '"' && inbox[i] != ']') i++;
+        if (i >= n || inbox[i] == ']') break;
+        i++;
+        unsigned lp = 0;
+        while (i < n && inbox[i] != '"' && lp + 1 < LANG_LEN)
+            trans_lang_codes[trans_lang_count][lp++] = inbox[i++];
+        trans_lang_codes[trans_lang_count][lp] = '\0';
+        while (i < n && inbox[i] != '"') i++;
+        if (i < n) i++;
+        trans_lang_count++;
+    }
+    /* If "en" not present, seed it */
+    int has_en = 0;
+    for (int k = 0; k < trans_lang_count; k++)
+        if (str_eq_n(trans_lang_codes[k], "en", 2) &&
+            str_len(trans_lang_codes[k]) == 2) { has_en = 1; break; }
+    if (!has_en && trans_lang_count < MAX_LANGS) {
+        trans_lang_codes[0][0]='e'; trans_lang_codes[0][1]='n';
+        trans_lang_codes[0][2]='\0';
+        trans_lang_count++;
+    }
+    trans_render_lang_files();
+    /* Always fetch English as reference (req_id 11) */
+    trans_request_read("en", 11);
+    /* Fetch active lang as target (req_id 12) — skip if same as "en" */
+    if (!(str_eq_n(trans_active_lang, "en", 2) &&
+          str_len(trans_active_lang) == 2))
+        trans_request_read(trans_active_lang, 12);
+}
+
+/* Handle wapps.read_lang.response — req_id 11 = ref, 12 = target */
+static void trans_on_read(const char *inbox, unsigned n, int req_id) {
+    /* Extract and decode the content string */
+    static char raw[8 * 1024];
+    static char content[8 * 1024];
+    int rn = extract_json_string_field(inbox, n, "content",
+                                       raw, sizeof(raw));
+    if (rn < 0) rn = 0;
+    unsigned cn = trans_decode(raw, (unsigned)rn, content, sizeof(content));
+
+    if (req_id == 11) {
+        trans_ref_count = trans_parse_flat(content, cn,
+            trans_ref_key, trans_ref_val, MAX_TRANS);
+        trans_render_ref();
+        /* If editing "en", mirror ref → tgt */
+        if (str_eq_n(trans_active_lang, "en", 2) &&
+            str_len(trans_active_lang) == 2) {
+            trans_tgt_count = trans_ref_count;
+            for (int k = 0; k < trans_ref_count; k++) {
+                copy_field(trans_ref_key[k], (int)str_len(trans_ref_key[k]),
+                           trans_tgt_key[k], TKEY_LEN);
+                copy_field(trans_ref_val[k], (int)str_len(trans_ref_val[k]),
+                           trans_tgt_val[k], TVAL_LEN);
+            }
+            trans_render_tgt();
+        }
+    } else {
+        trans_tgt_count = trans_parse_flat(content, cn,
+            trans_tgt_key, trans_tgt_val, MAX_TRANS);
+        trans_render_tgt();
+    }
+}
+
+/* Upsert a key/value into tgt arrays and persist */
+static void trans_upsert(const char *key, const char *val) {
+    unsigned kl = str_len(key);
+    for (int k = 0; k < trans_tgt_count; k++) {
+        if (str_len(trans_tgt_key[k]) == kl &&
+            str_eq_n(trans_tgt_key[k], key, kl)) {
+            copy_field(val, (int)str_len(val), trans_tgt_val[k], TVAL_LEN);
+            /* Mirror into ref if editing "en" */
+            if (str_eq_n(trans_active_lang,"en",2) &&
+                str_len(trans_active_lang)==2) {
+                copy_field(val,(int)str_len(val),trans_ref_val[k],TVAL_LEN);
+                trans_render_ref();
+            }
+            trans_write_active();
+            trans_render_tgt();
+            return;
+        }
+    }
+    if (trans_tgt_count >= MAX_TRANS) return;
+    copy_field(key, (int)kl, trans_tgt_key[trans_tgt_count], TKEY_LEN);
+    copy_field(val, (int)str_len(val), trans_tgt_val[trans_tgt_count], TVAL_LEN);
+    trans_tgt_count++;
+    if (str_eq_n(trans_active_lang,"en",2) && str_len(trans_active_lang)==2) {
+        copy_field(key,(int)kl,trans_ref_key[trans_ref_count],TKEY_LEN);
+        copy_field(val,(int)str_len(val),trans_ref_val[trans_ref_count],TVAL_LEN);
+        trans_ref_count++;
+        trans_render_ref();
+    }
+    trans_write_active();
+    trans_render_tgt();
+}
+
+/* Delete a key from tgt arrays */
+static void trans_delete(const char *key) {
+    unsigned kl = str_len(key);
+    for (int k = 0; k < trans_tgt_count; k++) {
+        if (str_len(trans_tgt_key[k]) == kl &&
+            str_eq_n(trans_tgt_key[k], key, kl)) {
+            for (int j = k; j < trans_tgt_count - 1; j++) {
+                copy_field(trans_tgt_key[j+1],(int)str_len(trans_tgt_key[j+1]),
+                           trans_tgt_key[j], TKEY_LEN);
+                copy_field(trans_tgt_val[j+1],(int)str_len(trans_tgt_val[j+1]),
+                           trans_tgt_val[j], TVAL_LEN);
+            }
+            trans_tgt_count--;
+            if (str_eq_n(trans_active_lang,"en",2) &&
+                str_len(trans_active_lang)==2) {
+                for (int j = k; j < trans_ref_count - 1; j++) {
+                    copy_field(trans_ref_key[j+1],(int)str_len(trans_ref_key[j+1]),
+                               trans_ref_key[j],TKEY_LEN);
+                    copy_field(trans_ref_val[j+1],(int)str_len(trans_ref_val[j+1]),
+                               trans_ref_val[j],TVAL_LEN);
+                }
+                trans_ref_count--;
+                trans_render_ref();
+            }
+            trans_write_active();
+            trans_render_tgt();
+            return;
+        }
+    }
+}
+
+/* Switch to a different active lang */
+static void trans_select_lang(const char *lang) {
+    copy_field(lang, (int)str_len(lang), trans_active_lang, LANG_LEN);
+    trans_render_lang_files();
+    if (str_eq_n(lang,"en",2) && str_len(lang)==2) {
+        /* Re-use already-loaded ref as tgt */
+        trans_tgt_count = trans_ref_count;
+        for (int k = 0; k < trans_ref_count; k++) {
+            copy_field(trans_ref_key[k],(int)str_len(trans_ref_key[k]),
+                       trans_tgt_key[k],TKEY_LEN);
+            copy_field(trans_ref_val[k],(int)str_len(trans_ref_val[k]),
+                       trans_tgt_val[k],TVAL_LEN);
+        }
+        trans_render_tgt();
+    } else {
+        trans_request_read(lang, 12);
+    }
+}
+
+/* Populate the edit form from a reference row click */
+static void trans_select_ref(int idx) {
+    if (idx < 0 || idx >= trans_ref_count) return;
+    send_set_field("trans_key", trans_ref_key[idx]);
+    /* Look up existing target value for this key */
+    unsigned kl = str_len(trans_ref_key[idx]);
+    for (int k = 0; k < trans_tgt_count; k++) {
+        if (str_len(trans_tgt_key[k]) == kl &&
+            str_eq_n(trans_tgt_key[k], trans_ref_key[idx], kl)) {
+            send_set_field("trans_value", trans_tgt_val[k]);
+            return;
+        }
+    }
+    send_set_field("trans_value", "");
+}
+
+/* Populate the edit form from a target row click */
+static void trans_select_tgt(int idx) {
+    if (idx < 0 || idx >= trans_tgt_count) return;
+    send_set_field("trans_key",   trans_tgt_key[idx]);
+    send_set_field("trans_value", trans_tgt_val[idx]);
+}
+
+/* Create a new language file */
+static void trans_create_lang(const char *code) {
+    if (str_len(code) == 0) return;
+    /* Register code */
+    for (int k = 0; k < trans_lang_count; k++)
+        if (str_eq_n(trans_lang_codes[k], code, str_len(code)) &&
+            str_len(trans_lang_codes[k]) == str_len(code)) return; /* dup */
+    if (trans_lang_count < MAX_LANGS) {
+        copy_field(code,(int)str_len(code),
+                   trans_lang_codes[trans_lang_count++],LANG_LEN);
+    }
+    /* Write an empty JSON object as the new file */
+    static char msg[512];
+    unsigned mp = 0;
+    append_cstr(msg, sizeof(msg), &mp,
+                "{\"type\":\"wapps.write_lang\",\"req_id\":13,\"slug\":\"");
+    append_cstr(msg, sizeof(msg), &mp, trans_edit_slug);
+    append_cstr(msg, sizeof(msg), &mp, "\",\"lang\":\"");
+    append_cstr(msg, sizeof(msg), &mp, code);
+    append_cstr(msg, sizeof(msg), &mp, "\",\"content\":\"{}\"}");
+    hal_msg_send(msg, mp);
+    trans_select_lang(code);
+}
+
 void module_init(void) {
     hal_log(1, "[app-creator] init", 18);
     select_screen("Projects");
@@ -1018,6 +1466,27 @@ void module_handle_event(void) {
         /* Host echo confirming a wapp.install completed. Surface to
          * the log and trigger a Projects refresh so the new wapp
          * appears the next time the user goes back. */
+        if (find_substr(inbox, n,
+                "\"type\":\"wapps.list_lang.response\"") >= 0) {
+            trans_on_list(inbox, n);
+            continue;
+        }
+
+        if (find_substr(inbox, n,
+                "\"type\":\"wapps.read_lang.response\"") >= 0) {
+            const int rid_at = find_substr(inbox, n, "\"req_id\":");
+            int req_id = 12;
+            if (rid_at >= 0) {
+                unsigned ri = (unsigned)rid_at + 9;
+                while (ri < n && (inbox[ri]==' '||inbox[ri]=='\t')) ri++;
+                req_id = 0;
+                while (ri < n && inbox[ri] >= '0' && inbox[ri] <= '9')
+                    req_id = req_id * 10 + (inbox[ri++] - '0');
+            }
+            trans_on_read(inbox, n, req_id);
+            continue;
+        }
+
         if (find_substr(inbox, n, "\"type\":\"wapp.installed\"") >= 0) {
             char ver[64];
             int vn = extract_json_string_field(
@@ -1102,6 +1571,70 @@ void module_handle_event(void) {
         }
         if (al == 15 && str_eq_n(a, "editor-settings", 15)) {
             select_screen("Settings");
+            continue;
+        }
+
+        /* Translation UI actions ─────────────────────────────── */
+
+        /* lang-select:<code> — switch active language */
+        if (al > 12 && str_eq_n(a, "lang-select:", 12)) {
+            static char code[LANG_LEN];
+            unsigned cl = al - 12;
+            if (cl >= LANG_LEN) cl = LANG_LEN - 1;
+            for (unsigned ci = 0; ci < cl; ci++) code[ci] = a[12 + ci];
+            code[cl] = '\0';
+            trans_select_lang(code);
+            continue;
+        }
+
+        /* ref-select:<idx> — click a reference row to fill the form */
+        if (al > 11 && str_eq_n(a, "ref-select:", 11)) {
+            int idx = 0;
+            for (unsigned ci = 11; ci < al; ci++)
+                idx = idx * 10 + (a[ci] - '0');
+            trans_select_ref(idx);
+            continue;
+        }
+
+        /* trans-select:<idx> — click a target row to fill the form */
+        if (al > 13 && str_eq_n(a, "trans-select:", 13)) {
+            int idx = 0;
+            for (unsigned ci = 13; ci < al; ci++)
+                idx = idx * 10 + (a[ci] - '0');
+            trans_select_tgt(idx);
+            continue;
+        }
+
+        /* upsert-trans — save the current key/value pair */
+        if (al == 12 && str_eq_n(a, "upsert-trans", 12)) {
+            static char tk[TKEY_LEN], tv[TVAL_LEN];
+            kv_read("trans_key", tk, sizeof(tk));
+            kv_read("trans_value", tv, sizeof(tv));
+            if (str_len(tk) > 0)
+                trans_upsert(tk, tv);
+            continue;
+        }
+
+        /* delete-trans — delete the current key */
+        if (al == 12 && str_eq_n(a, "delete-trans", 12)) {
+            static char tk[TKEY_LEN];
+            kv_read("trans_key", tk, sizeof(tk));
+            if (str_len(tk) > 0) {
+                trans_delete(tk);
+                send_set_field("trans_key", "");
+                send_set_field("trans_value", "");
+            }
+            continue;
+        }
+
+        /* add-lang — create a new language file */
+        if (al == 8 && str_eq_n(a, "add-lang", 8)) {
+            static char code[LANG_LEN];
+            kv_read("new_lang_code", code, sizeof(code));
+            if (str_len(code) > 0) {
+                trans_create_lang(code);
+                send_set_field("new_lang_code", "");
+            }
             continue;
         }
     }
