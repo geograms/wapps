@@ -999,8 +999,11 @@ static void trans_render_lang_files(void) {
         append_cstr(buf, sizeof(buf), &op, trans_lang_codes[k]);
         append_cstr(buf, sizeof(buf), &op, "\",\"title\":\"");
         append_cstr(buf, sizeof(buf), &op, trans_lang_codes[k]);
-        append_cstr(buf, sizeof(buf), &op, active ? "\",\"subtitle\":\"editing\"}"
-                                                  : "\",\"subtitle\":\"\"}");
+        append_cstr(buf, sizeof(buf), &op, active ? "\",\"subtitle\":\"editing\","
+                                                  : "\",\"subtitle\":\"\",");
+        append_cstr(buf, sizeof(buf), &op, "\"actions\":[{\"name\":\"lang-select:");
+        append_cstr(buf, sizeof(buf), &op, trans_lang_codes[k]);
+        append_cstr(buf, sizeof(buf), &op, "\",\"label\":\"Select\",\"icon\":\"check\"}]}");
     }
     append_cstr(buf, sizeof(buf), &op, "]}");
     hal_msg_send(buf, op);
@@ -1025,7 +1028,9 @@ static void trans_render_ref(void) {
         append_cstr(buf, sizeof(buf), &op, trans_ref_key[k]);
         append_cstr(buf, sizeof(buf), &op, "\",\"subtitle\":\"");
         append_cstr(buf, sizeof(buf), &op, vesc);
-        append_cstr(buf, sizeof(buf), &op, "\"}");
+        append_cstr(buf, sizeof(buf), &op, "\",\"actions\":[{\"name\":\"ref-select:");
+        append_cstr(buf, sizeof(buf), &op, eid);
+        append_cstr(buf, sizeof(buf), &op, "\",\"label\":\"Edit\",\"icon\":\"edit\"}]}");
     }
     append_cstr(buf, sizeof(buf), &op, "]}");
     hal_msg_send(buf, op);
@@ -1629,11 +1634,20 @@ void module_handle_event(void) {
 
         /* add-lang — create a new language file */
         if (al == 8 && str_eq_n(a, "add-lang", 8)) {
+            if (str_len(trans_edit_slug) == 0) {
+                emit_snackbar("Select a project first", "info");
+                continue;
+            }
             static char code[LANG_LEN];
             kv_read("new_lang_code", code, sizeof(code));
             if (str_len(code) > 0) {
                 trans_create_lang(code);
                 send_set_field("new_lang_code", "");
+                emit_snackbar("Language created", "success");
+            } else {
+                emit_snackbar(
+                    "Fill in the New language code field first (e.g. fr)",
+                    "info");
             }
             continue;
         }

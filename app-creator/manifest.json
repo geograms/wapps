@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.app-creator",
-  "version":         "0.3.0",
+  "version":         "0.3.1",
   "kind":            "system",
   "title":           "App Creator",
   "description":     "Write, compile and install C wapps without leaving geogram.",
