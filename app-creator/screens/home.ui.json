@@ -102,31 +102,44 @@
   {
     "$": "screen",
     "name": "Translations",
-    "tip": "Manage translation keys. Select a language on the left, pick a key from the reference column, edit the translation on the right.",
+    "tip": "Manage translation keys. Select a language on the left, pick a key from the reference column, edit on the right.",
     "children": [
       {
         "$": "group",
-        "$type": "header-actions",
-        "children": [
-          { "$": "action", "name": "add-lang", "icon": "add", "label": "Add language" }
-        ]
-      },
-      {
-        "$": "group",
         "$type": "split",
-        "ratio": 0.18,
+        "ratio": 0.22,
         "children": [
           {
             "$": "group",
-            "name": "lang_files",
-            "$type": "cards",
-            "layout": "list",
-            "empty": "No lang files."
+            "$type": "pane",
+            "children": [
+              {
+                "$": "field",
+                "name": "new_lang_code",
+                "$type": "string",
+                "label": "New language code",
+                "default": "",
+                "tip": "e.g. fr, de, es, pt-BR — then hit Add"
+              },
+              {
+                "$": "action",
+                "name": "add-lang",
+                "label": "Add language",
+                "style": "primary"
+              },
+              {
+                "$": "group",
+                "name": "lang_files",
+                "$type": "cards",
+                "layout": "list",
+                "empty": "No lang files."
+              }
+            ]
           },
           {
             "$": "group",
             "$type": "split",
-            "ratio": 0.42,
+            "ratio": 0.45,
             "children": [
               {
                 "$": "group",
@@ -178,33 +191,6 @@
             ]
           }
         ]
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "NewLang",
-    "tip": "Type a BCP-47 language code (e.g. fr, de, es, pt-BR) and hit Create.",
-    "children": [
-      {
-        "$": "field",
-        "name": "new_lang_code",
-        "$type": "string",
-        "label": "Language code",
-        "default": "",
-        "tip": "Examples: fr, de, es, pt-BR, zh-Hans"
-      },
-      {
-        "$": "action",
-        "name": "create-lang",
-        "label": "Create language",
-        "style": "primary"
-      },
-      {
-        "$": "action",
-        "name": "cancel-lang",
-        "label": "Cancel",
-        "style": "secondary"
       }
     ]
   },
