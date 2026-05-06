@@ -107,7 +107,7 @@
       {
         "$": "group",
         "$type": "split",
-        "ratio": 0.22,
+        "ratio": 0.26,
         "children": [
           {
             "$": "group",
@@ -131,7 +131,7 @@
                 "$": "group",
                 "name": "lang_files",
                 "$type": "cards",
-                "layout": "list",
+                "layout": "tree",
                 "empty": "No lang files."
               }
             ]
