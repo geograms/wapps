@@ -1632,23 +1632,34 @@ void module_handle_event(void) {
             continue;
         }
 
-        /* add-lang — create a new language file */
+        /* add-lang — navigate to the dedicated NewLang screen */
         if (al == 8 && str_eq_n(a, "add-lang", 8)) {
             if (str_len(trans_edit_slug) == 0) {
                 emit_snackbar("Select a project first", "info");
                 continue;
             }
+            send_set_field("new_lang_code", "");
+            select_screen("NewLang");
+            continue;
+        }
+
+        /* create-lang — commit the new language and return */
+        if (al == 11 && str_eq_n(a, "create-lang", 11)) {
             static char code[LANG_LEN];
             kv_read("new_lang_code", code, sizeof(code));
             if (str_len(code) > 0) {
                 trans_create_lang(code);
-                send_set_field("new_lang_code", "");
                 emit_snackbar("Language created", "success");
             } else {
-                emit_snackbar(
-                    "Fill in the New language code field first (e.g. fr)",
-                    "info");
+                emit_snackbar("Enter a language code first (e.g. fr)", "info");
             }
+            select_screen("Translations");
+            continue;
+        }
+
+        /* cancel-lang — go back without creating */
+        if (al == 11 && str_eq_n(a, "cancel-lang", 11)) {
+            select_screen("Translations");
             continue;
         }
     }

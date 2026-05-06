@@ -141,14 +141,6 @@
                 "children": [
                   {
                     "$": "field",
-                    "name": "new_lang_code",
-                    "$type": "string",
-                    "label": "New language code (e.g. fr)",
-                    "default": "",
-                    "tip": "Type a BCP-47 code and hit Add language in the toolbar."
-                  },
-                  {
-                    "$": "field",
                     "name": "trans_key",
                     "$type": "string",
                     "label": "Key",
@@ -186,6 +178,33 @@
             ]
           }
         ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "NewLang",
+    "tip": "Type a BCP-47 language code (e.g. fr, de, es, pt-BR) and hit Create.",
+    "children": [
+      {
+        "$": "field",
+        "name": "new_lang_code",
+        "$type": "string",
+        "label": "Language code",
+        "default": "",
+        "tip": "Examples: fr, de, es, pt-BR, zh-Hans"
+      },
+      {
+        "$": "action",
+        "name": "create-lang",
+        "label": "Create language",
+        "style": "primary"
+      },
+      {
+        "$": "action",
+        "name": "cancel-lang",
+        "label": "Cancel",
+        "style": "secondary"
       }
     ]
   },
