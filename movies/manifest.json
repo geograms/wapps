@@ -10,6 +10,8 @@
   "entry_ui":        "screens/home.ui.json",
   "tick_interval_ms": 0,
   "permissions":     ["storage"],
+  "platforms":       ["linux", "windows", "macos", "android", "ios"],
+  "hardware":        ["intel", "arm"],
   "provides": {
     "functionalities": [],
     "file_handlers": [
@@ -28,9 +30,10 @@
     ]
   },
   "requires": {
-    "hal":       ["log", "kv", "msg"],
-    "events":    [],
-    "libraries": [],
-    "variables": []
+    "hal":            ["log", "kv", "msg"],
+    "functionalities": ["media.video"],
+    "events":         [],
+    "libraries":      [],
+    "variables":      []
   }
 }
