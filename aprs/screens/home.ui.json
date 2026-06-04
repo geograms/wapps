@@ -1,0 +1,191 @@
+[
+  {
+    "$": "screen",
+    "name": "Map",
+    "tip": "Stations and messages received in your filter area.",
+    "children": [
+      {
+        "$": "group",
+        "name": "map-viewport",
+        "$type": "map",
+        "tile-url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "label-url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        "default-lat": 38.7223,
+        "default-lon": -9.1393,
+        "default-zoom": 9,
+        "min-zoom": 2,
+        "max-zoom": 18
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Messenger",
+    "tip": "Direct messages and group bulletins, organised as conversations.",
+    "children": [
+      {
+        "$": "group",
+        "name": "conversations",
+        "$type": "conversations",
+        "label": "Messages",
+        "children": [
+          { "$": "action", "name": "add_group", "icon": "add", "slot": "list", "tip": "Add a group" },
+          { "$": "action", "name": "new_chat", "icon": "edit", "slot": "list", "tip": "New message" },
+          { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
+          { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Beacon",
+    "tip": "Craft and transmit a beacon.",
+    "children": [
+      {
+        "$": "group",
+        "name": "compose",
+        "children": [
+          {
+            "$": "field",
+            "name": "beacon_type",
+            "$type": "enum",
+            "label": "Type",
+            "default": "position",
+            "children": [
+              { "$": "option", "name": "position", "label": "Position" },
+              { "$": "option", "name": "status", "label": "Status" },
+              { "$": "option", "name": "emergency", "label": "Emergency" }
+            ]
+          },
+          {
+            "$": "field",
+            "name": "beacon_comment",
+            "$type": "string",
+            "label": "Comment",
+            "default": "Aurora APRS station"
+          },
+          {
+            "$": "field",
+            "name": "beacon_interval",
+            "$type": "string",
+            "label": "Auto-beacon interval (s)",
+            "default": "600",
+            "tip": "Seconds between automatic beacons when auto-beacon is on."
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "beacon_actions",
+        "children": [
+          {
+            "$": "action",
+            "name": "send_beacon",
+            "label": "Send beacon",
+            "style": "primary",
+            "tip": "Transmit a beacon of the selected type now."
+          },
+          {
+            "$": "action",
+            "name": "send_emergency",
+            "label": "Send emergency",
+            "style": "danger",
+            "confirm": true,
+            "confirm-label": "Transmit an EMERGENCY beacon now?"
+          },
+          {
+            "$": "action",
+            "name": "toggle_timed",
+            "label": "Toggle auto-beacon",
+            "style": "secondary",
+            "tip": "Start/stop beaconing every interval."
+          }
+        ]
+      },
+      {
+        "$": "field",
+        "name": "status",
+        "$type": "log",
+        "label": "Activity",
+        "tip": "Connection and transmit log."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Settings",
+    "tip": "Station identity, position, network and filter.",
+    "children": [
+      {
+        "$": "group",
+        "name": "identity",
+        "tip": "Your station.",
+        "children": [
+          {
+            "$": "field",
+            "name": "callsign",
+            "$type": "string",
+            "label": "Callsign",
+            "default": "X16JK8",
+            "tip": "Your amateur callsign with SSID, e.g. N0CALL-9. The APRS-IS passcode is computed from this."
+          },
+          {
+            "$": "field",
+            "name": "symbol",
+            "$type": "string",
+            "label": "Symbol",
+            "default": "/>",
+            "tip": "Two chars: table + code. \"/>\" is a car."
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "position",
+        "tip": "Your position and how far around it to listen.",
+        "children": [
+          { "$": "field", "name": "my_lat", "$type": "string", "label": "Latitude", "default": "38.7223" },
+          { "$": "field", "name": "my_lon", "$type": "string", "label": "Longitude", "default": "-9.1393" },
+          { "$": "field", "name": "radius_km", "$type": "string", "label": "Filter radius (km)", "default": "100" }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "network",
+        "tip": "APRS-IS server and digipeater path.",
+        "children": [
+          { "$": "field", "name": "server", "$type": "string", "label": "APRS-IS server", "default": "rotate.aprs2.net" },
+          { "$": "field", "name": "port", "$type": "string", "label": "Port", "default": "14580" },
+          { "$": "field", "name": "path", "$type": "string", "label": "Digipeater path", "default": "WIDE1-1,WIDE2-1" }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "tags",
+        "children": [
+          { "$": "field", "name": "tags", "$type": "string", "label": "Subscribed tags", "default": "#cq" }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "bluetooth",
+        "tip": "Exchange short APRS messages directly over Bluetooth, off-grid.",
+        "children": [
+          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": false, "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
+          { "$": "field", "name": "ble_relay", "$type": "bool", "label": "Relay Bluetooth ↔ internet", "default": false, "tip": "Bridge frames between BLE-local stations and APRS-IS." },
+          { "$": "action", "name": "ble_apply", "label": "Apply Bluetooth", "style": "primary", "tip": "Start/stop Bluetooth with the settings above." }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "control",
+        "children": [
+          { "$": "action", "name": "connect", "label": "Connect", "style": "primary", "tip": "Connect to APRS-IS and start receiving." },
+          { "$": "action", "name": "disconnect", "label": "Disconnect", "style": "secondary" },
+          { "$": "action", "name": "center", "label": "Center map", "style": "secondary", "tip": "Recenter the map on your position." }
+        ]
+      }
+    ]
+  }
+]
