@@ -117,7 +117,7 @@ static void jesc(char *dst, unsigned m, const char *src) {
 static int   g_sock = -1;
 static int   g_logged = 0;
 static int   g_seq = 1;
-static char  g_call[16] = "X16JK8";
+static char  g_call[16] = "N0CALL";  /* replaced at init by hal_identity() */
 static double g_lat = 0, g_lon = 0;
 static int   g_radius = 100;
 static char  g_symbol[8] = "/>";
@@ -971,6 +971,12 @@ static void ble_reconcile(void) {
 /* ── module entry points ────────────────────────────────────────────── */
 void module_init(void) {
   hal_log(1, "[aprs] init", 11);
+  /* Default callsign = THIS device's profile callsign (so each device
+   * transmits as itself, not a hardcoded one). The user's Settings callsign,
+   * if set, overrides this via read_config. */
+  char id[16];
+  uint32_t n = hal_identity(id, sizeof(id) - 1);
+  if (n > 0 && n < sizeof(id)) { id[n] = 0; if (id[0]) s_cpy(g_call, id, sizeof(g_call)); }
   status("APRS ready - connecting to APRS-IS automatically...");
   /* Ask the host to run our "connect" command with the current settings
    * (auto-connect on load; no manual Connect needed). */

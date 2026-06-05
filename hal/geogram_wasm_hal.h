@@ -44,6 +44,12 @@ void hal_yield(void);
 __attribute__((import_module("hal"), import_name("platform")))
 uint32_t hal_platform(char *buf, uint32_t buf_len);
 
+/* This device's identity (the active profile's callsign) written into buf.
+ * Returns bytes written (0 if none). Use it as the default callsign instead
+ * of hardcoding one, so each device transmits as itself. */
+__attribute__((import_module("hal"), import_name("identity")))
+uint32_t hal_identity(char *buf, uint32_t buf_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);
@@ -142,6 +148,52 @@ int32_t hal_http_status(int32_t request_id);
 /* Free request resources. */
 __attribute__((import_module("hal"), import_name("http_free")))
 void hal_http_free(int32_t request_id);
+
+/* ── Raw TCP socket (async, host network) ───────────────────────────── */
+
+/* Open a TCP connection. Returns a handle (>=0) immediately; the
+ * connection resolves in the background — poll hal_socket_status until it
+ * reports open. Returns -1 on bad arguments. */
+__attribute__((import_module("hal"), import_name("socket_open")))
+int32_t hal_socket_open(const char *host, uint32_t host_len, int32_t port);
+
+/* Connection state: 0 = connecting, 1 = open, 2 = closed or error. */
+__attribute__((import_module("hal"), import_name("socket_status")))
+int32_t hal_socket_status(int32_t handle);
+
+/* Queue bytes for transmission. Returns bytes accepted, or -1 on error. */
+__attribute__((import_module("hal"), import_name("socket_send")))
+int32_t hal_socket_send(int32_t handle, const char *buf, uint32_t len);
+
+/* Drain received bytes into buf. Returns bytes read (0 if none yet). */
+__attribute__((import_module("hal"), import_name("socket_recv")))
+uint32_t hal_socket_recv(int32_t handle, char *buf, uint32_t buf_len);
+
+/* Close the connection and release the handle. */
+__attribute__((import_module("hal"), import_name("socket_close")))
+void hal_socket_close(int32_t handle);
+
+/* ── Synchronous (blocking) socket — for the test runner only ────────── *
+ * The wasm test runner (module_run_tests) is one synchronous call and
+ * can't await the async hal_socket_* above. These blocking variants let
+ * a test connect/write/read within that single call: connect blocks,
+ * `avail` returns kernel-buffered bytes without blocking, and `read`
+ * pulls only what's already buffered. Bound your read loop with
+ * hal_time_ms(). Do NOT use these in normal wapp code — they block. */
+__attribute__((import_module("hal"), import_name("socket_open_sync")))
+int32_t hal_socket_open_sync(const char *host, uint32_t host_len, int32_t port);
+
+__attribute__((import_module("hal"), import_name("socket_avail_sync")))
+int32_t hal_socket_avail_sync(int32_t handle);
+
+__attribute__((import_module("hal"), import_name("socket_read_sync")))
+int32_t hal_socket_read_sync(int32_t handle, char *buf, uint32_t buf_len);
+
+__attribute__((import_module("hal"), import_name("socket_write_sync")))
+int32_t hal_socket_write_sync(int32_t handle, const char *buf, uint32_t len);
+
+__attribute__((import_module("hal"), import_name("socket_close_sync")))
+void hal_socket_close_sync(int32_t handle);
 
 /* ── Process (host subprocess) ──────────────────────────────────────
  *

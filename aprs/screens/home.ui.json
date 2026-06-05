@@ -127,7 +127,7 @@
             "name": "callsign",
             "$type": "string",
             "label": "Callsign",
-            "default": "X16JK8",
+            "default": "",
             "tip": "Your amateur callsign with SSID, e.g. N0CALL-9. The APRS-IS passcode is computed from this."
           },
           {
