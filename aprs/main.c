@@ -359,6 +359,21 @@ static int fseen_has(unsigned h) {
 }
 static void fseen_add(unsigned h) { g_fseen[g_fseen_cnt % 64] = h; g_fseen_cnt++; }
 
+/* BLE mesh repeater: rebroadcast each received frame once, suppressing any
+ * content already repeated within the last 10 minutes (loop/storm control). */
+#define RPT_MAX 64
+static struct { unsigned h; uint64_t t; } g_rpt[RPT_MAX];
+static unsigned g_rpt_cnt = 0;
+static int rpt_recent(unsigned h, uint64_t now) {
+  unsigned n = g_rpt_cnt < RPT_MAX ? g_rpt_cnt : RPT_MAX;
+  for (unsigned i = 0; i < n; i++)
+    if (g_rpt[i].h == h && now - g_rpt[i].t < 600) return 1;
+  return 0;
+}
+static void rpt_mark(unsigned h, uint64_t now) {
+  g_rpt[g_rpt_cnt % RPT_MAX].h = h; g_rpt[g_rpt_cnt % RPT_MAX].t = now; g_rpt_cnt++;
+}
+
 /* Last-known station positions, for the 1:1 distance badge. */
 typedef struct { char call[16]; double lat, lon; int used; } pos_t;
 static pos_t g_pos[64];
@@ -871,6 +886,13 @@ static void ble_handle(const char *compact) {
     if (up(g_call[i]) != up(from[i])) { mine = 0; break; }
   }
   if (mine) return;
+
+  /* Mesh repeater: rebroadcast this frame once (within ~2s, via the advertise
+   * rotation), ignoring content already repeated in the last 10 minutes. */
+  {
+    uint64_t now = hal_time_epoch();
+    if (!rpt_recent(h, now)) { rpt_mark(h, now); ble_send(compact); }
+  }
 
   if (s_eq(to, "!")) {                    /* position: "lat,lon[,comment]" */
     char a[24] = "", b[24] = "", comment[80] = "";
