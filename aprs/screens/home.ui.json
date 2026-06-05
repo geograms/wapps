@@ -172,7 +172,7 @@
         "name": "bluetooth",
         "tip": "Exchange short APRS messages directly over Bluetooth, off-grid.",
         "children": [
-          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": false, "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
+          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": true, "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
           { "$": "field", "name": "ble_relay", "$type": "bool", "label": "Relay Bluetooth ↔ internet", "default": false, "tip": "Bridge frames between BLE-local stations and APRS-IS." },
           { "$": "action", "name": "ble_apply", "label": "Apply Bluetooth", "style": "primary", "tip": "Start/stop Bluetooth with the settings above." }
         ]

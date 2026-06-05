@@ -56,7 +56,9 @@ static int jstr(const char *buf, const char *key, char *out, unsigned m) {
   out[0] = 0; return 0;
 }
 /* read a JSON bool: matches "key":true / "key":1 (host sends bools unquoted) */
-static int jbool(const char *buf, const char *key) {
+/* Parse a boolean field; return `def` when the key is absent (so callers can
+ * have a true default that an explicit "false" still overrides). */
+static int jbool_def(const char *buf, const char *key, int def) {
   char pat[80]; pat[0] = '"'; pat[1] = 0;
   s_cat(pat, key, sizeof(pat)); s_cat(pat, "\":", sizeof(pat));
   unsigned pl = s_len(pat);
@@ -67,8 +69,9 @@ static int jbool(const char *buf, const char *key) {
     p += pl; while (*p == ' ') p++;
     return *p == 't' || *p == '1';
   }
-  return 0;
+  return def;
 }
+static int jbool(const char *buf, const char *key) { return jbool_def(buf, key, 0); }
 static double to_dbl(const char *s) {
   int neg = 0; if (*s == '-') { neg = 1; s++; } else if (*s == '+') s++;
   double v = 0; while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
@@ -128,10 +131,11 @@ static char  g_host[64] = APRS_DEFAULT_HOST;
 static int   g_port = APRS_DEFAULT_PORT;
 static uint64_t g_last_reconnect = 0;
 
-/* BLE transport (shared adapter via hal_ble_*). g_ble_on = exchange enabled;
- * g_ble_relay = bridge frames between BLE and APRS-IS; g_ble_started tracks
- * whether we've told the HAL to scan. */
-static int g_ble_on = 0, g_ble_relay = 0, g_ble_started = 0;
+/* BLE transport (shared adapter via hal_ble_*). g_ble_on = exchange enabled
+ * (on by default — matches the "Exchange over Bluetooth" default in
+ * screens/home.ui.json); g_ble_relay = bridge frames between BLE and APRS-IS;
+ * g_ble_started tracks whether we've told the HAL to scan. */
+static int g_ble_on = 1, g_ble_relay = 0, g_ble_started = 0;
 static uint64_t g_ble_last_beacon = 0;
 /* compact BLE senders, defined with the module entry points */
 static void ble_tx_msg(const char *to, const char *text);
@@ -267,8 +271,11 @@ static void read_config(const char *buf) {
   if (jstr(buf, "symbol", v, sizeof(v)) && s_len(v) >= 2) s_cpy(g_symbol, v, sizeof(g_symbol));
   if (jstr(buf, "path", v, sizeof(v))) s_cpy(g_path, v, sizeof(g_path));
   if (jstr(buf, "beacon_interval", v, sizeof(v)) && v[0]) g_interval = to_int(v);
-  g_ble_on = jbool(buf, "ble_enabled");
-  g_ble_relay = jbool(buf, "ble_relay");
+  /* NOTE: BLE on/off is intentionally NOT read here. read_config runs on
+   * every command (connect, sends, …) and the host serialises an unset
+   * checkbox as false, which would clobber the on-by-default state before the
+   * user ever touches Settings. BLE state is owned by init (default on) and
+   * the explicit "Apply Bluetooth" action instead — see the ble_apply cmd. */
 }
 
 static void do_connect(const char *buf) {
@@ -1095,7 +1102,12 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "prompt")) do_prompt_result(buf);
   else if (s_eq(cmd, "set_radius")) do_set_radius(buf);
   else if (s_eq(cmd, "geochat_send")) do_geochat_send(buf);
-  else if (s_eq(cmd, "ble_apply")) { read_config(buf); ble_reconcile(); }
+  else if (s_eq(cmd, "ble_apply")) {
+    read_config(buf);
+    g_ble_on = jbool_def(buf, "ble_enabled", 1);
+    g_ble_relay = jbool_def(buf, "ble_relay", 0);
+    ble_reconcile();
+  }
   else if (s_eq(cmd, "marker_tap")) {
     char id[24] = ""; jstr(buf, "id", id, sizeof(id));
     char b[64] = "Station: "; s_cat(b, id, sizeof(b)); status(b);
