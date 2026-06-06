@@ -39,6 +39,13 @@ static int is_ack_text(const char *t) {
 }
 
 /* extract "key":"value" from buf; returns 1 if found */
+/* hex digit -> value, or -1 */
+static int hexv(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
 static int jstr(const char *buf, const char *key, char *out, unsigned m) {
   char pat[80]; pat[0] = '"'; pat[1] = 0;
   s_cat(pat, key, sizeof(pat)); s_cat(pat, "\":\"", sizeof(pat));
@@ -49,7 +56,21 @@ static int jstr(const char *buf, const char *key, char *out, unsigned m) {
     if (!ok) continue;
     p += pl; unsigned i = 0;
     while (*p && *p != '"' && i < m - 1) {
-      if (*p == '\\' && *(p + 1)) { p++; out[i++] = *p++; } else out[i++] = *p++;
+      if (*p == '\\' && *(p + 1)) {
+        p++;
+        /* Decode \uXXXX -> one byte. The host JSON-encodes received BLE bytes,
+         * so the 0x1f field separator arrives as ""; without this it was
+         * copied as the literal text "u001f" and frames couldn't be split. */
+        if (*p == 'u' && hexv(p[1]) >= 0 && hexv(p[2]) >= 0 &&
+            hexv(p[3]) >= 0 && hexv(p[4]) >= 0) {
+          int v = (hexv(p[1]) << 12) | (hexv(p[2]) << 8) |
+                  (hexv(p[3]) << 4) | hexv(p[4]);
+          p += 5;
+          out[i++] = (char)(v & 0xff);
+        } else {
+          out[i++] = *p++;
+        }
+      } else out[i++] = *p++;
     }
     out[i] = 0; return 1;
   }
@@ -169,6 +190,25 @@ static void status(const char *text) {
   char m[400] = "{\"type\":\"ui.log.append\",\"field\":\"status\",\"line\":\"";
   jesc(m, sizeof(m), text);
   s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Persistent transport indicators on the map (replaces flickering toasts):
+ * APRS-IS connected? and BLE active? Pushed only when a value changes, so a
+ * flapping link never spams. -1 = nothing pushed yet. */
+static int g_ind_net = -1, g_ind_ble = -1;
+static void push_status(void) {
+  int net = (g_sock >= 0 && g_logged) ? 1 : 0;
+  int ble = g_ble_on ? 1 : 0;
+  if (net == g_ind_net && ble == g_ind_ble) return;
+  g_ind_net = net; g_ind_ble = ble;
+  char m[256];
+  s_cpy(m, "{\"type\":\"ui.map.status\",\"items\":["
+           "{\"id\":\"aprsis\",\"label\":\"APRS-IS\",\"on\":", sizeof(m));
+  s_cat(m, net ? "true" : "false", sizeof(m));
+  s_cat(m, "},{\"id\":\"ble\",\"label\":\"BLE\",\"on\":", sizeof(m));
+  s_cat(m, ble ? "true" : "false", sizeof(m));
+  s_cat(m, "}]}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 
@@ -356,15 +396,46 @@ static int seen_has(unsigned h) {
 static void seen_add(unsigned h) { g_seen[g_seen_cnt % 128] = h; g_seen_cnt++; }
 
 /* Separate raw-frame dedup (cross-transport + relay loop guard), kept apart
- * from the conversation seen-ring above so it can't evict pin-detection keys. */
-static unsigned g_fseen[64];
-static unsigned g_fseen_cnt = 0;
+ * from the conversation seen-ring above so it can't evict pin-detection keys.
+ * Time-windowed: a frame is suppressed for FSEEN_WINDOW after it is first seen,
+ * so a message re-broadcast many times (BLE adverts repeat for their TTL, and
+ * the mesh relays them) is shown only once. A plain count ring evicted recent
+ * hashes once enough other frames arrived, letting duplicates reappear. */
+#define FSEEN_MAX 256
+#define FSEEN_WINDOW 3600   /* 60 minutes */
+static struct { unsigned h; uint64_t t; } g_fseen[FSEEN_MAX];
 static int fseen_has(unsigned h) {
-  unsigned n = g_fseen_cnt < 64 ? g_fseen_cnt : 64;
-  for (unsigned i = 0; i < n; i++) if (g_fseen[i] == h) return 1;
+  uint64_t now = hal_time_epoch();
+  for (unsigned i = 0; i < FSEEN_MAX; i++)
+    if (g_fseen[i].t && g_fseen[i].h == h && now - g_fseen[i].t < FSEEN_WINDOW)
+      return 1;
   return 0;
 }
-static void fseen_add(unsigned h) { g_fseen[g_fseen_cnt % 64] = h; g_fseen_cnt++; }
+static void fseen_add(unsigned h) {
+  uint64_t now = hal_time_epoch();
+  unsigned oldest = 0;
+  for (unsigned i = 0; i < FSEEN_MAX; i++) {
+    /* reuse a free or expired slot so an hour of distinct frames can't evict
+     * still-valid entries */
+    if (!g_fseen[i].t || now - g_fseen[i].t >= FSEEN_WINDOW) {
+      g_fseen[i].h = h; g_fseen[i].t = now; return;
+    }
+    if (g_fseen[i].t < g_fseen[oldest].t) oldest = i;
+  }
+  g_fseen[oldest].h = h; g_fseen[oldest].t = now;  /* all fresh: drop oldest */
+}
+
+/* Content dedup for the Live/Beacons geo-chat. The same message reaches us as
+ * different raw frames — over BLE and over APRS-IS — and APRS-IS itself can
+ * deliver duplicates via multiple IGates, so the per-frame fseen ring above
+ * can't catch them. Dedup on sender+text (transport-independent) so a message
+ * shows once per 60 min. Returns 1 if it's a duplicate to drop. */
+static int geo_dup(const char *from, const char *text) {
+  unsigned h = sig_hash("g", from, text);
+  if (fseen_has(h)) return 1;
+  fseen_add(h);
+  return 0;
+}
 
 /* BLE mesh repeater: rebroadcast each received frame once, suppressing any
  * content already repeated within the last 10 minutes (loop/storm control). */
@@ -836,7 +907,8 @@ static void route_frame(const char *line) {
     if (convo_known(p.from)) convo_badge_only(p.from);
     if (p.comment[0]) {
       char meta[24] = ""; distance_to(p.lat, p.lon, meta, sizeof(meta));
-      chat_append("geochat", "", "in", p.from, p.comment, "pos", 0, meta, p.lat, p.lon);
+      if (!geo_dup(p.from, p.comment))
+        chat_append("geochat", "", "in", p.from, p.comment, "pos", 0, meta, p.lat, p.lon);
     }
   } else if (p.type == APRS_MESSAGE) {
     if (p.text[0] && !is_ack_text(p.text)) {
@@ -852,7 +924,8 @@ static void route_frame(const char *line) {
       } else {
         char meta[24] = ""; double slat = 0, slon = 0;
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
-        chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon);
+        if (!geo_dup(p.from, p.text))
+          chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon);
         int amine = 1;
         for (int i = 0; g_call[i] || p.addressee[i]; i++) {
           if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
@@ -917,7 +990,8 @@ static void ble_handle(const char *compact) {
     if (convo_known(from)) convo_badge_only(from);
     if (comment[0]) {
       char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
-      chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon);
+      if (!geo_dup(from, comment))
+        chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon);
     }
   } else if (to[0] == '#') {              /* group */
     char preview[120] = ""; s_cpy(preview, from, sizeof(preview));
@@ -932,7 +1006,8 @@ static void ble_handle(const char *compact) {
   } else if (!to[0]) {                    /* area / geo-chat broadcast text */
     char meta[24] = ""; double slat = 0, slon = 0;
     if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
-    chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
+    if (!geo_dup(from, text))
+      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
   } else {                               /* 1:1 to a callsign */
     int amine = 1;
     for (int i = 0; g_call[i] || to[i]; i++) {
@@ -943,7 +1018,8 @@ static void ble_handle(const char *compact) {
     } else {
       char meta[24] = ""; double slat = 0, slon = 0;
       if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
-      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
+      if (!geo_dup(from, text))
+        chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
     }
     if (g_ble_relay && g_logged) {
       char line[260]; aprs_build_message(line, sizeof(line), from, to, text, 0);
@@ -988,6 +1064,7 @@ void module_tick(void) {
   /* BLE runs independently of the internet link (off-grid). Reconcile the
    * scan/advertise state, drain inbound frames, and beacon our position. */
   ble_reconcile();
+  push_status();   /* refresh APRS-IS / BLE indicators (only on change) */
   if (g_ble_on) {
     char rec[400];
     for (int guard = 0; guard < 20; guard++) {
@@ -1026,7 +1103,8 @@ void module_tick(void) {
       char b[64] = "Connected. passcode "; char nb[16];
       { int v = pass, j = 0; char t[12]; if (v == 0) t[j++]='0'; while (v>0){t[j++]=(char)('0'+v%10);v/=10;} int k=0; while(j>0)nb[k++]=t[--j]; nb[k]=0; }
       s_cat(b, nb, sizeof(b)); status(b);
-      notify("success", "Connected to APRS-IS");
+      /* No toast on (re)connect — the APRS-IS indicator shows the state and a
+       * flapping link would otherwise flicker notifications. */
       center_map();
       push_radius();
     } else if (st == 2) {
@@ -1041,7 +1119,7 @@ void module_tick(void) {
   if (hal_socket_status(g_sock) == 2) {
     aprs_disconnect(g_sock); g_sock = -1; g_logged = 0;
     status("Connection lost - reconnecting...");
-    notify("warning", "APRS-IS connection lost; reconnecting");
+    /* No toast — the APRS-IS indicator turns grey; reconnection is automatic. */
     return;
   }
 
