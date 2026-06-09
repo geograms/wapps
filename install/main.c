@@ -190,10 +190,12 @@ static void parse_sources_raw(void) {
 
 /* Default catalog source when no user configuration exists yet. The
  * Settings tab can add or replace it; this is just the seed so a
- * fresh install isn't staring at an empty catalog. The user-facing
- * github.com tree URL is converted to the raw form at fetch time
- * (see github_tree_to_raw below). */
-#define DEFAULT_SOURCE "https://github.com/geograms/wapps/tree/main/binaries"
+ * fresh install isn't staring at an empty catalog. Self-hosted on
+ * geogram.radio (no github.com dependency) — the store appends
+ * "/index.json" and downloads "<base>/<file>" for each wapp. A
+ * github.com tree URL, if ever configured, is still converted to the
+ * raw form at fetch time (see github_tree_to_raw below). */
+#define DEFAULT_SOURCE "https://geogram.radio/wapps"
 
 static void load_sources(void) {
     uint32_t n = hal_kv_get("source", 6, sources_raw, sizeof(sources_raw) - 1);
