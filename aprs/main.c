@@ -226,9 +226,13 @@ static void fmt_time(char *b) {
  * bulletin room). Pass "" for the geo-chat feed (it isn't grouped). */
 /* fwd decl: append "lat":..,"lon":.. when known */
 static void cat_pos(char *m, unsigned sz, double lat, double lon);
+/* via: transport the message arrived on ("BLE"/"NET"); "" for our own sends.
+ * The host renders it as a small origin chip so users can tell where a
+ * received message came from. */
 static void chat_append(const char *field, const char *convo, const char *dir,
                         const char *from, const char *text, const char *kind,
-                        int recur, const char *meta, double lat, double lon) {
+                        int recur, const char *meta, double lat, double lon,
+                        const char *via) {
   char t[8]; fmt_time(t);
   char m[500] = "{\"type\":\"ui.chat.append\",\"field\":\"";
   s_cat(m, field, sizeof(m));
@@ -239,8 +243,13 @@ static void chat_append(const char *field, const char *convo, const char *dir,
   s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), text);
   s_cat(m, "\",\"kind\":\"", sizeof(m)); s_cat(m, kind, sizeof(m));
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
-  if (recur) s_cat(m, "\",\"recur\":true,\"time\":\"", sizeof(m));
-  else s_cat(m, "\",\"time\":\"", sizeof(m));
+  s_cat(m, "\"", sizeof(m));
+  if (via && via[0]) {
+    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
+    s_cat(m, "\"", sizeof(m));
+  }
+  if (recur) s_cat(m, ",\"recur\":true,\"time\":\"", sizeof(m));
+  else s_cat(m, ",\"time\":\"", sizeof(m));
   s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
   s_cat(m, "}}", sizeof(m));
@@ -437,6 +446,30 @@ static int geo_dup(const char *from, const char *text) {
   return 0;
 }
 
+/* Popup notification for an incoming chat message. Only for: Live-tab geo-chat
+ * messages, direct messages addressed to us, and group/bulletin messages for a
+ * group we are subscribed to (i.e. in our conversation list). NOT beacons. The
+ * host shows it as a system notification when we're in the background (so the
+ * user is alerted with the screen off / app closed) and an in-app card when the
+ * page is open. Content-deduped (own ring) so the same message arriving via both
+ * APRS-IS and BLE — or a repeated bulletin — pops only once. */
+static int notif_dup(const char *from, const char *text) {
+  unsigned h = sig_hash("ntf", from, text);
+  if (fseen_has(h)) return 1;
+  fseen_add(h);
+  return 0;
+}
+static void notify_msg(const char *title, const char *from, const char *text,
+                       const char *body) {
+  if (notif_dup(from, text)) return;
+  char m[480] = "{\"type\":\"notify\",\"level\":\"info\",\"title\":\"";
+  jesc(m, sizeof(m), title);
+  s_cat(m, "\",\"body\":\"", sizeof(m));
+  jesc(m, sizeof(m), body);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
 /* BLE mesh repeater: rebroadcast each received frame once, suppressing any
  * content already repeated within the last 10 minutes (loop/storm control). */
 #define RPT_MAX 64
@@ -522,7 +555,7 @@ static void cat_pos(char *m, unsigned sz, double lat, double lon) {
 }
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
-                      double lat, double lon) {
+                      double lat, double lon, const char *via) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -531,14 +564,19 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), text);
   s_cat(m, "\",\"key\":\"", sizeof(m)); s_cat(m, key, sizeof(m));
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
-  s_cat(m, "\",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
+  s_cat(m, "\"", sizeof(m));
+  if (via && via[0]) {
+    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
+    s_cat(m, "\"", sizeof(m));
+  }
+  s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void convo_pin(const char *id, const char *key, const char *dir,
                       const char *from, const char *text, const char *meta,
-                      double lat, double lon) {
+                      double lat, double lon, const char *via) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.pin\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -547,7 +585,12 @@ static void convo_pin(const char *id, const char *key, const char *dir,
   s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
   s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), text);
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
-  s_cat(m, "\",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
+  s_cat(m, "\"", sizeof(m));
+  if (via && via[0]) {
+    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
+    s_cat(m, "\"", sizeof(m));
+  }
+  s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
@@ -592,7 +635,8 @@ static void convo_badge_only(const char *id) {
  * ignored as updates of the same pin). [forcePin] is set for our own
  * recurring sends (pinned from the first beat). */
 static void convo_deliver(const char *id, const char *dir, const char *from,
-                          const char *text, const char *preview, int forcePin) {
+                          const char *text, const char *preview, int forcePin,
+                          const char *via) {
   unsigned h = sig_hash(id, from, text);
   char key[16]; u_itoa(h, key);
   /* Distance + position of the sender (incoming only), so the host can show
@@ -604,8 +648,8 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   }
   int rep = seen_has(h);
   if (!rep) seen_add(h);
-  if (forcePin || rep) convo_pin(id, key, dir, from, text, meta, lat, lon);
-  else convo_msg(id, dir, from, text, key, meta, lat, lon);
+  if (forcePin || rep) convo_pin(id, key, dir, from, text, meta, lat, lon, via);
+  else convo_msg(id, dir, from, text, key, meta, lat, lon, via);
   convo_touch(id, preview, 0);
 }
 
@@ -635,7 +679,7 @@ static void do_convo_send(const char *buf) {
     if (net) aprs_send_message_multi(g_sock, g_call, id, text, APRS_MAX_MSG_LEN, &g_seq);
   }
   if (g_ble_on) ble_tx_msg(id, text);   /* compact BLE: to = callsign or #group */
-  convo_deliver(id, "out", g_call, text, text, 0);
+  convo_deliver(id, "out", g_call, text, text, 0, "");
   status(loc ? "TX message + position" : "TX message");
 }
 
@@ -696,7 +740,7 @@ static void do_geochat_send(const char *buf) {
   char echo[420];
   s_cpy(echo, ">>", sizeof(echo));
   s_cat(echo, body, sizeof(echo));
-  chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", 0, 0);
+  chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", 0, 0, "");
   status("TX geo-chat");
 }
 
@@ -709,7 +753,7 @@ static void recur_broadcast(recur_t *r) {
   for (int i = 0; r->group[i] && j < 39; i++) convo[j++] = r->group[i];
   convo[j] = 0;
   if (g_ble_on) ble_tx_msg(convo, r->text);
-  convo_deliver(convo, "out", g_call, r->text, r->text, 1);
+  convo_deliver(convo, "out", g_call, r->text, r->text, 1, "");
 }
 
 /* Begin a recurring bulletin into [group] (re-broadcast every 5 min for
@@ -908,7 +952,7 @@ static void route_frame(const char *line) {
     if (p.comment[0]) {
       char meta[24] = ""; distance_to(p.lat, p.lon, meta, sizeof(meta));
       if (!geo_dup(p.from, p.comment))
-        chat_append("geochat", "", "in", p.from, p.comment, "pos", 0, meta, p.lat, p.lon);
+        chat_append("geochat", "", "in", p.from, p.comment, "pos", 0, meta, p.lat, p.lon, "NET");
     }
   } else if (p.type == APRS_MESSAGE) {
     if (p.text[0] && !is_ack_text(p.text)) {
@@ -919,18 +963,21 @@ static void route_frame(const char *line) {
         convo[j] = 0;
         char preview[120] = ""; s_cpy(preview, p.from, sizeof(preview));
         s_cat(preview, ": ", sizeof(preview)); s_cat(preview, p.text, sizeof(preview));
-        convo_deliver(convo, "in", p.from, p.text, preview, 0);
+        convo_deliver(convo, "in", p.from, p.text, preview, 0, "NET");
+        if (convo_known(convo)) notify_msg(convo, p.from, p.text, preview);
         if (g_ble_relay && g_ble_on) ble_tx_from(p.from, convo, p.text);
       } else {
         char meta[24] = ""; double slat = 0, slon = 0;
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
         if (!geo_dup(p.from, p.text))
-          chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon);
+          chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon, "NET");
         int amine = 1;
         for (int i = 0; g_call[i] || p.addressee[i]; i++) {
           if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
         }
-        if (amine) convo_deliver(p.from, "in", p.from, p.text, p.text, 0);
+        if (amine) convo_deliver(p.from, "in", p.from, p.text, p.text, 0, "NET");
+        /* Direct message to us, or a message on the Live tab — pop a notice. */
+        notify_msg(p.from, p.from, p.text, p.text);
         if (g_ble_relay && g_ble_on) ble_tx_from(p.from, p.addressee, p.text);
       }
     }
@@ -991,12 +1038,13 @@ static void ble_handle(const char *compact) {
     if (comment[0]) {
       char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
       if (!geo_dup(from, comment))
-        chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon);
+        chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon, "BLE");
     }
   } else if (to[0] == '#') {              /* group */
     char preview[120] = ""; s_cpy(preview, from, sizeof(preview));
     s_cat(preview, ": ", sizeof(preview)); s_cat(preview, text, sizeof(preview));
-    convo_deliver(to, "in", from, text, preview, 0);
+    convo_deliver(to, "in", from, text, preview, 0, "BLE");
+    if (convo_known(to)) notify_msg(to, from, text, preview);
     if (g_ble_relay && g_logged) {
       char line[260]; aprs_build_bulletin(line, sizeof(line), from, to + 1, '0', text);
       char tp[340]; s_cpy(tp, g_call, sizeof(tp));
@@ -1007,20 +1055,23 @@ static void ble_handle(const char *compact) {
     char meta[24] = ""; double slat = 0, slon = 0;
     if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
     if (!geo_dup(from, text))
-      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
+      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
+    notify_msg(from, from, text, text);   /* message on the Live tab */
   } else {                               /* 1:1 to a callsign */
     int amine = 1;
     for (int i = 0; g_call[i] || to[i]; i++) {
       if (up(g_call[i]) != up(to[i])) { amine = 0; break; }
     }
     if (amine) {
-      convo_deliver(from, "in", from, text, text, 0);
+      convo_deliver(from, "in", from, text, text, 0, "BLE");
     } else {
       char meta[24] = ""; double slat = 0, slon = 0;
       if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
       if (!geo_dup(from, text))
-        chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon);
+        chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
     }
+    /* Direct message to us, or a message shown on the Live tab — pop a notice. */
+    notify_msg(from, from, text, text);
     if (g_ble_relay && g_logged) {
       char line[260]; aprs_build_message(line, sizeof(line), from, to, text, 0);
       char tp[340]; s_cpy(tp, g_call, sizeof(tp));
