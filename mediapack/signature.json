@@ -1,0 +1,43 @@
+{
+  "schema": "geogram.wapp.signature/1",
+  "wapp_id": "radio.geogram.mediapack",
+  "wapp_version": "1.0.0",
+  "signed_at": 1780402242,
+  "publisher_npub": "npub1d34f2e57kyvplrv5wkf3uyfs8l5hak7fev2qe76z584wly6c2akqh8k824",
+  "publisher_hex": "6c6a95669eb1181f8d9475931e11303fe97edbc9cb140cfb42a1eaef9358576c",
+  "hash_algo": "sha256",
+  "manifest_digest_hex": "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851",
+  "hashes": {
+    "manifest.json": "efecf478a177bd4d6bd943a1e020a3cd53a24844c12100de3586b59a406826e8"
+  },
+  "event": {
+    "id": "5d6d3128d7e566bbe1e1cc5e6b9e88cead83252a8678466d340a20ad2c24f656",
+    "pubkey": "6c6a95669eb1181f8d9475931e11303fe97edbc9cb140cfb42a1eaef9358576c",
+    "created_at": 1780402242,
+    "kind": 30078,
+    "tags": [
+      [
+        "d",
+        "geogram.wapp:radio.geogram.mediapack"
+      ],
+      [
+        "t",
+        "geogram-wapp-signature"
+      ],
+      [
+        "wapp_id",
+        "radio.geogram.mediapack"
+      ],
+      [
+        "wapp_version",
+        "1.0.0"
+      ],
+      [
+        "manifest_digest",
+        "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851"
+      ]
+    ],
+    "content": "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851",
+    "sig": "c576c79eaf9e6ee019fb0ea22734c88563721735be49f7ffca5ed98934382fa9e84aad3d175ace44936b301ec48284adaa1ef6c43d601e37e6809a9e2c2c20bd"
+  }
+}

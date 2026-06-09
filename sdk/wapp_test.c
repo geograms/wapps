@@ -169,6 +169,26 @@ static int32_t read_req_id(void) {
     return (int32_t)v;
 }
 
+/* 1 if `name` appears as a comma-separated token in `csv`. Used to
+ * skip cases the editor disabled (csv comes from KV "test.disabled"). */
+static int name_in_csv(const char *name, const char *csv) {
+    unsigned nl = 0; while (name[nl]) nl++;
+    const char *p = csv;
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        unsigned len = (unsigned)(p - start);
+        if (len == nl) {
+            int eq = 1;
+            for (unsigned i = 0; i < len; i++)
+                if (start[i] != name[i]) { eq = 0; break; }
+            if (eq) return 1;
+        }
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
 /* ── Main entry — exported as module_run_tests ──────────────────── */
 
 __attribute__((export_name("module_run_tests")))
@@ -179,6 +199,13 @@ void module_run_tests(void) {
     int32_t req_id = read_req_id();
     int passed = 0;
     int failed = 0;
+    int skipped = 0;
+
+    /* Cases the editor disabled — CSV of names in KV "test.disabled". */
+    static char disabled[512];
+    uint32_t dn = hal_kv_get("test.disabled", 13, disabled, sizeof(disabled) - 1);
+    if (dn >= sizeof(disabled)) dn = sizeof(disabled) - 1;
+    disabled[dn] = '\0';
 
     uint64_t t0 = hal_time_ms();
 
@@ -189,11 +216,14 @@ void module_run_tests(void) {
     for (; p < end; p++) {
         derive_suite(p->file, suite, sizeof(suite));
 
+        int is_skip = disabled[0] &&
+                      name_in_csv(p->name ? p->name : "?", disabled);
+
         WappTestCtx ctx = { .passed = 1 };
         ctx.error[0] = '\0';
 
         uint64_t case_t0 = hal_time_ms();
-        if (p->fn) p->fn(&ctx);
+        if (!is_skip && p->fn) p->fn(&ctx);
         uint64_t case_dur = hal_time_ms() - case_t0;
 
         unsigned o = 0;
@@ -205,8 +235,10 @@ void module_run_tests(void) {
         o = strcpy_into(",\"name\":", buf, o, sizeof(buf));
         o = json_str(p->name ? p->name : "?", buf, o, sizeof(buf));
         o = strcpy_into(",\"passed\":", buf, o, sizeof(buf));
-        o = strcpy_into(ctx.passed ? "true" : "false",
+        o = strcpy_into((is_skip || ctx.passed) ? "true" : "false",
                          buf, o, sizeof(buf));
+        o = strcpy_into(",\"skipped\":", buf, o, sizeof(buf));
+        o = strcpy_into(is_skip ? "true" : "false", buf, o, sizeof(buf));
         o = strcpy_into(",\"duration_ms\":", buf, o, sizeof(buf));
         o += u64_to_dec(case_dur, buf + o, sizeof(buf) - o);
         o = strcpy_into(",\"error\":", buf, o, sizeof(buf));
@@ -219,8 +251,9 @@ void module_run_tests(void) {
 
         hal_msg_send(buf, o);
 
-        if (ctx.passed) passed++;
-        else            failed++;
+        if (is_skip)        skipped++;
+        else if (ctx.passed) passed++;
+        else                 failed++;
     }
 
     uint64_t total_dur = hal_time_ms() - t0;
@@ -233,6 +266,8 @@ void module_run_tests(void) {
     o += wapp__itoa(passed, buf + o, sizeof(buf) - o);
     o = strcpy_into(",\"failed\":", buf, o, sizeof(buf));
     o += wapp__itoa(failed, buf + o, sizeof(buf) - o);
+    o = strcpy_into(",\"skipped\":", buf, o, sizeof(buf));
+    o += wapp__itoa(skipped, buf + o, sizeof(buf) - o);
     o = strcpy_into(",\"duration_ms\":", buf, o, sizeof(buf));
     o += u64_to_dec(total_dur, buf + o, sizeof(buf) - o);
     o = strcpy_into(",\"error\":null}", buf, o, sizeof(buf));
