@@ -310,6 +310,20 @@ static void clear_area(void) {
   hal_msg_send(b, s_len(b));
 }
 
+/* Ask the host to replay archived Live geo-chat for the current area into the
+ * Live tab. The host persists every geo-tagged Live message and answers this
+ * by centre+radius, so opening the wapp (or changing the radius) brings back
+ * the older messages that happened in the selected region. */
+static void request_history(void) {
+  char m[200] = "{\"type\":\"ui.chat.history\",\"field\":\"geochat\",\"lat\":";
+  append_dbl(m, sizeof(m), g_lat);
+  s_cat(m, ",\"lon\":", sizeof(m)); append_dbl(m, sizeof(m), g_lon);
+  s_cat(m, ",\"radius_km\":", sizeof(m));
+  { char nb[12]; u_itoa((unsigned)g_radius, nb); s_cat(m, nb, sizeof(m)); }
+  s_cat(m, ",\"limit\":200}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
 /* read shared config from a command's bundled fields */
 static void read_config(const char *buf) {
   char v[64];
@@ -329,6 +343,7 @@ static void read_config(const char *buf) {
 
 static void do_connect(const char *buf) {
   read_config(buf);
+  request_history();   /* bring back this area's older Live messages on open */
   s_cpy(g_host, APRS_DEFAULT_HOST, sizeof(g_host));
   g_port = APRS_DEFAULT_PORT;
   char v[64];
@@ -692,6 +707,7 @@ static void do_set_radius(const char *buf) {
   if (g_radius < 1) g_radius = 1;
   clear_area();
   push_radius();
+  request_history();   /* reload archived Live messages for the new area */
   if (g_sock >= 0) {
     aprs_disconnect(g_sock);
     char host[64] = APRS_DEFAULT_HOST; int port = APRS_DEFAULT_PORT;
@@ -740,7 +756,9 @@ static void do_geochat_send(const char *buf) {
   char echo[420];
   s_cpy(echo, ">>", sizeof(echo));
   s_cat(echo, body, sizeof(echo));
-  chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", 0, 0, "");
+  /* Geo-tag our own message with our position so it is archived for this
+   * area and reappears in the Live history later. */
+  chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", g_lat, g_lon, "");
   status("TX geo-chat");
 }
 

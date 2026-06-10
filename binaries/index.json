@@ -1,5 +1,6 @@
 [
   {"file":"app-creator/app-creator-0.3.4.wapp","id":"tools.geogram.app-creator","version":"0.3.4","size":42300,"title":"App Creator","description":"Write, compile and install C wapps without leaving geogram."},
+  {"file":"aprs/aprs-0.2.2.wapp","id":"tools.geogram.aprs","version":"0.2.2","size":65734,"title":"APRS","description":"APRS station — map, messenger, beacons over APRS-IS."},
   {"file":"forum/forum-0.1.0.wapp","id":"tools.geogram.forum","version":"0.1.0","size":34025,"title":"Forum","description":"Browse and post in forum collections."},
   {"file":"functionalities/functionalities-1.0.1.wapp","id":"tools.geogram.functionalities","version":"1.0.1","size":8633,"title":"Functionalities","description":"Browse registered functionalities and pick default providers."},
   {"file":"install/install-1.1.4.wapp","id":"tools.geogram.install","version":"1.1.4","size":29519,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
