@@ -187,5 +187,30 @@
         ]
       }
     ]
+  },
+  {
+    "$": "screen",
+    "name": "Tools",
+    "tip": "Network tools — ping the local Bluetooth mesh to test reach.",
+    "children": [
+      {
+        "$": "group",
+        "name": "ping_group",
+        "tip": "Ping nearby stations over Bluetooth; each digipeater replies with its callsign, hop count and location.",
+        "children": [
+          {
+            "$": "field", "name": "ping_ttl", "$type": "enum", "label": "Max hops", "default": "3",
+            "children": [
+              { "$": "option", "name": "1", "label": "1" },
+              { "$": "option", "name": "2", "label": "2" },
+              { "$": "option", "name": "3", "label": "3" },
+              { "$": "option", "name": "4", "label": "4" }
+            ]
+          },
+          { "$": "action", "name": "ping", "label": "Send ping", "style": "primary", "tip": "Broadcast a BLE ping; nearby stations reply with callsign, hops and location." }
+        ]
+      },
+      { "$": "field", "name": "pingresults", "$type": "log", "label": "Responses", "tip": "Stations that answered, with hop count and distance." }
+    ]
   }
 ]

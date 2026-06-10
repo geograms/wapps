@@ -162,6 +162,20 @@ static uint64_t g_ble_last_beacon = 0;
 static void ble_tx_msg(const char *to, const char *text);
 static void ble_tx_pos(double lat, double lon, const char *comment);
 
+/* ── BLE ping (Tools tab): local reach test across digipeaters ──────────
+ * A ping is a BLE-only broadcast (never APRS-IS, never shown on the Live
+ * feed). Every BLE station answers once with its callsign + position and
+ * forwards the ping (ttl) so it travels further; replies are forwarded back
+ * (pttl) so multi-hop responders still reach the pinger. */
+#define PING_TO "?PING"
+#define PONG_TO "?PONG"
+#define PING_DEFAULT_TTL 3
+#define GPS_NA (-2147483647 - 1)   /* hal_sensor_gps_* "unavailable" sentinel */
+static int      g_ping_active = 0;   /* collecting replies for our ping */
+static unsigned g_ping_id = 0;
+static uint64_t g_ping_start = 0;
+static unsigned g_ping_seq = 0;
+
 /* Recurring group bulletins: re-broadcast the same text every 5 minutes
  * for a chosen period (APRS is transient and most clients keep no history,
  * so periodic re-sends let late joiners catch important news). In-memory:
@@ -1011,6 +1025,184 @@ static void route_frame(const char *line) {
 }
 
 /* Handle one compact frame received over BLE; bridge to APRS-IS when relaying. */
+/* ── Ping reach-test helpers ──────────────────────────────────────────── */
+
+/* Per-id / per-(responder,id) dedup so each station answers + forwards a
+ * given ping once, and forwards each pong once. */
+#define PSEEN_MAX 96
+static unsigned g_pseen[PSEEN_MAX];
+static unsigned g_pseen_cnt = 0;
+static int pseen_has(unsigned h) {
+  unsigned n = g_pseen_cnt < PSEEN_MAX ? g_pseen_cnt : PSEEN_MAX;
+  for (unsigned i = 0; i < n; i++) if (g_pseen[i] == h) return 1;
+  return 0;
+}
+static void pseen_add(unsigned h) { g_pseen[g_pseen_cnt % PSEEN_MAX] = h; g_pseen_cnt++; }
+
+/* Deferred digipeat queue: instead of rebroadcasting a received frame
+ * immediately, hold it a short, per-frame-staggered delay (a few ticks) and
+ * re-advertise when due. The stagger (derived from the frame hash so peers
+ * pick different delays) cuts collisions and widens effective reach. */
+#define RQ_MAX 16
+static struct { char frame[300]; uint64_t due; int used; } g_rq[RQ_MAX];
+static void rq_push(const char *frame, uint64_t due) {
+  for (int i = 0; i < RQ_MAX; i++)
+    if (!g_rq[i].used) { s_cpy(g_rq[i].frame, frame, sizeof(g_rq[i].frame)); g_rq[i].due = due; g_rq[i].used = 1; return; }
+  /* queue full: drop (storm protection) */
+}
+static void rq_flush(uint64_t now) {
+  for (int i = 0; i < RQ_MAX; i++)
+    if (g_rq[i].used && now >= g_rq[i].due) { ble_send(g_rq[i].frame); g_rq[i].used = 0; }
+}
+
+/* Best position: live device GPS (hal_sensor_gps_*) if the host provides it,
+ * else the configured station position. Returns 1 when a position is known. */
+static int my_position(double *lat, double *lon) {
+  int32_t la = hal_sensor_gps_lat();
+  int32_t lo = hal_sensor_gps_lon();
+  if (la != GPS_NA && lo != GPS_NA) {
+    *lat = (double)la / 1e7; *lon = (double)lo / 1e7; return 1;
+  }
+  if (g_lat != 0.0 || g_lon != 0.0) { *lat = g_lat; *lon = g_lon; return 1; }
+  *lat = 0; *lon = 0; return 0;
+}
+
+/* Append one line to a $type:"log" field. */
+static void log_line(const char *field, const char *text) {
+  char m[400] = "{\"type\":\"ui.log.append\",\"field\":\"";
+  s_cat(m, field, sizeof(m));
+  s_cat(m, "\",\"line\":\"", sizeof(m));
+  jesc(m, sizeof(m), text);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Extract the idx-th comma-separated field of s into out (NUL-terminated). */
+static void csv_field(const char *s, int idx, char *out, unsigned osz) {
+  out[0] = 0;
+  int f = 0;
+  const char *start = s;
+  for (const char *p = s;; p++) {
+    if (*p == ',' || *p == 0) {
+      if (f == idx) {
+        unsigned n = (unsigned)(p - start);
+        if (n >= osz) n = osz - 1;
+        for (unsigned i = 0; i < n; i++) out[i] = start[i];
+        out[n] = 0;
+        return;
+      }
+      if (*p == 0) return;
+      f++; start = p + 1;
+    }
+  }
+}
+
+/* Inbound ping: answer once with our callsign + position, then forward it on
+ * (ttl) so it reaches further stations. text = "id,ttl,hops". */
+static void handle_ping(const char *from, const char *text) {
+  char ids[16], ttls[8], hopss[8];
+  csv_field(text, 0, ids, sizeof(ids));
+  csv_field(text, 1, ttls, sizeof(ttls));
+  csv_field(text, 2, hopss, sizeof(hopss));
+  if (!ids[0]) return;
+  unsigned key = sig_hash("P", "", ids);
+  if (pseen_has(key)) return;
+  pseen_add(key);
+  int ttl = to_int(ttls), hops = to_int(hopss);
+  if (hops < 0) hops = 0;
+
+  /* reply "id,hops,lat,lon,pttl" (lat/lon empty when unknown) */
+  double la, lo; int have = my_position(&la, &lo);
+  char body[96] = ""; s_cat(body, ids, sizeof(body)); s_cat(body, ",", sizeof(body));
+  { char t[8]; u_itoa((unsigned)hops, t); s_cat(body, t, sizeof(body)); }
+  s_cat(body, ",", sizeof(body));
+  if (have) append_dbl(body, sizeof(body), la);
+  s_cat(body, ",", sizeof(body));
+  if (have) append_dbl(body, sizeof(body), lo);
+  s_cat(body, ",", sizeof(body));
+  { char t[8]; u_itoa((unsigned)PING_DEFAULT_TTL, t); s_cat(body, t, sizeof(body)); }
+  ble_tx_from(g_call, PONG_TO, body);
+
+  if (ttl > 1) {     /* digipeat the ping further */
+    char fwd[40] = ""; s_cat(fwd, ids, sizeof(fwd)); s_cat(fwd, ",", sizeof(fwd));
+    { char t[8]; u_itoa((unsigned)(ttl - 1), t); s_cat(fwd, t, sizeof(fwd)); }
+    s_cat(fwd, ",", sizeof(fwd));
+    { char t[8]; u_itoa((unsigned)(hops + 1), t); s_cat(fwd, t, sizeof(fwd)); }
+    ble_tx_from(from, PING_TO, fwd);   /* keep the original pinger as 'from' */
+  }
+}
+
+/* Inbound pong: if it answers our active ping, list it + drop a map marker;
+ * forward it back across the mesh (pttl). text = "id,hops,lat,lon,pttl". */
+static void handle_pong(const char *from, const char *text) {
+  char ids[16], hopss[8], las[24], los[24], pttls[8];
+  csv_field(text, 0, ids, sizeof(ids));
+  csv_field(text, 1, hopss, sizeof(hopss));
+  csv_field(text, 2, las, sizeof(las));
+  csv_field(text, 3, los, sizeof(los));
+  csv_field(text, 4, pttls, sizeof(pttls));
+  if (!ids[0]) return;
+  unsigned key = sig_hash("Q", from, ids);
+  if (pseen_has(key)) return;
+  pseen_add(key);
+
+  int hops = to_int(hopss);
+  double lat = to_dbl(las), lon = to_dbl(los);
+  int has_pos = (las[0] != 0);
+
+  char gids[16]; u_itoa(g_ping_id, gids);
+  if (g_ping_active && s_eq(gids, ids)) {
+    char line[120] = ""; s_cat(line, from, sizeof(line)); s_cat(line, "  ", sizeof(line));
+    { char t[8]; u_itoa((unsigned)(hops < 0 ? 0 : hops), t); s_cat(line, t, sizeof(line)); }
+    s_cat(line, (hops == 1) ? " hop" : " hops", sizeof(line));
+    if (has_pos) {
+      char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
+      if (meta[0]) { s_cat(line, "  -  ", sizeof(line)); s_cat(line, meta, sizeof(line)); }
+      push_marker(from, lat, lon, "green", "ping reply");
+    }
+    log_line("pingresults", line);
+  }
+
+  int pttl = to_int(pttls);
+  if (pttl > 1) {    /* propagate the reply back toward the pinger */
+    char fwd[100] = ""; s_cat(fwd, ids, sizeof(fwd)); s_cat(fwd, ",", sizeof(fwd));
+    { char t[8]; u_itoa((unsigned)hops, t); s_cat(fwd, t, sizeof(fwd)); }
+    s_cat(fwd, ",", sizeof(fwd)); s_cat(fwd, las, sizeof(fwd));
+    s_cat(fwd, ",", sizeof(fwd)); s_cat(fwd, los, sizeof(fwd));
+    s_cat(fwd, ",", sizeof(fwd));
+    { char t[8]; u_itoa((unsigned)(pttl - 1), t); s_cat(fwd, t, sizeof(fwd)); }
+    ble_tx_from(from, PONG_TO, fwd);   /* keep the responder as 'from' */
+  }
+}
+
+/* Tools "Send ping": broadcast a fresh ping and start collecting replies. */
+static void do_ping(const char *buf) {
+  read_config(buf);
+  if (!g_ble_on) { notify("warning", "Enable Bluetooth exchange first (Settings)"); return; }
+  int ttl = PING_DEFAULT_TTL;
+  { char v[8]; if (jstr(buf, "ping_ttl", v, sizeof(v)) && v[0]) ttl = to_int(v); }
+  if (ttl < 1) ttl = 1; if (ttl > 8) ttl = 8;
+
+  g_ping_seq++;
+  g_ping_id = (unsigned)hal_time_epoch() ^ (g_ping_seq * 2654435761u);
+  g_ping_active = 1;
+  g_ping_start = hal_time_epoch();
+
+  { const char *c = "{\"type\":\"ui.log.clear\",\"field\":\"pingresults\"}";
+    hal_msg_send(c, s_len(c)); }
+
+  char ids[16]; u_itoa(g_ping_id, ids);
+  pseen_add(sig_hash("P", "", ids));   /* never answer our own ping */
+
+  char body[40] = ""; s_cat(body, ids, sizeof(body)); s_cat(body, ",", sizeof(body));
+  { char t[8]; u_itoa((unsigned)ttl, t); s_cat(body, t, sizeof(body)); }
+  s_cat(body, ",0", sizeof(body));
+  ble_tx_from(g_call, PING_TO, body);
+
+  log_line("pingresults", "Ping sent - waiting for replies...");
+  status("TX ping");
+}
+
 static void ble_handle(const char *compact) {
   unsigned h = sig_hash("b", "", compact);
   if (fseen_has(h)) return;
@@ -1032,11 +1224,17 @@ static void ble_handle(const char *compact) {
   }
   if (mine) return;
 
-  /* Mesh repeater: rebroadcast this frame once (within ~2s, via the advertise
-   * rotation), ignoring content already repeated in the last 10 minutes. */
+  /* Ping reach-test frames (Tools tab): handled here and NEVER digipeated
+   * verbatim, relayed to APRS-IS, or shown on the Live feed — they have their
+   * own ttl-based forwarding. */
+  if (s_eq(to, PING_TO)) { handle_ping(from, text); return; }
+  if (s_eq(to, PONG_TO)) { handle_pong(from, text); return; }
+
+  /* Digipeater: rebroadcast this frame once, after a short staggered delay
+   * (see rq_*), ignoring content already repeated in the last 10 minutes. */
   {
     uint64_t now = hal_time_epoch();
-    if (!rpt_recent(h, now)) { rpt_mark(h, now); ble_send(compact); }
+    if (!rpt_recent(h, now)) { rpt_mark(h, now); rq_push(compact, now + 1 + (h % 3)); }
   }
 
   if (s_eq(to, "!")) {                    /* position: "lat,lon[,comment]" */
@@ -1134,6 +1332,16 @@ void module_tick(void) {
    * scan/advertise state, drain inbound frames, and beacon our position. */
   ble_reconcile();
   push_status();   /* refresh APRS-IS / BLE indicators (only on change) */
+
+  /* Flush any digipeat rebroadcasts whose staggered delay is now due. */
+  rq_flush(hal_time_epoch());
+
+  /* Close the ping collection window. */
+  if (g_ping_active && hal_time_epoch() - g_ping_start > 12) {
+    g_ping_active = 0;
+    log_line("pingresults", "Ping complete.");
+  }
+
   if (g_ble_on) {
     char rec[400];
     for (int guard = 0; guard < 20; guard++) {
@@ -1254,6 +1462,7 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "recur")) do_recur(buf);
   else if (s_eq(cmd, "prompt")) do_prompt_result(buf);
   else if (s_eq(cmd, "set_radius")) do_set_radius(buf);
+  else if (s_eq(cmd, "ping")) do_ping(buf);
   else if (s_eq(cmd, "geochat_send")) do_geochat_send(buf);
   else if (s_eq(cmd, "ble_apply")) {
     read_config(buf);
