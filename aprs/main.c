@@ -145,6 +145,7 @@ static char  g_symbol[8] = "/>";
 static char  g_path[64] = "WIDE1-1,WIDE2-1";
 static int   g_auto = 0;
 static int   g_interval = 600;          /* seconds */
+static int   g_mail_days = 7;           /* ?MAIL look-back window sent to iGates */
 static uint64_t g_last_beacon = 0;
 /* Auto-connect / auto-reconnect state. */
 static int   g_want_connect = 0;        /* keep a connection alive */
@@ -348,6 +349,7 @@ static void read_config(const char *buf) {
   if (jstr(buf, "symbol", v, sizeof(v)) && s_len(v) >= 2) s_cpy(g_symbol, v, sizeof(g_symbol));
   if (jstr(buf, "path", v, sizeof(v))) s_cpy(g_path, v, sizeof(g_path));
   if (jstr(buf, "beacon_interval", v, sizeof(v)) && v[0]) g_interval = to_int(v);
+  if (jstr(buf, "mail_days", v, sizeof(v)) && v[0]) { g_mail_days = to_int(v); if (g_mail_days < 1) g_mail_days = 1; }
   /* NOTE: BLE on/off is intentionally NOT read here. read_config runs on
    * every command (connect, sends, …) and the host serialises an unset
    * checkbox as false, which would clobber the on-by-default state before the
@@ -1070,33 +1072,45 @@ static void mailbox_clear(const char *call) {
   char key[20]; mailbox_key(key, sizeof(key), call);
   hal_kv_delete(key, s_len(key));
 }
-static int contains_line(const char *buf, const char *line) {
-  unsigned ll = s_len(line);
+/* The "<from>|<text>" body of a stored line is everything after the first '|'
+ * (which separates the leading timestamp). Returns NULL if malformed. */
+static const char *mail_line_body(const char *line) {
+  const char *p = line; while (*p && *p != '|') p++;
+  return (*p == '|') ? p + 1 : 0;
+}
+/* Dedup on the body (sender+text), ignoring the per-line timestamp. */
+static int contains_body(const char *buf, const char *body) {
+  unsigned bl = s_len(body);
   const char *p = buf;
   while (*p) {
     const char *e = p; while (*e && *e != '\n') e++;
-    if ((unsigned)(e - p) == ll) {
-      int eq = 1; for (unsigned i = 0; i < ll; i++) if (p[i] != line[i]) { eq = 0; break; }
+    const char *b = mail_line_body(p);
+    if (b && b <= e && (unsigned)(e - b) == bl) {
+      int eq = 1; for (unsigned i = 0; i < bl; i++) if (b[i] != body[i]) { eq = 0; break; }
       if (eq) return 1;
     }
     p = (*e == '\n') ? e + 1 : e;
   }
   return 0;
 }
-/* Hold a message addressed to a heard station until it pulls its mail. */
+/* Hold a message addressed to a heard station until it pulls its mail. Each line
+ * is "<ts>|<from>|<text>" (ts = epoch when held) so a ?MAIL can window by age. */
 static void mailbox_add(const char *call, const char *from, const char *text) {
   if (!call[0] || !from[0]) return;
   char key[20]; mailbox_key(key, sizeof(key), call);
   char buf[1300];
   uint32_t n = hal_kv_get(key, s_len(key), buf, sizeof(buf) - 1);
   buf[n] = 0;
-  char line[420]; line[0] = 0;
-  s_cat(line, from, sizeof(line)); s_cat(line, "|", sizeof(line));
-  for (const char *t = text; *t && s_len(line) < sizeof(line) - 2; t++) {
+  char body[420]; body[0] = 0;                    /* "<from>|<text>" (newline-free) */
+  s_cat(body, from, sizeof(body)); s_cat(body, "|", sizeof(body));
+  for (const char *t = text; *t && s_len(body) < sizeof(body) - 2; t++) {
     char c = (*t == '\n' || *t == '\r') ? ' ' : *t;
-    char cc[2] = { c, 0 }; s_cat(line, cc, sizeof(line));
+    char cc[2] = { c, 0 }; s_cat(body, cc, sizeof(body));
   }
-  if (n && contains_line(buf, line)) return;     /* dedup */
+  if (n && contains_body(buf, body)) return;      /* dedup ignoring ts */
+  char line[440]; line[0] = 0;
+  { char tb[12]; u_itoa((unsigned)hal_time_epoch(), tb); s_cat(line, tb, sizeof(line)); }
+  s_cat(line, "|", sizeof(line)); s_cat(line, body, sizeof(line));
   char out[1500]; out[0] = 0;
   if (n) { s_cat(out, buf, sizeof(out)); s_cat(out, "\n", sizeof(out)); }
   s_cat(out, line, sizeof(out));
@@ -1108,29 +1122,58 @@ static void mailbox_add(const char *call, const char *from, const char *text) {
   hal_kv_set(key, s_len(key), o, s_len(o));
 }
 
-/* A heard station broadcast "?MAIL <call>": deliver its held messages over BLE
- * (each as a 1:1 frame from the original sender) and clear the mailbox. */
-static void handle_mail_query(const char *from) {
+#define MAIL_QUERY_CAP 30   /* most-recent messages delivered per ?MAIL pull */
+
+/* A heard station broadcast "?MAIL <days> <nonce>": deliver the messages we hold
+ * for it that are within the requested day-window (default 7), newest first,
+ * capped, each as a 1:1 frame from the original sender. Delivered lines are
+ * removed; out-of-window lines are kept for a possible later, wider pull. */
+static void handle_mail_query(const char *from, const char *text) {
   if (s_eq(from, g_call)) return;
   sdev_touch(from);
+  int days = text ? to_int(text) : 0;             /* leading integer = look-back days */
+  if (days <= 0) days = 7;
+  uint64_t now = hal_time_epoch();
+  uint64_t cutoff = (now > (uint64_t)days * 86400) ? now - (uint64_t)days * 86400 : 0;
+
   char key[20]; mailbox_key(key, sizeof(key), from);
   char buf[1400];
   uint32_t n = hal_kv_get(key, s_len(key), buf, sizeof(buf) - 1);
   if (n == 0) return;
   buf[n] = 0;
+
+  /* First pass: split into NUL-terminated lines; collect in-window pointers
+   * (oldest..newest as stored), accumulate out-of-window lines into `keep`. */
+  const char *lines[64]; int nl = 0;
+  char keep[1500]; keep[0] = 0;                   /* out-of-window lines, kept */
   char *p = buf;
-  while (*p) {
+  while (*p && nl < 64) {
     char *e = p; while (*e && *e != '\n') e++;
-    char save = *e; *e = 0;
-    char mfrom[16] = ""; const char *bar = p; int bi = 0;
+    int had_nl = (*e == '\n');
+    *e = 0;                                        /* terminate this line */
+    uint64_t ts = (uint64_t)(unsigned)to_int(p);  /* leading ts */
+    if (ts >= cutoff) { lines[nl++] = p; }
+    else { if (keep[0]) s_cat(keep, "\n", sizeof(keep)); s_cat(keep, p, sizeof(keep)); }
+    p = had_nl ? e + 1 : e;
+  }
+  /* Deliver the newest MAIL_QUERY_CAP in-window (they sit at the tail). */
+  int start = (nl > MAIL_QUERY_CAP) ? nl - MAIL_QUERY_CAP : 0;
+  for (int i = start; i < nl; i++) {
+    const char *body = mail_line_body(lines[i]);
+    if (!body) continue;
+    char mfrom[16] = ""; const char *bar = body; int bi = 0;
     while (*bar && *bar != '|' && bi < 15) mfrom[bi++] = *bar++;
     mfrom[bi] = 0;
     const char *mtext = (*bar == '|') ? bar + 1 : "";
     if (mfrom[0]) ble_tx_from(mfrom, from, mtext);
-    *e = save;
-    p = (*e == '\n') ? e + 1 : e;
   }
-  mailbox_clear(from);
+  /* Keep out-of-window lines plus any in-window ones we didn't deliver (cap). */
+  for (int i = 0; i < start; i++) {
+    if (keep[0]) s_cat(keep, "\n", sizeof(keep));
+    s_cat(keep, lines[i], sizeof(keep));
+  }
+  if (keep[0]) hal_kv_set(key, s_len(key), keep, s_len(keep));
+  else mailbox_clear(from);
 }
 
 /* Route one APRS-IS TNC2 line to the UI; bridge to BLE when relaying. */
@@ -1472,10 +1515,6 @@ static void do_ping(const char *buf) {
 }
 
 static void ble_handle(const char *compact, int rssi) {
-  unsigned h = sig_hash("b", "", compact);
-  if (fseen_has(h)) return;
-  fseen_add(h);
-
   char from[16] = "", to[24] = "", text[200] = "";
   int seg = 0, fi = 0, ti = 0, xi = 0;
   for (const char *q = compact; *q; q++) {
@@ -1495,17 +1534,26 @@ static void ble_handle(const char *compact, int rssi) {
   /* Remember every BLE-local station we hear (store-and-forward registry). */
   sdev_touch(from);
 
-  /* Store-and-forward control frames (handled here; not shown/relayed):
+  /* Control frames are handled on EVERY receipt — BEFORE the content-dedup below
+   * — because they carry no unique body: a repeated ?IGATE beacon must keep
+   * refreshing g_last_igate_heard (else the client stops pulling mail after the
+   * window), and each ?MAIL must be answered. (Our own re-scanned control frames
+   * are dropped by the `mine` check above.)
    *  ?IGATE = an online iGate announcing itself -> note it's in reach.
-   *  ?MAIL  = a station pulling its held mail -> deliver + clear its mailbox. */
+   *  ?MAIL  = a station pulling its held mail (text = "<days> <nonce>"). */
   if (s_eq(to, IGATE_TO)) { g_last_igate_heard = hal_time_epoch(); return; }
-  if (s_eq(to, MAIL_TO))  { handle_mail_query(from); return; }
+  if (s_eq(to, MAIL_TO))  { handle_mail_query(from, text); return; }
 
   /* Ping reach-test frames (Tools tab): handled here and NEVER digipeated
    * verbatim, relayed to APRS-IS, or shown on the Live feed — they have their
    * own ttl-based forwarding. */
   if (s_eq(to, PING_TO)) { handle_ping(from, text); return; }
   if (s_eq(to, PONG_TO)) { handle_pong(from, text, rssi); return; }
+
+  /* Content frames: dedup so the digipeater and the chat handle each only once. */
+  unsigned h = sig_hash("b", "", compact);
+  if (fseen_has(h)) return;
+  fseen_add(h);
 
   /* Digipeater: rebroadcast this frame once, after a short staggered delay
    * (see rq_*), ignoring content already repeated in the last 10 minutes. */
@@ -1632,8 +1680,11 @@ void module_tick(void) {
     }
     /* Client: while an iGate is in reach, pull our mail every 5 minutes. */
     if (g_ble_on && now - g_last_igate_heard < 600 && now - g_last_mail_query >= 300) {
-      char nb[16]; u_itoa((unsigned)now, nb);   /* nonce so each query is distinct */
-      ble_tx_from(g_call, MAIL_TO, nb);
+      /* text = "<days> <nonce>": the look-back window the iGate should honour,
+       * plus a nonce so each query is distinct on the wire. */
+      char mq[24]; u_itoa((unsigned)g_mail_days, mq); s_cat(mq, " ", sizeof(mq));
+      { char nb[12]; u_itoa((unsigned)now, nb); s_cat(mq, nb, sizeof(mq)); }
+      ble_tx_from(g_call, MAIL_TO, mq);
       g_last_mail_query = now;
     }
     /* Persist the seen registry (debounced). */
