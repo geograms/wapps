@@ -118,6 +118,33 @@ void aprs_login(int handle, const char *callsign, int passcode,
   a_send(handle, line);
 }
 
+void aprs_build_filter(char *out, unsigned max, double lat, double lon,
+                       int radius_km, const char *extra) {
+  out[0] = 0;
+  a_cat(out, "r/", max);
+  char db[24];
+  a_dtoa(lat, db, 4); a_cat(out, db, max); a_cat(out, "/", max);
+  a_dtoa(lon, db, 4); a_cat(out, db, max); a_cat(out, "/", max);
+  char nb[16]; a_itoa(radius_km, nb); a_cat(out, nb, max);
+  if (extra && extra[0]) { a_cat(out, " ", max); a_cat(out, extra, max); }
+}
+
+void aprs_login_ex(int handle, const char *callsign, int passcode,
+                   double lat, double lon, int radius_km, const char *extra) {
+  char line[512];
+  line[0] = 0;
+  a_cat(line, "user ", sizeof(line));
+  a_cat(line, callsign, sizeof(line));
+  a_cat(line, " pass ", sizeof(line));
+  char nb[16]; a_itoa(passcode, nb); a_cat(line, nb, sizeof(line));
+  a_cat(line, " vers Aurora 1.0 filter ", sizeof(line));
+  char filt[400];
+  aprs_build_filter(filt, sizeof(filt), lat, lon, radius_km, extra);
+  a_cat(line, filt, sizeof(line));
+  a_cat(line, "\r\n", sizeof(line));
+  a_send(handle, line);
+}
+
 /* ── line framing ─────────────────────────────────────────────────────── */
 static char g_rx[8192];
 static int g_rxlen = 0;

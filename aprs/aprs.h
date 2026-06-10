@@ -64,6 +64,17 @@ void aprs_build_login(char *out, unsigned max, const char *callsign,
 void aprs_login(int handle, const char *callsign, int passcode,
                 double lat, double lon, int radius_km);
 
+/* Build the server-side filter "r/<lat>/<lon>/<km>[ <extra>]". [extra] may be
+ * "" or e.g. "g/CALL/BUDDY1/BUDDY2" to ALSO receive messages addressed to a
+ * buddy list (used for store-and-forward of BLE-heard stations' mail). */
+void aprs_build_filter(char *out, unsigned max, double lat, double lon,
+                       int radius_km, const char *extra);
+
+/* Log in with an extra filter term appended (e.g. a g/ buddy list). Pass
+ * extra="" for the plain range filter (equivalent to aprs_login). */
+void aprs_login_ex(int handle, const char *callsign, int passcode,
+                   double lat, double lon, int radius_km, const char *extra);
+
 /* Drain socket bytes and, if a full CRLF-delimited line is buffered,
  * copy it (without the CRLF) into line[max] and return its length.
  * Returns 0 when no complete line is ready. Skips APRS-IS comment

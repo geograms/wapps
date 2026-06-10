@@ -963,6 +963,176 @@ static void ble_tx_pos(double lat, double lon, const char *comment) {
   ble_tx_msg("!", t);
 }
 
+/* ── Store-and-forward: BLE iGate mailbox for heard stations ──────────────
+ * When this station is online (APRS-IS up) it acts as an iGate for nearby
+ * BLE-only stations: it remembers the callsigns it hears over BLE in a
+ * persistent registry (<=100, 1-year LRU), adds them to the APRS-IS `g/`
+ * filter so the server pushes messages addressed to them, and holds those
+ * messages in a per-callsign mailbox. A BLE-only station pulls its mail by
+ * broadcasting "?MAIL <call>" every 5 min while an iGate (?IGATE beacon) is in
+ * reach; we reply with each held message and clear the mailbox. No UI. */
+#define MAIL_TO       "?MAIL"
+#define IGATE_TO      "?IGATE"
+#define SDEV_MAX      100
+#define SDEV_TTL      (365ULL * 24 * 3600)   /* 1 year */
+#define GFILTER_CAP   30                      /* heard calls put in the g/ filter */
+
+typedef struct { char call[12]; uint64_t ts; } sdev_t;
+static sdev_t g_sdev[SDEV_MAX];
+static int g_sdev_n = 0;
+static int g_sdev_dirty = 0;
+
+static uint64_t g_last_igate_heard  = 0;   /* we (client) heard an iGate beacon */
+static uint64_t g_last_igate_beacon = 0;   /* we (iGate) last announced ourselves */
+static uint64_t g_last_mail_query   = 0;
+static uint64_t g_last_filter_check = 0;
+static uint64_t g_sdev_saved        = 0;
+static char g_gfilter[256] = "";           /* g/ extra filter currently in use */
+
+static int sdev_find(const char *c) {
+  for (int i = 0; i < g_sdev_n; i++) if (s_eq(g_sdev[i].call, c)) return i;
+  return -1;
+}
+static int sdev_has(const char *c) { return sdev_find(c) >= 0; }
+static void mailbox_clear(const char *call);   /* fwd */
+
+/* Remember a callsign heard over BLE (not us): refresh its timestamp, add it,
+ * or evict the least-recently-seen when full. */
+static void sdev_touch(const char *c) {
+  if (!c || !c[0] || s_eq(c, g_call)) return;
+  uint64_t now = hal_time_epoch();
+  int i = sdev_find(c);
+  if (i >= 0) { g_sdev[i].ts = now; g_sdev_dirty = 1; return; }
+  if (g_sdev_n < SDEV_MAX) { i = g_sdev_n++; }
+  else {
+    int lru = 0;
+    for (int k = 1; k < g_sdev_n; k++) if (g_sdev[k].ts < g_sdev[lru].ts) lru = k;
+    mailbox_clear(g_sdev[lru].call);
+    i = lru;
+  }
+  s_cpy(g_sdev[i].call, c, sizeof(g_sdev[i].call));
+  g_sdev[i].ts = now; g_sdev_dirty = 1;
+}
+
+static void sdev_save(void) {
+  char buf[1800]; buf[0] = 0;
+  for (int i = 0; i < g_sdev_n; i++) {
+    s_cat(buf, g_sdev[i].call, sizeof(buf)); s_cat(buf, ",", sizeof(buf));
+    char tb[20]; u_itoa((unsigned)g_sdev[i].ts, tb); s_cat(buf, tb, sizeof(buf));
+    s_cat(buf, ";", sizeof(buf));
+  }
+  hal_kv_set("seendev", 7, buf, s_len(buf));
+}
+static void sdev_load(void) {
+  char buf[1800];
+  uint32_t n = hal_kv_get("seendev", 7, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  uint64_t now = hal_time_epoch();
+  g_sdev_n = 0;
+  char *p = buf;
+  while (*p && g_sdev_n < SDEV_MAX) {
+    char call[12]; int ci = 0;
+    while (*p && *p != ',' && ci < 11) call[ci++] = *p++;
+    call[ci] = 0;
+    if (*p == ',') p++;
+    uint64_t ts = 0;
+    while (*p >= '0' && *p <= '9') { ts = ts * 10 + (uint64_t)(*p - '0'); p++; }
+    if (*p == ';') p++;
+    if (call[0] && (now < SDEV_TTL || ts >= now - SDEV_TTL)) {   /* prune >1yr */
+      s_cpy(g_sdev[g_sdev_n].call, call, sizeof(g_sdev[g_sdev_n].call));
+      g_sdev[g_sdev_n].ts = ts; g_sdev_n++;
+    }
+  }
+}
+
+/* g/ extra filter from the most-recently-seen calls (+ our own). */
+static void build_gfilter(char *out, unsigned max) {
+  out[0] = 0;
+  s_cat(out, "g/", max); s_cat(out, g_call, max);
+  int used[SDEV_MAX]; for (int i = 0; i < g_sdev_n; i++) used[i] = 0;
+  int cnt = g_sdev_n < GFILTER_CAP ? g_sdev_n : GFILTER_CAP;
+  for (int k = 0; k < cnt; k++) {
+    int best = -1;
+    for (int i = 0; i < g_sdev_n; i++)
+      if (!used[i] && (best < 0 || g_sdev[i].ts > g_sdev[best].ts)) best = i;
+    if (best < 0) break;
+    used[best] = 1;
+    s_cat(out, "/", max); s_cat(out, g_sdev[best].call, max);
+  }
+}
+
+/* ---- per-callsign mailbox (KV "m.<call>", lines "<from>|<text>") ---- */
+static void mailbox_key(char *out, unsigned max, const char *call) {
+  out[0] = 0; s_cat(out, "m.", max); s_cat(out, call, max);
+}
+static void mailbox_clear(const char *call) {
+  char key[20]; mailbox_key(key, sizeof(key), call);
+  hal_kv_delete(key, s_len(key));
+}
+static int contains_line(const char *buf, const char *line) {
+  unsigned ll = s_len(line);
+  const char *p = buf;
+  while (*p) {
+    const char *e = p; while (*e && *e != '\n') e++;
+    if ((unsigned)(e - p) == ll) {
+      int eq = 1; for (unsigned i = 0; i < ll; i++) if (p[i] != line[i]) { eq = 0; break; }
+      if (eq) return 1;
+    }
+    p = (*e == '\n') ? e + 1 : e;
+  }
+  return 0;
+}
+/* Hold a message addressed to a heard station until it pulls its mail. */
+static void mailbox_add(const char *call, const char *from, const char *text) {
+  if (!call[0] || !from[0]) return;
+  char key[20]; mailbox_key(key, sizeof(key), call);
+  char buf[1300];
+  uint32_t n = hal_kv_get(key, s_len(key), buf, sizeof(buf) - 1);
+  buf[n] = 0;
+  char line[420]; line[0] = 0;
+  s_cat(line, from, sizeof(line)); s_cat(line, "|", sizeof(line));
+  for (const char *t = text; *t && s_len(line) < sizeof(line) - 2; t++) {
+    char c = (*t == '\n' || *t == '\r') ? ' ' : *t;
+    char cc[2] = { c, 0 }; s_cat(line, cc, sizeof(line));
+  }
+  if (n && contains_line(buf, line)) return;     /* dedup */
+  char out[1500]; out[0] = 0;
+  if (n) { s_cat(out, buf, sizeof(out)); s_cat(out, "\n", sizeof(out)); }
+  s_cat(out, line, sizeof(out));
+  char *o = out;                                  /* cap: drop oldest lines */
+  while (s_len(o) > 1100) {
+    char *nl = o; while (*nl && *nl != '\n') nl++;
+    if (*nl == '\n') o = nl + 1; else break;
+  }
+  hal_kv_set(key, s_len(key), o, s_len(o));
+}
+
+/* A heard station broadcast "?MAIL <call>": deliver its held messages over BLE
+ * (each as a 1:1 frame from the original sender) and clear the mailbox. */
+static void handle_mail_query(const char *from) {
+  if (s_eq(from, g_call)) return;
+  sdev_touch(from);
+  char key[20]; mailbox_key(key, sizeof(key), from);
+  char buf[1400];
+  uint32_t n = hal_kv_get(key, s_len(key), buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  char *p = buf;
+  while (*p) {
+    char *e = p; while (*e && *e != '\n') e++;
+    char save = *e; *e = 0;
+    char mfrom[16] = ""; const char *bar = p; int bi = 0;
+    while (*bar && *bar != '|' && bi < 15) mfrom[bi++] = *bar++;
+    mfrom[bi] = 0;
+    const char *mtext = (*bar == '|') ? bar + 1 : "";
+    if (mfrom[0]) ble_tx_from(mfrom, from, mtext);
+    *e = save;
+    p = (*e == '\n') ? e + 1 : e;
+  }
+  mailbox_clear(from);
+}
+
 /* Route one APRS-IS TNC2 line to the UI; bridge to BLE when relaying. */
 static void route_frame(const char *line) {
   unsigned fh = sig_hash("f", "", line);
@@ -1008,9 +1178,14 @@ static void route_frame(const char *line) {
           if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
         }
         if (amine) convo_deliver(p.from, "in", p.from, p.text, p.text, 0, "NET");
+        else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
+          mailbox_add(p.addressee, p.from, p.text);
         /* Direct message to us, or a message on the Live tab — pop a notice. */
         notify_msg(p.from, p.from, p.text, p.text);
-        if (g_ble_relay && g_ble_on) ble_tx_from(p.from, p.addressee, p.text);
+        /* Bridge to BLE: when relay is on, OR always for a heard station's mail
+         * (immediate delivery if it's in range right now). */
+        if (g_ble_on && (g_ble_relay || sdev_has(p.addressee)))
+          ble_tx_from(p.from, p.addressee, p.text);
       }
     }
   }
@@ -1317,6 +1492,15 @@ static void ble_handle(const char *compact, int rssi) {
   }
   if (mine) return;
 
+  /* Remember every BLE-local station we hear (store-and-forward registry). */
+  sdev_touch(from);
+
+  /* Store-and-forward control frames (handled here; not shown/relayed):
+   *  ?IGATE = an online iGate announcing itself -> note it's in reach.
+   *  ?MAIL  = a station pulling its held mail -> deliver + clear its mailbox. */
+  if (s_eq(to, IGATE_TO)) { g_last_igate_heard = hal_time_epoch(); return; }
+  if (s_eq(to, MAIL_TO))  { handle_mail_query(from); return; }
+
   /* Ping reach-test frames (Tools tab): handled here and NEVER digipeated
    * verbatim, relayed to APRS-IS, or shown on the Live feed — they have their
    * own ttl-based forwarding. */
@@ -1413,6 +1597,7 @@ void module_init(void) {
   char id[16];
   uint32_t n = hal_identity(id, sizeof(id) - 1);
   if (n > 0 && n < sizeof(id)) { id[n] = 0; if (id[0]) s_cpy(g_call, id, sizeof(g_call)); }
+  sdev_load();   /* restore the seen-devices registry (store-and-forward) */
   status("APRS ready - connecting to APRS-IS automatically...");
   /* Ask the host to run our "connect" command with the current settings
    * (auto-connect on load; no manual Connect needed). */
@@ -1433,6 +1618,36 @@ void module_tick(void) {
   if (g_ping_active && hal_time_epoch() - g_ping_start > 12) {
     g_ping_active = 0;
     log_line("pingresults", "Ping complete.");
+  }
+
+  /* ── Store-and-forward housekeeping (automatic, no UI) ── */
+  {
+    uint64_t now = hal_time_epoch();
+    int online = (g_sock >= 0 && g_logged);   /* we are an APRS-IS iGate */
+
+    /* iGate beacon: announce ourselves so BLE-local stations know to pull mail. */
+    if (online && g_ble_on && now - g_last_igate_beacon >= 120) {
+      ble_tx_from(g_call, IGATE_TO, "");
+      g_last_igate_beacon = now;
+    }
+    /* Client: while an iGate is in reach, pull our mail every 5 minutes. */
+    if (g_ble_on && now - g_last_igate_heard < 600 && now - g_last_mail_query >= 300) {
+      char nb[16]; u_itoa((unsigned)now, nb);   /* nonce so each query is distinct */
+      ble_tx_from(g_call, MAIL_TO, nb);
+      g_last_mail_query = now;
+    }
+    /* Persist the seen registry (debounced). */
+    if (g_sdev_dirty && now - g_sdev_saved >= 60) {
+      sdev_save(); g_sdev_saved = now; g_sdev_dirty = 0;
+    }
+    /* Re-evaluate the APRS-IS g/ filter; reconnect to apply it if it changed. */
+    if (online && now - g_last_filter_check >= 30) {
+      g_last_filter_check = now;
+      char nf[256]; build_gfilter(nf, sizeof(nf));
+      if (!s_eq(nf, g_gfilter)) {
+        aprs_disconnect(g_sock); g_sock = -1; g_logged = 0;   /* re-login w/ new filter */
+      }
+    }
   }
 
   if (g_ble_on) {
@@ -1469,7 +1684,10 @@ void module_tick(void) {
     int st = hal_socket_status(g_sock);
     if (st == 1) {
       int pass = aprs_passcode(g_call);
-      aprs_login(g_sock, g_call, pass, g_lat, g_lon, g_radius);
+      /* Include the heard stations in the server-side g/ filter so APRS-IS
+       * pushes messages addressed to them (store-and-forward iGate). */
+      build_gfilter(g_gfilter, sizeof(g_gfilter));
+      aprs_login_ex(g_sock, g_call, pass, g_lat, g_lon, g_radius, g_gfilter);
       g_logged = 1;
       char b[64] = "Connected. passcode "; char nb[16];
       { int v = pass, j = 0; char t[12]; if (v == 0) t[j++]='0'; while (v>0){t[j++]=(char)('0'+v%10);v/=10;} int k=0; while(j>0)nb[k++]=t[--j]; nb[k]=0; }
