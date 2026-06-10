@@ -426,6 +426,74 @@ static unsigned sig_hash(const char *a, const char *b, const char *c) {
   for (const char *p = c; *p; p++) { h ^= (unsigned char)*p; h *= 16777619u; }
   return h;
 }
+
+/* ── SHA-1 (RFC 3174) — only for short, stable message ids ────────────────
+ * A reply references its parent by a 4-hex-char id both sender and receiver
+ * derive from the same content (from|text), so threads work across APRS-IS and
+ * BLE without any extra wire fields. Inputs are short (<~220B); a fixed buffer
+ * is plenty. */
+static uint32_t sha1_rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+static void sha1(const unsigned char *msg, unsigned len, unsigned char out[20]) {
+  uint32_t h[5] = { 0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u };
+  unsigned char buf[384];
+  if (len > 256) len = 256;
+  for (unsigned i = 0; i < len; i++) buf[i] = msg[i];
+  uint64_t ml = (uint64_t)len * 8u;
+  unsigned n = len;
+  buf[n++] = 0x80;
+  while ((n % 64u) != 56u) buf[n++] = 0;
+  for (int i = 7; i >= 0; i--) buf[n++] = (unsigned char)((ml >> (i * 8)) & 0xffu);
+  for (unsigned off = 0; off < n; off += 64) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++)
+      w[i] = ((uint32_t)buf[off + i*4] << 24) | ((uint32_t)buf[off + i*4 + 1] << 16) |
+             ((uint32_t)buf[off + i*4 + 2] << 8) | (uint32_t)buf[off + i*4 + 3];
+    for (int i = 16; i < 80; i++) w[i] = sha1_rol(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; i++) {
+      uint32_t f, k;
+      if (i < 20)      { f = (b & c) | ((~b) & d);            k = 0x5A827999u; }
+      else if (i < 40) { f = b ^ c ^ d;                       k = 0x6ED9EBA1u; }
+      else if (i < 60) { f = (b & c) | (b & d) | (c & d);     k = 0x8F1BBCDCu; }
+      else             { f = b ^ c ^ d;                       k = 0xCA62C1D6u; }
+      uint32_t t = sha1_rol(a, 5) + f + e + k + w[i];
+      e = d; d = c; c = sha1_rol(b, 30); b = a; a = t;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+  }
+  for (int i = 0; i < 5; i++) {
+    out[i*4]   = (unsigned char)(h[i] >> 24);
+    out[i*4+1] = (unsigned char)(h[i] >> 16);
+    out[i*4+2] = (unsigned char)(h[i] >> 8);
+    out[i*4+3] = (unsigned char)(h[i]);
+  }
+}
+/* First 4 hex chars of sha1("from|text") — the thread id of a message. */
+static void msg_id(const char *from, const char *text, char out[5]) {
+  unsigned char in[280]; unsigned n = 0;
+  for (const char *p = from; *p && n < 270; p++) in[n++] = (unsigned char)*p;
+  in[n++] = '|';
+  for (const char *p = text; *p && n < 279; p++) in[n++] = (unsigned char)*p;
+  unsigned char d[20]; sha1(in, n, d);
+  static const char hx[] = "0123456789abcdef";
+  out[0] = hx[d[0] >> 4]; out[1] = hx[d[0] & 15];
+  out[2] = hx[d[1] >> 4]; out[3] = hx[d[1] & 15]; out[4] = 0;
+}
+/* Thread reply marker on the wire: "+<4hex> <text>". If present, copies the
+ * parent id into [parent] (5 bytes) and points *disp at the text after the
+ * marker; otherwise parent="" and *disp = wire. Returns 1 if a marker was found. */
+static int thread_parse(const char *wire, char parent[5], const char **disp) {
+  parent[0] = 0; *disp = wire;
+  if (wire[0] != '+') return 0;
+  for (int i = 0; i < 4; i++) {
+    char ch = wire[1 + i];
+    if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return 0;
+  }
+  if (wire[5] != ' ') return 0;
+  for (int i = 0; i < 4; i++) parent[i] = wire[1 + i];
+  parent[4] = 0; *disp = wire + 6;
+  return 1;
+}
 static unsigned g_seen[128];
 static unsigned g_seen_cnt = 0;
 static int seen_has(unsigned h) {
@@ -563,6 +631,22 @@ static int distance_badge(const char *call, char *out, unsigned osz) {
   if (!pos_get(call, &lat, &lon)) return 0;
   return distance_to(lat, lon, out, osz);
 }
+/* km from us to a callsign's last-known position, or -1 if unknown. */
+static double km_to_call(const char *call) {
+  double lat, lon;
+  if (!pos_get(call, &lat, &lon)) return -1.0;
+  if (g_lat == 0 && g_lon == 0) return -1.0;
+  const double D2R = 0.0174532925199433;
+  double x = (lon - g_lon) * D2R * m_cos((g_lat + lat) * 0.5 * D2R);
+  double y = (lat - g_lat) * D2R;
+  return 6371.0 * __builtin_sqrt(x * x + y * y);
+}
+/* True only when we positively know the sender sits inside our coverage radius
+ * (so a local group bulletin can be filed as "local"); unknown position = no. */
+static int within_radius(const char *call) {
+  double km = km_to_call(call);
+  return km >= 0 && km <= (double)g_radius;
+}
 
 /* Conversations the host knows about, so we can refresh the distance badge
  * when a contact's position arrives. */
@@ -576,6 +660,7 @@ static int convo_known(const char *id) {
   for (int i = 0; i < g_convo_n; i++) if (s_eq(g_convo_ids[i], id)) return 1;
   return 0;
 }
+static void groups_save(void);   /* fwd: persist subscribed groups to KV */
 
 /* ── generic ui.convo.* senders ── */
 /* append "lat":..,"lon":.. to m when the position is known (not 0,0). */
@@ -584,9 +669,17 @@ static void cat_pos(char *m, unsigned sz, double lat, double lon) {
   s_cat(m, ",\"lat\":", sz); append_dbl(m, sz, lat);
   s_cat(m, ",\"lon\":", sz); append_dbl(m, sz, lon);
 }
+/* Append optional thread fields ("mid" = this message's 4-hex id, "parent" =
+ * the id it replies to). Empty values are omitted so non-threaded chats and the
+ * host's generic store are unaffected. */
+static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent) {
+  if (mid && mid[0]) { s_cat(m, ",\"mid\":\"", sz); s_cat(m, mid, sz); s_cat(m, "\"", sz); }
+  if (parent && parent[0]) { s_cat(m, ",\"parent\":\"", sz); s_cat(m, parent, sz); s_cat(m, "\"", sz); }
+}
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
-                      double lat, double lon, const char *via) {
+                      double lat, double lon, const char *via,
+                      const char *mid, const char *parent) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -602,12 +695,14 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
+  cat_thread(m, sizeof(m), mid, parent);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void convo_pin(const char *id, const char *key, const char *dir,
                       const char *from, const char *text, const char *meta,
-                      double lat, double lon, const char *via) {
+                      double lat, double lon, const char *via,
+                      const char *mid, const char *parent) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.pin\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -623,6 +718,7 @@ static void convo_pin(const char *id, const char *key, const char *dir,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
+  cat_thread(m, sizeof(m), mid, parent);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -633,15 +729,31 @@ static void convo_unpin(const char *id, const char *key) {
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
+/* Display title for a conversation row. Groups show the bare name; local vs
+ * global (trailing '*') is conveyed by the row icon (campaign vs public/globe)
+ * plus a " · global"/" · local" tag (ASCII — the host renders titles as latin1,
+ * so no emoji). 1:1 chats keep the callsign. */
+static void convo_title(const char *id, char *out, unsigned osz) {
+  if (id[0] != '#') { s_cpy(out, id, osz); return; }
+  out[0] = 0;
+  char name[8]; int j = 0;
+  for (int i = 1; id[i] && id[i] != '*' && j < 6; i++) name[j++] = id[i];
+  name[j] = 0;
+  int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
+  s_cat(out, name, osz);
+  s_cat(out, global ? " (global)" : " (local)", osz);   /* ASCII-only tag */
+}
 /* Refresh a conversation row (title/preview/icon + distance badge). */
 static void convo_touch(const char *id, const char *preview, int select) {
   convo_remember(id);
-  const char *icon = (id[0] == '#') ? "campaign" : "person";
+  int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
+  const char *icon = (id[0] == '#') ? (global ? "public" : "campaign") : "person";
   char badge[24] = "";
   if (id[0] != '#') distance_badge(id, badge, sizeof(badge));
+  char title[24]; convo_title(id, title, sizeof(title));
   char m[600] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
   jesc(m, sizeof(m), id);
-  s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), id);
+  s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), title);
   s_cat(m, "\",\"subtitle\":\"", sizeof(m)); jesc(m, sizeof(m), preview);
   s_cat(m, "\",\"badge\":\"", sizeof(m)); jesc(m, sizeof(m), badge);
   s_cat(m, "\",\"icon\":\"", sizeof(m)); s_cat(m, icon, sizeof(m));
@@ -668,7 +780,16 @@ static void convo_badge_only(const char *id) {
 static void convo_deliver(const char *id, const char *dir, const char *from,
                           const char *text, const char *preview, int forcePin,
                           const char *via) {
-  unsigned h = sig_hash(id, from, text);
+  /* Threading is group-only: derive this message's id from the wire text and,
+   * if it carries a "+<4hex> " reply marker, split off the parent + show the
+   * text without the marker. 1:1 chats are untouched. */
+  char mid[5] = "", parent[5] = "";
+  const char *disp = text;
+  if (id[0] == '#') {
+    msg_id(from, text, mid);
+    thread_parse(text, parent, &disp);
+  }
+  unsigned h = sig_hash(id, from, text);   /* dedup on the wire text */
   char key[16]; u_itoa(h, key);
   /* Distance + position of the sender (incoming only), so the host can show
    * them on the map when the distance is tapped. */
@@ -679,8 +800,8 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   }
   int rep = seen_has(h);
   if (!rep) seen_add(h);
-  if (forcePin || rep) convo_pin(id, key, dir, from, text, meta, lat, lon, via);
-  else convo_msg(id, dir, from, text, key, meta, lat, lon, via);
+  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent);
+  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent);
   convo_touch(id, preview, 0);
 }
 
@@ -705,11 +826,20 @@ static void do_convo_send(const char *buf) {
     push_marker(g_call, g_lat, g_lon, "blue", "");
   }
   if (id[0] == '#') {
-    if (net) aprs_send_bulletin_multi(g_sock, g_call, id + 1, text, APRS_MAX_MSG_LEN);
+    /* Strip the scope marker: a global group "#NEWS*" transmits the same
+     * "NEWS" bulletin as the local "#NEWS" — scope is only a local view. */
+    char gname[8]; int gj = 0;
+    for (int i = 1; id[i] && id[i] != '*' && gj < 6; i++) gname[gj++] = id[i];
+    gname[gj] = 0;
+    if (net) aprs_send_bulletin_multi(g_sock, g_call, gname, text, APRS_MAX_MSG_LEN);
+    if (g_ble_on) {
+      char bid[10]; bid[0] = '#'; s_cpy(bid + 1, gname, sizeof(bid) - 1);
+      ble_tx_msg(bid, text);            /* compact BLE: to = "#group" (no scope) */
+    }
   } else {
     if (net) aprs_send_message_multi(g_sock, g_call, id, text, APRS_MAX_MSG_LEN, &g_seq);
+    if (g_ble_on) ble_tx_msg(id, text);
   }
-  if (g_ble_on) ble_tx_msg(id, text);   /* compact BLE: to = callsign or #group */
   convo_deliver(id, "out", g_call, text, text, 0, "");
   status(loc ? "TX message + position" : "TX message");
 }
@@ -856,11 +986,13 @@ static void prompt_group(void) {
     s_cat(chips, PRESET_GROUPS[i], sizeof(chips));
     s_cat(chips, "\"}", sizeof(chips));
   }
-  char m[1100] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"title\":\"Add a group\","
-                 "\"body\":\"Join an APRS bulletin group (max 5 letters).\",\"chips\":[";
+  char m[1200] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"title\":\"Add a group\","
+                 "\"body\":\"Pick or type a group (max 5 letters). Global follows it "
+                 "worldwide; local follows it only within your radius.\",\"chips\":[";
   s_cat(m, chips, sizeof(m));
-  s_cat(m, "],\"chipMode\":\"instant\",\"input\":{\"hint\":\"Custom\",\"max\":5,"
-          "\"prefix\":\"#\"},\"confirm\":\"Add\"}", sizeof(m));
+  s_cat(m, "],\"chipMode\":\"select\",\"input\":{\"hint\":\"Custom\",\"max\":5,"
+          "\"prefix\":\"#\"},\"toggle\":{\"label\":\"Global (worldwide)\"},"
+          "\"confirm\":\"Add\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void prompt_newchat(void) {
@@ -920,7 +1052,12 @@ static void do_prompt_result(const char *buf) {
     }
   } else if (s_eq(pid, "group")) {
     char g[8]; norm_group(val[0] ? val : inp, g);
-    if (g[0]) { char id[10]; id[0] = '#'; s_cpy(id + 1, g, sizeof(id) - 1); convo_touch(id, "", 1); }
+    if (g[0]) {
+      char id[12]; id[0] = '#'; s_cpy(id + 1, g, sizeof(id) - 1);
+      if (jbool(buf, "prompt_toggle")) s_cat(id, "*", sizeof(id));   /* global */
+      convo_touch(id, "", 1);
+      groups_save();
+    }
   } else if (s_eq(pid, "recur")) {
     char id[40] = ""; jstr(buf, "conversations_convo", id, sizeof(id));
     if (id[0] == '#' && inp[0]) recur_begin(id + 1, inp, to_int(val));
@@ -1048,7 +1185,11 @@ static void sdev_load(void) {
   }
 }
 
-/* g/ extra filter from the most-recently-seen calls (+ our own). */
+/* g/ extra filter: our own call, the most-recently-seen stations (so APRS-IS
+ * pushes their direct messages), and the bulletin addressee pattern for every
+ * GLOBAL group we subscribe to (id ending in '*') so we hear that group
+ * worldwide. Local groups (no '*') need nothing extra — the always-on r/ range
+ * filter already brings in-radius bulletins. */
 static void build_gfilter(char *out, unsigned max) {
   out[0] = 0;
   s_cat(out, "g/", max); s_cat(out, g_call, max);
@@ -1061,6 +1202,48 @@ static void build_gfilter(char *out, unsigned max) {
     if (best < 0) break;
     used[best] = 1;
     s_cat(out, "/", max); s_cat(out, g_sdev[best].call, max);
+  }
+  /* Any GLOBAL group (#NAME*) → pull bulletins worldwide. APRS-IS g/ only
+   * supports a trailing '*' (no mid-string wildcard, verified live), and a
+   * bulletin's addressee is "BLN<id><GROUP>", so we can't match a specific
+   * group server-side. Bulletin volume is tiny (a few per minute globally), so
+   * one catch-all "g/BLN*" is fine; deliver_bulletin() then files only the
+   * groups we actually subscribed to. */
+  for (int i = 0; i < g_convo_n; i++) {
+    const char *id = g_convo_ids[i];
+    unsigned L = s_len(id);
+    if (id[0] == '#' && L >= 3 && id[L - 1] == '*') { s_cat(out, "/BLN*", max); break; }
+  }
+}
+/* True if any global group (#NAME*) is subscribed — i.e. g/BLN* is active and
+ * worldwide bulletins are arriving, so a local group must verify proximity. */
+static int any_global_group(void) {
+  for (int i = 0; i < g_convo_n; i++) {
+    const char *id = g_convo_ids[i];
+    unsigned L = s_len(id);
+    if (id[0] == '#' && L >= 3 && id[L - 1] == '*') return 1;
+  }
+  return 0;
+}
+
+/* Subscribed groups persist in KV "groups" (";"-joined ids) so the APRS-IS
+ * filter is correct immediately after a restart, before any row is reopened. */
+static void groups_save(void) {
+  char buf[600]; buf[0] = 0;
+  for (int i = 0; i < g_convo_n; i++)
+    if (g_convo_ids[i][0] == '#') { s_cat(buf, g_convo_ids[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+  hal_kv_set("groups", 6, buf, s_len(buf));
+}
+static void groups_load(void) {
+  char buf[600];
+  uint32_t n = hal_kv_get("groups", 6, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  char id[40]; int j = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? buf[i] : ';';
+    if (ch == ';') { id[j] = 0; if (id[0] == '#') convo_remember(id); j = 0; }
+    else if (j < 39) id[j++] = ch;
   }
 }
 
@@ -1177,6 +1360,37 @@ static void handle_mail_query(const char *from, const char *text) {
 }
 
 /* Route one APRS-IS TNC2 line to the UI; bridge to BLE when relaying. */
+/* File a received group bulletin into the right conversation(s):
+ *   - global (#NAME*) when subscribed — always (it arrived because we asked for
+ *     the group worldwide, or it's in range);
+ *   - local (#NAME) when subscribed AND the sender is within radius, OR when
+ *     only the local view is subscribed;
+ *   - if neither is subscribed, surface it once under the local id (discovery).
+ * [within] = sender known to be inside our radius; [via] = "NET"/"BLE". */
+static void deliver_bulletin(const char *gname, const char *from,
+                             const char *text, int within, const char *via) {
+  char nm[8]; int nj = 0;                 /* clean group name (no '#'/'*') */
+  for (int i = 0; gname[i] && gname[i] != '*' && nj < 6; i++) nm[nj++] = gname[i];
+  nm[nj] = 0;
+  if (!nm[0]) return;
+  char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
+  char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
+  int has_g = convo_known(gid), has_l = convo_known(lid);
+  if (!has_g && !has_l) return;            /* only listen to groups we subscribed */
+  char preview[140] = ""; s_cpy(preview, from, sizeof(preview)); s_cat(preview, ": ", sizeof(preview));
+  { char par[5]; const char *d; thread_parse(text, par, &d); s_cat(preview, d, sizeof(preview)); }
+  if (has_g) {                              /* global: every bulletin for the group */
+    convo_deliver(gid, "in", from, text, preview, 0, via);
+    notify_msg(gid, from, text, preview);
+  }
+  /* Local: a nearby sender, OR — when no global pull is active (g/BLN* off) —
+   * trust the region filter that the bulletin is in-range. */
+  if (has_l && (within || !any_global_group())) {
+    convo_deliver(lid, "in", from, text, preview, 0, via);
+    notify_msg(lid, from, text, preview);
+  }
+}
+
 static void route_frame(const char *line) {
   unsigned fh = sig_hash("f", "", line);
   if (fseen_has(fh)) return;
@@ -1202,15 +1416,11 @@ static void route_frame(const char *line) {
   } else if (p.type == APRS_MESSAGE) {
     if (p.text[0] && !is_ack_text(p.text)) {
       if (p.is_bulletin) {
-        char convo[40];
-        convo[0] = '#'; int j = 1;
-        for (int i = 0; p.group[i] && j < 39; i++) convo[j++] = p.group[i];
-        convo[j] = 0;
-        char preview[120] = ""; s_cpy(preview, p.from, sizeof(preview));
-        s_cat(preview, ": ", sizeof(preview)); s_cat(preview, p.text, sizeof(preview));
-        convo_deliver(convo, "in", p.from, p.text, preview, 0, "NET");
-        if (convo_known(convo)) notify_msg(convo, p.from, p.text, preview);
-        if (g_ble_relay && g_ble_on) ble_tx_from(p.from, convo, p.text);
+        deliver_bulletin(p.group, p.from, p.text, within_radius(p.from), "NET");
+        if (g_ble_relay && g_ble_on) {
+          char convo[12]; convo[0] = '#'; s_cpy(convo + 1, p.group, sizeof(convo) - 1);
+          ble_tx_from(p.from, convo, p.text);
+        }
       } else {
         char meta[24] = ""; double slat = 0, slon = 0;
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
@@ -1581,11 +1791,8 @@ static void ble_handle(const char *compact, int rssi) {
       if (!geo_dup(from, comment))
         chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon, "BLE");
     }
-  } else if (to[0] == '#') {              /* group */
-    char preview[120] = ""; s_cpy(preview, from, sizeof(preview));
-    s_cat(preview, ": ", sizeof(preview)); s_cat(preview, text, sizeof(preview));
-    convo_deliver(to, "in", from, text, preview, 0, "BLE");
-    if (convo_known(to)) notify_msg(to, from, text, preview);
+  } else if (to[0] == '#') {              /* group bulletin over BLE (in range = local) */
+    deliver_bulletin(to + 1, from, text, 1, "BLE");
     if (g_ble_relay && g_logged) {
       char line[260]; aprs_build_bulletin(line, sizeof(line), from, to + 1, '0', text);
       char tp[340]; s_cpy(tp, g_call, sizeof(tp));
@@ -1645,7 +1852,8 @@ void module_init(void) {
   char id[16];
   uint32_t n = hal_identity(id, sizeof(id) - 1);
   if (n > 0 && n < sizeof(id)) { id[n] = 0; if (id[0]) s_cpy(g_call, id, sizeof(g_call)); }
-  sdev_load();   /* restore the seen-devices registry (store-and-forward) */
+  sdev_load();     /* restore the seen-devices registry (store-and-forward) */
+  groups_load();   /* restore subscribed groups so the g/ filter is correct now */
   status("APRS ready - connecting to APRS-IS automatically...");
   /* Ask the host to run our "connect" command with the current settings
    * (auto-connect on load; no manual Connect needed). */
