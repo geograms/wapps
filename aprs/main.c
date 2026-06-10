@@ -1097,6 +1097,81 @@ static void csv_field(const char *s, int idx, char *out, unsigned osz) {
   }
 }
 
+/* RSSI -> rough distance (metres) via log-distance path loss:
+ *   d = 10^((TXREF - rssi)/(10*N)),  TXREF ~ RSSI at 1 m, N ~ path-loss exp.
+ * Coarse, but close enough for a direct hop. -1 when rssi is unknown. */
+static int est_dist_m(int rssi) {
+  if (rssi >= 0) return -1;
+  double d = __builtin_pow(10.0, (double)(-59 - rssi) / 25.0);
+  if (d < 1.0) d = 1.0;
+  if (d > 5000.0) d = 5000.0;
+  return (int)(d + 0.5);
+}
+
+/* Straight-line distance from our position to lat/lon in metres, or -1 when
+ * our own position is unknown. (Metres twin of distance_to.) */
+static int dist_m_to(double lat, double lon) {
+  if (g_lat == 0 && g_lon == 0) return -1;
+  const double D2R = 0.0174532925199433;
+  double x = (lon - g_lon) * D2R * m_cos((g_lat + lat) * 0.5 * D2R);
+  double y = (lat - g_lat) * D2R;
+  double km = 6371.0 * __builtin_sqrt(x * x + y * y);
+  return (int)(km * 1000.0 + 0.5);
+}
+
+/* Format metres as "<n> m" (<1 km) or "<n> km". */
+static void fmt_dist_m(int m, char *out, unsigned osz) {
+  if (m < 1000) { u_itoa((unsigned)m, out); s_cat(out, " m", osz); }
+  else { u_itoa((unsigned)((m + 500) / 1000), out); s_cat(out, " km", osz); }
+}
+
+/* Per-ping responder results, so we can keep the best route per responder and
+ * re-render the list as replies arrive. by_pos = distance came from a real
+ * position (accurate); else it's an RF (RSSI) estimate. */
+#define PRES_MAX 32
+static struct { char call[16]; int hops; int dist_m; int by_pos; int used; } g_pres[PRES_MAX];
+static int g_pres_n = 0;
+static void pres_reset(void) { g_pres_n = 0; for (int i = 0; i < PRES_MAX; i++) g_pres[i].used = 0; }
+/* Best route: prefer a position fix; among RF estimates keep the smallest
+ * (most-direct) one; track the fewest hops seen. */
+static void pres_update(const char *call, int hops, int dist_m, int by_pos) {
+  int idx = -1;
+  for (int i = 0; i < g_pres_n; i++)
+    if (g_pres[i].used && s_eq(g_pres[i].call, call)) { idx = i; break; }
+  if (idx < 0) {
+    if (g_pres_n >= PRES_MAX) return;
+    idx = g_pres_n++;
+    s_cpy(g_pres[idx].call, call, sizeof(g_pres[idx].call));
+    g_pres[idx].used = 1; g_pres[idx].hops = hops;
+    g_pres[idx].dist_m = dist_m; g_pres[idx].by_pos = by_pos;
+    return;
+  }
+  if (by_pos && !g_pres[idx].by_pos) { g_pres[idx].by_pos = 1; g_pres[idx].dist_m = dist_m; }
+  else if (by_pos == g_pres[idx].by_pos && dist_m >= 0 &&
+           (g_pres[idx].dist_m < 0 || dist_m < g_pres[idx].dist_m)) {
+    g_pres[idx].dist_m = dist_m;
+  }
+  if (hops >= 0 && hops < g_pres[idx].hops) g_pres[idx].hops = hops;
+}
+static void pres_render(void) {
+  const char *c = "{\"type\":\"ui.log.clear\",\"field\":\"pingresults\"}";
+  hal_msg_send(c, s_len(c));
+  for (int i = 0; i < g_pres_n; i++) {
+    if (!g_pres[i].used) continue;
+    char line[128] = ""; s_cat(line, g_pres[i].call, sizeof(line)); s_cat(line, "  ", sizeof(line));
+    { char t[8]; u_itoa((unsigned)(g_pres[i].hops < 0 ? 0 : g_pres[i].hops), t); s_cat(line, t, sizeof(line)); }
+    s_cat(line, (g_pres[i].hops == 1) ? " hop" : " hops", sizeof(line));
+    if (g_pres[i].dist_m >= 0) {
+      char d[24]; fmt_dist_m(g_pres[i].dist_m, d, sizeof(d));
+      s_cat(line, "  -  ", sizeof(line));
+      if (!g_pres[i].by_pos) s_cat(line, "~", sizeof(line));   /* RF estimate */
+      s_cat(line, d, sizeof(line));
+      if (!g_pres[i].by_pos) s_cat(line, " (RF)", sizeof(line));
+    }
+    log_line("pingresults", line);
+  }
+}
+
 /* Inbound ping: answer once with our callsign + position, then forward it on
  * (ttl) so it reaches further stations. text = "id,ttl,hops". */
 static void handle_ping(const char *from, const char *text) {
@@ -1121,6 +1196,7 @@ static void handle_ping(const char *from, const char *text) {
   if (have) append_dbl(body, sizeof(body), lo);
   s_cat(body, ",", sizeof(body));
   { char t[8]; u_itoa((unsigned)PING_DEFAULT_TTL, t); s_cat(body, t, sizeof(body)); }
+  s_cat(body, ",0", sizeof(body));   /* dM: cumulative RF distance starts at 0 */
   ble_tx_from(g_call, PONG_TO, body);
 
   if (ttl > 1) {     /* digipeat the ping further */
@@ -1132,45 +1208,61 @@ static void handle_ping(const char *from, const char *text) {
   }
 }
 
-/* Inbound pong: if it answers our active ping, list it + drop a map marker;
- * forward it back across the mesh (pttl). text = "id,hops,lat,lon,pttl". */
-static void handle_pong(const char *from, const char *text) {
-  char ids[16], hopss[8], las[24], los[24], pttls[8];
+/* Inbound pong: if it answers our active ping, record it (best route) + drop a
+ * map marker; forward it back across the mesh, accumulating an RF distance.
+ * text = "id,hops,lat,lon,pttl,dM". [rssi] = strength we received it at.
+ *
+ * Distance estimate per responder:
+ *  - if the reply carries a position AND we know ours -> exact (by_pos);
+ *  - else RF: dM (sum of prior hops' RSSI distances) + this hop's RSSI distance.
+ * For multi-hop, several routes may arrive; we keep the smallest (best). */
+static void handle_pong(const char *from, const char *text, int rssi) {
+  char ids[16], hopss[8], las[24], los[24], pttls[8], dms[12];
   csv_field(text, 0, ids, sizeof(ids));
   csv_field(text, 1, hopss, sizeof(hopss));
   csv_field(text, 2, las, sizeof(las));
   csv_field(text, 3, los, sizeof(los));
   csv_field(text, 4, pttls, sizeof(pttls));
+  csv_field(text, 5, dms, sizeof(dms));
   if (!ids[0]) return;
-  unsigned key = sig_hash("Q", from, ids);
-  if (pseen_has(key)) return;
-  pseen_add(key);
 
   int hops = to_int(hopss);
   double lat = to_dbl(las), lon = to_dbl(los);
   int has_pos = (las[0] != 0);
+  int dM = to_int(dms);                  /* RF metres accumulated so far */
+  int hop_m = est_dist_m(rssi);          /* this hop's RF distance (-1 unknown) */
 
+  /* Record for our active ping — for EVERY arriving copy, so best-route wins. */
   char gids[16]; u_itoa(g_ping_id, gids);
   if (g_ping_active && s_eq(gids, ids)) {
-    char line[120] = ""; s_cat(line, from, sizeof(line)); s_cat(line, "  ", sizeof(line));
-    { char t[8]; u_itoa((unsigned)(hops < 0 ? 0 : hops), t); s_cat(line, t, sizeof(line)); }
-    s_cat(line, (hops == 1) ? " hop" : " hops", sizeof(line));
+    int by_pos = 0, dist = -1;
     if (has_pos) {
-      char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
-      if (meta[0]) { s_cat(line, "  -  ", sizeof(line)); s_cat(line, meta, sizeof(line)); }
-      push_marker(from, lat, lon, "green", "ping reply");
+      int dm = dist_m_to(lat, lon);      /* needs our own position */
+      if (dm >= 0) { dist = dm; by_pos = 1; }
     }
-    log_line("pingresults", line);
+    if (!by_pos && hop_m >= 0) dist = dM + hop_m;   /* RF total along this route */
+    pres_update(from, hops, dist, by_pos);
+    if (has_pos) push_marker(from, lat, lon, "green", "ping reply");
+    pres_render();
   }
 
+  /* Forward the reply once (per responder+id), adding this hop's RF distance so
+   * the running total reflects the path back to the pinger. Skip if we're the
+   * pinger (we're the destination). */
+  unsigned key = sig_hash("Q", from, ids);
+  if (pseen_has(key)) return;
+  pseen_add(key);
   int pttl = to_int(pttls);
-  if (pttl > 1) {    /* propagate the reply back toward the pinger */
-    char fwd[100] = ""; s_cat(fwd, ids, sizeof(fwd)); s_cat(fwd, ",", sizeof(fwd));
+  if (pttl > 1 && !(g_ping_active && s_eq(gids, ids))) {
+    int dM2 = dM + (hop_m >= 0 ? hop_m : 0);
+    char fwd[110] = ""; s_cat(fwd, ids, sizeof(fwd)); s_cat(fwd, ",", sizeof(fwd));
     { char t[8]; u_itoa((unsigned)hops, t); s_cat(fwd, t, sizeof(fwd)); }
     s_cat(fwd, ",", sizeof(fwd)); s_cat(fwd, las, sizeof(fwd));
     s_cat(fwd, ",", sizeof(fwd)); s_cat(fwd, los, sizeof(fwd));
     s_cat(fwd, ",", sizeof(fwd));
     { char t[8]; u_itoa((unsigned)(pttl - 1), t); s_cat(fwd, t, sizeof(fwd)); }
+    s_cat(fwd, ",", sizeof(fwd));
+    { char t[12]; u_itoa((unsigned)dM2, t); s_cat(fwd, t, sizeof(fwd)); }
     ble_tx_from(from, PONG_TO, fwd);   /* keep the responder as 'from' */
   }
 }
@@ -1187,6 +1279,7 @@ static void do_ping(const char *buf) {
   g_ping_id = (unsigned)hal_time_epoch() ^ (g_ping_seq * 2654435761u);
   g_ping_active = 1;
   g_ping_start = hal_time_epoch();
+  pres_reset();
 
   { const char *c = "{\"type\":\"ui.log.clear\",\"field\":\"pingresults\"}";
     hal_msg_send(c, s_len(c)); }
@@ -1203,7 +1296,7 @@ static void do_ping(const char *buf) {
   status("TX ping");
 }
 
-static void ble_handle(const char *compact) {
+static void ble_handle(const char *compact, int rssi) {
   unsigned h = sig_hash("b", "", compact);
   if (fseen_has(h)) return;
   fseen_add(h);
@@ -1228,7 +1321,7 @@ static void ble_handle(const char *compact) {
    * verbatim, relayed to APRS-IS, or shown on the Live feed — they have their
    * own ttl-based forwarding. */
   if (s_eq(to, PING_TO)) { handle_ping(from, text); return; }
-  if (s_eq(to, PONG_TO)) { handle_pong(from, text); return; }
+  if (s_eq(to, PONG_TO)) { handle_pong(from, text, rssi); return; }
 
   /* Digipeater: rebroadcast this frame once, after a short staggered delay
    * (see rq_*), ignoring content already repeated in the last 10 minutes. */
@@ -1347,7 +1440,8 @@ void module_tick(void) {
     for (int guard = 0; guard < 20; guard++) {
       if (ble_poll(rec, sizeof(rec)) <= 0) break;
       char frame[300]; jstr(rec, "data", frame, sizeof(frame));
-      if (frame[0]) ble_handle(frame);
+      int rssi = 0; { char rv[12]; if (jstr(rec, "rssi", rv, sizeof(rv))) rssi = to_int(rv); }
+      if (frame[0]) ble_handle(frame, rssi);
     }
     if (g_lat != 0 || g_lon != 0) {
       uint64_t now = hal_time_epoch();
