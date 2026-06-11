@@ -1898,22 +1898,22 @@ static void rel_time(uint64_t ts, char *out, unsigned sz) {
   out[0] = 0; s_cat(out, nb, sz); { char u[2] = { unit, 0 }; s_cat(out, u, sz); }
 }
 
-/* Rebuild the Keys list view from the callsign->pubkey database. Each line:
- * "<callsign>  <fingerprint>…  <age> ago". The full base64url key lives in KV. */
+/* Rebuild the Keys list view from the callsign->pubkey database. Per station two
+ * lines: "<callsign>  (<age>)" then the full npub. The host encodes the stored
+ * base64url key to npub; the raw key stays in KV for encryption. */
 static void pk_render(void) {
   log_clear("keys_list");
   if (g_pk_n == 0) { log_line("keys_list", "No public keys received yet."); return; }
   for (int i = 0; i < g_pk_n; i++) {
-    char line[96]; line[0] = 0;
-    s_cat(line, g_pk_call[i], sizeof(line));
-    while (s_len(line) < 9) s_cat(line, " ", sizeof(line));
-    s_cat(line, " ", sizeof(line));
-    char fp[16]; int j = 0; for (; j < 12 && g_pk_key[i][j]; j++) fp[j] = g_pk_key[i][j];
-    fp[j] = 0;
-    s_cat(line, fp, sizeof(line)); s_cat(line, "..  ", sizeof(line));
+    char hdr[40]; hdr[0] = 0;
+    s_cat(hdr, g_pk_call[i], sizeof(hdr));
     char age[12]; rel_time(g_pk_ts[i], age, sizeof(age));
-    s_cat(line, age, sizeof(line));
-    log_line("keys_list", line);
+    s_cat(hdr, "  (", sizeof(hdr)); s_cat(hdr, age, sizeof(hdr)); s_cat(hdr, ")", sizeof(hdr));
+    log_line("keys_list", hdr);
+    char npub[72];
+    uint32_t nn = hal_npub(g_pk_key[i], s_len(g_pk_key[i]), npub, sizeof(npub) - 1);
+    if (nn > 0 && nn < sizeof(npub)) { npub[nn] = 0; log_line("keys_list", npub); }
+    else log_line("keys_list", g_pk_key[i]);   /* fallback: raw base64url key */
   }
 }
 

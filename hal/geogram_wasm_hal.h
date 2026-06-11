@@ -75,6 +75,13 @@ uint32_t hal_verify(const char *pubkey, uint32_t pubkey_len,
                     const char *msg, uint32_t msg_len,
                     const char *sig, uint32_t sig_len);
 
+/* Encode a public key (base64url of the 32 raw bytes, as hal_identity_pubkey
+ * emits) to its npub bech32 string ("npub1..."), written into out_buf. Returns
+ * bytes written (0 on error). Lets a wapp display the familiar npub form. */
+__attribute__((import_module("hal"), import_name("npub")))
+uint32_t hal_npub(const char *pubkey, uint32_t pubkey_len,
+                  char *out_buf, uint32_t out_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);
