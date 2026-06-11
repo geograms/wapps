@@ -223,5 +223,21 @@
       },
       { "$": "field", "name": "pingresults", "$type": "log", "label": "Responses", "tip": "Stations that answered, with hop count and distance." }
     ]
+  },
+  {
+    "$": "screen",
+    "name": "Keys",
+    "tip": "Public keys collected from other stations' NOSTR beacons — the basis for sending them encrypted messages.",
+    "children": [
+      {
+        "$": "group",
+        "name": "keys_group",
+        "tip": "Each station that broadcasts its public key is recorded here (callsign, key fingerprint, time since last heard).",
+        "children": [
+          { "$": "action", "name": "keys_refresh", "label": "Refresh", "style": "secondary", "tip": "Rebuild the list from the stored key database." },
+          { "$": "field", "name": "keys_list", "$type": "log", "label": "Known public keys", "tip": "callsign  key-fingerprint..  age. The full key is stored for encryption." }
+        ]
+      }
+    ]
   }
 ]

@@ -192,7 +192,9 @@ static int g_sign_msgs = 0;
 #define PK_MAX 64
 static char g_pk_call[PK_MAX][16];        /* callsign -> */
 static char g_pk_key[PK_MAX][48];         /* pubkey (base64url, ~43 chars) */
+static uint64_t g_pk_ts[PK_MAX];          /* last time we heard this station's key */
 static int  g_pk_n = 0;
+static void pk_render(void);              /* fwd: refresh the Keys list view */
 
 /* ── BLE ping (Tools tab): local reach test across digipeaters ──────────
  * A ping is a BLE-only broadcast (never APRS-IS, never shown on the Live
@@ -887,9 +889,12 @@ static const char *pk_get(const char *call) {
 static void pk_save(void) {
   g_pk_scratch[0] = 0;
   for (int i = 0; i < g_pk_n; i++) {
+    char tb[12]; u_itoa((unsigned)g_pk_ts[i], tb);
     s_cat(g_pk_scratch, g_pk_call[i], sizeof(g_pk_scratch));
     s_cat(g_pk_scratch, "=", sizeof(g_pk_scratch));
     s_cat(g_pk_scratch, g_pk_key[i], sizeof(g_pk_scratch));
+    s_cat(g_pk_scratch, "=", sizeof(g_pk_scratch));   /* base64url has no '=' */
+    s_cat(g_pk_scratch, tb, sizeof(g_pk_scratch));
     s_cat(g_pk_scratch, ";", sizeof(g_pk_scratch));
   }
   hal_kv_set("pubkeys", 7, g_pk_scratch, s_len(g_pk_scratch));
@@ -897,31 +902,38 @@ static void pk_save(void) {
 static void pk_store(const char *call, const char *key) {
   if (!call[0] || !key[0] || s_eq(call, g_call)) return;
   for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_call[i], call)) {
+    g_pk_ts[i] = hal_time_epoch();
     if (!s_eq(g_pk_key[i], key)) { s_cpy(g_pk_key[i], key, sizeof(g_pk_key[i])); pk_save(); }
+    pk_render();
     return;
   }
   if (g_pk_n >= PK_MAX) return;
   s_cpy(g_pk_call[g_pk_n], call, sizeof(g_pk_call[0]));
   s_cpy(g_pk_key[g_pk_n], key, sizeof(g_pk_key[0]));
+  g_pk_ts[g_pk_n] = hal_time_epoch();
   g_pk_n++;
   pk_save();
+  pk_render();
 }
 static void pk_load(void) {
   uint32_t n = hal_kv_get("pubkeys", 7, g_pk_scratch, sizeof(g_pk_scratch) - 1);
   if (n == 0) return;
   g_pk_scratch[n] = 0;
-  char call[16], key[48]; int ci = 0, ki = 0, stage = 0;
+  char call[16], key[48], ts[12]; int ci = 0, ki = 0, ti = 0, stage = 0;
   for (unsigned i = 0; i <= n; i++) {
     char c = (i < n) ? g_pk_scratch[i] : ';';
     if (c == ';') {
-      if (stage == 1 && ci > 0 && ki > 0 && g_pk_n < PK_MAX) {
-        call[ci] = 0; key[ki] = 0;
-        s_cpy(g_pk_call[g_pk_n], call, 16); s_cpy(g_pk_key[g_pk_n], key, 48); g_pk_n++;
+      if (ci > 0 && ki > 0 && g_pk_n < PK_MAX) {
+        call[ci] = 0; key[ki] = 0; ts[ti] = 0;
+        s_cpy(g_pk_call[g_pk_n], call, 16); s_cpy(g_pk_key[g_pk_n], key, 48);
+        g_pk_ts[g_pk_n] = ti > 0 ? (uint64_t)to_int(ts) : 0;   /* legacy: no ts */
+        g_pk_n++;
       }
-      ci = 0; ki = 0; stage = 0;
-    } else if (c == '=' && stage == 0) stage = 1;
+      ci = 0; ki = 0; ti = 0; stage = 0;
+    } else if (c == '=' && stage < 2) stage++;
     else if (stage == 0) { if (ci < 15) call[ci++] = c; }
-    else { if (ki < 47) key[ki++] = c; }
+    else if (stage == 1) { if (ki < 47) key[ki++] = c; }
+    else { if (ti < 11) ts[ti++] = c; }
   }
 }
 /* Intercept a NOSTR key beacon (group "NOSTR"): record from->pubkey and report
@@ -1866,6 +1878,44 @@ static void log_line(const char *field, const char *text) {
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
+static void log_clear(const char *field) {
+  char m[80] = "{\"type\":\"ui.log.clear\",\"field\":\"";
+  s_cat(m, field, sizeof(m)); s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Compact "time since" into out (e.g. "12s", "5m", "3h", "2d", "-" if unknown). */
+static void rel_time(uint64_t ts, char *out, unsigned sz) {
+  if (ts == 0) { s_cpy(out, "-", sz); return; }
+  uint64_t now = hal_time_epoch();
+  uint64_t d = now > ts ? now - ts : 0;
+  unsigned v; char unit;
+  if (d < 60) { v = (unsigned)d; unit = 's'; }
+  else if (d < 3600) { v = (unsigned)(d / 60); unit = 'm'; }
+  else if (d < 86400) { v = (unsigned)(d / 3600); unit = 'h'; }
+  else { v = (unsigned)(d / 86400); unit = 'd'; }
+  char nb[12]; u_itoa(v, nb);
+  out[0] = 0; s_cat(out, nb, sz); { char u[2] = { unit, 0 }; s_cat(out, u, sz); }
+}
+
+/* Rebuild the Keys list view from the callsign->pubkey database. Each line:
+ * "<callsign>  <fingerprint>…  <age> ago". The full base64url key lives in KV. */
+static void pk_render(void) {
+  log_clear("keys_list");
+  if (g_pk_n == 0) { log_line("keys_list", "No public keys received yet."); return; }
+  for (int i = 0; i < g_pk_n; i++) {
+    char line[96]; line[0] = 0;
+    s_cat(line, g_pk_call[i], sizeof(line));
+    while (s_len(line) < 9) s_cat(line, " ", sizeof(line));
+    s_cat(line, " ", sizeof(line));
+    char fp[16]; int j = 0; for (; j < 12 && g_pk_key[i][j]; j++) fp[j] = g_pk_key[i][j];
+    fp[j] = 0;
+    s_cat(line, fp, sizeof(line)); s_cat(line, "..  ", sizeof(line));
+    char age[12]; rel_time(g_pk_ts[i], age, sizeof(age));
+    s_cat(line, age, sizeof(line));
+    log_line("keys_list", line);
+  }
+}
 
 /* Extract the idx-th comma-separated field of s into out (NUL-terminated). */
 static void csv_field(const char *s, int idx, char *out, unsigned osz) {
@@ -2230,6 +2280,7 @@ void module_init(void) {
     if (pn < sizeof(g_pubkey)) g_pubkey[pn] = 0; else g_pubkey[0] = 0; }
   pkbeacon_load();
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
+  pk_render();     /* populate the Keys list view from the restored database */
   { char b[4]; uint32_t n = hal_kv_get("signmsgs", 8, b, sizeof(b) - 1);
     if (n >= 1) g_sign_msgs = (b[0] != '0'); }
   status("APRS ready - connecting to APRS-IS automatically...");
@@ -2442,6 +2493,7 @@ void module_handle_event(void) {
       notify("info", "Public-key broadcast disabled");
     }
   }
+  else if (s_eq(cmd, "keys_refresh")) pk_render();
   else if (s_eq(cmd, "sign_apply")) {
     g_sign_msgs = jbool_def(buf, "sign_msgs", 0);
     hal_kv_set("signmsgs", 8, g_sign_msgs ? "1" : "0", 1);
