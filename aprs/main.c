@@ -163,6 +163,37 @@ static uint64_t g_ble_last_beacon = 0;
 static void ble_tx_msg(const char *to, const char *text);
 static void ble_tx_pos(double lat, double lon, const char *comment);
 
+/* ── Public-key beacon ───────────────────────────────────────────────────
+ * Periodically broadcast this station's public key so peers can map our
+ * callsign -> pubkey and later send us encrypted messages. The host hands us
+ * the key as base64url of the raw 32 bytes (43 chars — an npub bech32 string
+ * would be 63, too tight for one 67-char APRS message and bulky on a BLE
+ * advert). Sent as an APRS bulletin to the well-known group "NOSTR" (the
+ * addressee BLN..NOSTR is the "code"; the frame's from-field is the callsign;
+ * the text is the base64 key) and, identically, over BLE as "#NOSTR". The key
+ * never changes, so the rate is low. ON by default; the user can disable it in
+ * Settings (persisted to KV). Receivers base64url-decode it back to 32 bytes.
+ */
+#define PKBEACON_GROUP    "NOSTR"
+#define PKBEACON_INTERVAL 1800            /* seconds (30 min) */
+static char  g_pubkey[80] = "";           /* our pubkey (base64url), cached at init */
+static int   g_pubkey_beacon = 1;         /* broadcast it? (default on) */
+static uint64_t g_last_pkbeacon = 0;
+
+/* ── Message signing (APRX verifiable authorship) ────────────────────────
+ * When enabled, outgoing messages carry a short-Schnorr signature so peers can
+ * verify the author. The signature is 48 bytes -> 60 base85 chars, appended as
+ * " ~<sig>" (one extra APRS line). Verification needs the sender's pubkey, kept
+ * in a callsign->pubkey map filled from received NOSTR beacons (§10). Both the
+ * crypto and the base85 live host-side (hal_identity_sign / hal_verify); the
+ * private key never reaches the wapp. OFF by default (a signature ~doubles a
+ * short message); persisted in KV. */
+static int g_sign_msgs = 0;
+#define PK_MAX 64
+static char g_pk_call[PK_MAX][16];        /* callsign -> */
+static char g_pk_key[PK_MAX][48];         /* pubkey (base64url, ~43 chars) */
+static int  g_pk_n = 0;
+
 /* ── BLE ping (Tools tab): local reach test across digipeaters ──────────
  * A ping is a BLE-only broadcast (never APRS-IS, never shown on the Live
  * feed). Every BLE station answers once with its callsign + position and
@@ -494,6 +525,26 @@ static int thread_parse(const char *wire, char parent[5], const char **disp) {
   parent[4] = 0; *disp = wire + 6;
   return 1;
 }
+/* "Like" marker on the wire: "<4hex>:like" / "<4hex>:unlike" — a vote on the
+ * message whose thread id is <4hex>. Deliberately human-readable (no special
+ * leading byte) so any APRS client, not just Aurora, can like a topic by
+ * sending e.g. "b9fb:like" to the group. On match copies the target id into
+ * [tgt] (5 bytes), sets *unlike, and returns 1. */
+static int like_parse(const char *wire, char tgt[5], int *unlike) {
+  tgt[0] = 0; *unlike = 0;
+  for (int i = 0; i < 4; i++) {
+    char ch = wire[i];
+    if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return 0;
+  }
+  if (wire[4] != ':') return 0;
+  const char *v = wire + 5;
+  if (s_eq(v, "like")) *unlike = 0;
+  else if (s_eq(v, "unlike")) *unlike = 1;
+  else return 0;
+  for (int i = 0; i < 4; i++) tgt[i] = wire[i];
+  tgt[4] = 0;
+  return 1;
+}
 static unsigned g_seen[128];
 static unsigned g_seen_cnt = 0;
 static int seen_has(unsigned h) {
@@ -672,14 +723,17 @@ static void cat_pos(char *m, unsigned sz, double lat, double lon) {
 /* Append optional thread fields ("mid" = this message's 4-hex id, "parent" =
  * the id it replies to). Empty values are omitted so non-threaded chats and the
  * host's generic store are unaffected. */
-static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent) {
+static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent,
+                       const char *auth) {
   if (mid && mid[0]) { s_cat(m, ",\"mid\":\"", sz); s_cat(m, mid, sz); s_cat(m, "\"", sz); }
   if (parent && parent[0]) { s_cat(m, ",\"parent\":\"", sz); s_cat(m, parent, sz); s_cat(m, "\"", sz); }
+  /* Signature verdict (APRX): verified / bad / unverified. Empty = unsigned. */
+  if (auth && auth[0]) { s_cat(m, ",\"auth\":\"", sz); s_cat(m, auth, sz); s_cat(m, "\"", sz); }
 }
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
                       double lat, double lon, const char *via,
-                      const char *mid, const char *parent) {
+                      const char *mid, const char *parent, const char *auth) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -695,14 +749,14 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
-  cat_thread(m, sizeof(m), mid, parent);
+  cat_thread(m, sizeof(m), mid, parent, auth);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void convo_pin(const char *id, const char *key, const char *dir,
                       const char *from, const char *text, const char *meta,
                       double lat, double lon, const char *via,
-                      const char *mid, const char *parent) {
+                      const char *mid, const char *parent, const char *auth) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.pin\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -718,7 +772,7 @@ static void convo_pin(const char *id, const char *key, const char *dir,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
-  cat_thread(m, sizeof(m), mid, parent);
+  cat_thread(m, sizeof(m), mid, parent, auth);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -727,6 +781,23 @@ static void convo_unpin(const char *id, const char *key) {
   jesc(m, sizeof(m), id);
   s_cat(m, "\",\"key\":\"", sizeof(m)); s_cat(m, key, sizeof(m));
   s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+/* A "like" vote on message [mid] by station [from]. The host owns the tally:
+ * it keeps the set of likers per message id (so each callsign counts once) and
+ * derives the count + whether *we* liked it. [remove] retracts the like;
+ * [mine] flags our own vote so the host can light the heart. App-agnostic on
+ * the host side (a generic reaction by an opaque actor id). */
+static void convo_react(const char *id, const char *mid, const char *from,
+                        int remove, int mine) {
+  char m[220] = "{\"type\":\"ui.convo.react\",\"id\":\"";
+  jesc(m, sizeof(m), id);
+  s_cat(m, "\",\"mid\":\"", sizeof(m)); s_cat(m, mid, sizeof(m));
+  s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
+  s_cat(m, "\"", sizeof(m));
+  if (remove) s_cat(m, ",\"remove\":true", sizeof(m));
+  if (mine) s_cat(m, ",\"mine\":true", sizeof(m));
+  s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 /* Display title for a conversation row. Groups show the bare name; local vs
@@ -773,6 +844,94 @@ static void convo_badge_only(const char *id) {
   hal_msg_send(m, s_len(m));
 }
 
+/* ── APRX message signatures ──────────────────────────────────────────── */
+/* base85 alphabet — must match the host (lib/util/aprx_sign.dart). */
+static int is_b85(char c) {
+  if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+    return 1;
+  const char *p = ".-+=^!/*?&<>()[]%$#@,;_";
+  for (; *p; p++) if (*p == c) return 1;
+  return 0;
+}
+/* A signed message ends with " ~<60 base85 chars>". If present, copy the body
+ * (without that suffix) into [core] and the 60-char signature into [sig], and
+ * return 1; else 0. */
+#define SIG_B85_LEN 60
+static int sig_split(const char *text, char *core, unsigned coresz,
+                     char *sig, unsigned sigsz) {
+  int n = (int)s_len(text);
+  if (n < SIG_B85_LEN + 2) return 0;
+  int s0 = n - SIG_B85_LEN;
+  if (text[s0 - 1] != '~' || text[s0 - 2] != ' ') return 0;
+  for (int i = s0; i < n; i++) if (!is_b85(text[i])) return 0;
+  int clen = s0 - 2;
+  if ((unsigned)clen >= coresz) clen = (int)coresz - 1;
+  for (int i = 0; i < clen; i++) core[i] = text[i];
+  core[clen] = 0;
+  unsigned j = 0;
+  for (int i = s0; i < n && j + 1 < sigsz; i++) sig[j++] = text[i];
+  sig[j] = 0;
+  return 1;
+}
+/* canonical signed bytes = "<from>|<core>" (must match the signer) */
+static void sig_canon(char *out, unsigned sz, const char *from, const char *core) {
+  out[0] = 0; s_cat(out, from, sz); s_cat(out, "|", sz); s_cat(out, core, sz);
+}
+
+/* ── callsign -> pubkey map (filled from received NOSTR beacons) ───────── */
+static char g_pk_scratch[PK_MAX * 64];
+static const char *pk_get(const char *call) {
+  for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_call[i], call)) return g_pk_key[i];
+  return 0;
+}
+static void pk_save(void) {
+  g_pk_scratch[0] = 0;
+  for (int i = 0; i < g_pk_n; i++) {
+    s_cat(g_pk_scratch, g_pk_call[i], sizeof(g_pk_scratch));
+    s_cat(g_pk_scratch, "=", sizeof(g_pk_scratch));
+    s_cat(g_pk_scratch, g_pk_key[i], sizeof(g_pk_scratch));
+    s_cat(g_pk_scratch, ";", sizeof(g_pk_scratch));
+  }
+  hal_kv_set("pubkeys", 7, g_pk_scratch, s_len(g_pk_scratch));
+}
+static void pk_store(const char *call, const char *key) {
+  if (!call[0] || !key[0] || s_eq(call, g_call)) return;
+  for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_call[i], call)) {
+    if (!s_eq(g_pk_key[i], key)) { s_cpy(g_pk_key[i], key, sizeof(g_pk_key[i])); pk_save(); }
+    return;
+  }
+  if (g_pk_n >= PK_MAX) return;
+  s_cpy(g_pk_call[g_pk_n], call, sizeof(g_pk_call[0]));
+  s_cpy(g_pk_key[g_pk_n], key, sizeof(g_pk_key[0]));
+  g_pk_n++;
+  pk_save();
+}
+static void pk_load(void) {
+  uint32_t n = hal_kv_get("pubkeys", 7, g_pk_scratch, sizeof(g_pk_scratch) - 1);
+  if (n == 0) return;
+  g_pk_scratch[n] = 0;
+  char call[16], key[48]; int ci = 0, ki = 0, stage = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char c = (i < n) ? g_pk_scratch[i] : ';';
+    if (c == ';') {
+      if (stage == 1 && ci > 0 && ki > 0 && g_pk_n < PK_MAX) {
+        call[ci] = 0; key[ki] = 0;
+        s_cpy(g_pk_call[g_pk_n], call, 16); s_cpy(g_pk_key[g_pk_n], key, 48); g_pk_n++;
+      }
+      ci = 0; ki = 0; stage = 0;
+    } else if (c == '=' && stage == 0) stage = 1;
+    else if (stage == 0) { if (ci < 15) call[ci++] = c; }
+    else { if (ki < 47) key[ki++] = c; }
+  }
+}
+/* Intercept a NOSTR key beacon (group "NOSTR"): record from->pubkey and report
+ * it was handled (so it isn't shown as a chat message). */
+static int pk_intercept(const char *group, const char *from, const char *text) {
+  if (!s_eq(group, "NOSTR")) return 0;
+  pk_store(from, text);
+  return 1;
+}
+
 /* Deliver one conversation message: dedup by signature — first time shows in
  * the flow, a repeat is promoted to a pinned item (and further repeats are
  * ignored as updates of the same pin). [forcePin] is set for our own
@@ -784,12 +943,41 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
    * if it carries a "+<4hex> " reply marker, split off the parent + show the
    * text without the marker. 1:1 chats are untouched. */
   char mid[5] = "", parent[5] = "";
-  const char *disp = text;
-  if (id[0] == '#') {
-    msg_id(from, text, mid);
-    thread_parse(text, parent, &disp);
+  /* APRX signature: split off a trailing " ~<sig>" and verify it. The core
+   * (sig stripped) is what we thread/id/display; the sig never affects mid. */
+  char core[400]; char sigstr[80]; char auth[12] = "";
+  const char *body = text;
+  if (sig_split(text, core, sizeof(core), sigstr, sizeof(sigstr))) {
+    body = core;
+    if (s_eq(dir, "out")) {
+      s_cpy(auth, "verified", sizeof(auth));     /* we signed it ourselves */
+    } else {
+      const char *pk = pk_get(from);
+      if (!pk) {
+        s_cpy(auth, "unverified", sizeof(auth)); /* sender's key not known yet */
+      } else {
+        char canon[460]; sig_canon(canon, sizeof(canon), from, core);
+        int ok = hal_verify(pk, s_len(pk), canon, s_len(canon), sigstr, s_len(sigstr));
+        s_cpy(auth, ok ? "verified" : "bad", sizeof(auth));
+      }
+    }
   }
-  unsigned h = sig_hash(id, from, text);   /* dedup on the wire text */
+  const char *disp = body;
+  if (id[0] == '#') {
+    /* A like vote ("<4hex>:like") is not a chat message: register the reaction
+     * and stop (no bubble). Works for our own echo (mine) and others' votes. */
+    char tgt[5]; int unlike;
+    if (like_parse(body, tgt, &unlike)) {
+      convo_react(id, tgt, from, unlike, s_eq(from, g_call));
+      return;
+    }
+    msg_id(from, body, mid);
+    thread_parse(body, parent, &disp);
+  }
+  /* Dedup on the signature-stripped core, so the SAME message arriving via two
+   * transports (e.g. directly from APRS-IS and re-broadcast by a BLE iGate),
+   * or signed vs unsigned forms, collapses to one. */
+  unsigned h = sig_hash(id, from, body);
   char key[16]; u_itoa(h, key);
   /* Distance + position of the sender (incoming only), so the host can show
    * them on the map when the distance is tapped. */
@@ -800,8 +988,12 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   }
   int rep = seen_has(h);
   if (!rep) seen_add(h);
-  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent);
-  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent);
+  /* A repeated INCOMING direct message is a duplicate (dual-path delivery from
+   * APRS-IS + a BLE iGate, or a resend) — drop it. Repeated bulletins are
+   * intentional (recurring) → promote to pinned; our own sends are never dropped. */
+  if (rep && id[0] != '#' && s_eq(dir, "in")) return;
+  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent, auth);
+  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth);
   convo_touch(id, preview, 0);
 }
 
@@ -825,22 +1017,41 @@ static void do_convo_send(const char *buf) {
     if (g_ble_on) ble_tx_pos(g_lat, g_lon, "");
     push_marker(g_call, g_lat, g_lon, "blue", "");
   }
+  /* Sign the message (APRX) when enabled: append " ~<base85 sig>". The signed
+   * body is then word-split by the multi-line senders so the 60-char signature
+   * lands on its own final APRS line (≤67 chars/line, retro-compatible). The
+   * receiver reassembles and verifies. Likes are left unsigned (kept compact). */
+  char wire[480];
+  s_cpy(wire, text, sizeof(wire));
+  {
+    char tgt[5]; int ul;
+    if (g_sign_msgs && !like_parse(text, tgt, &ul)) {
+      char canon[460]; sig_canon(canon, sizeof(canon), g_call, text);
+      char sg[80];
+      uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
+      if (sn > 0 && sn < sizeof(sg)) {
+        sg[sn] = 0;
+        s_cat(wire, " ~", sizeof(wire));
+        s_cat(wire, sg, sizeof(wire));
+      }
+    }
+  }
   if (id[0] == '#') {
     /* Strip the scope marker: a global group "#NEWS*" transmits the same
      * "NEWS" bulletin as the local "#NEWS" — scope is only a local view. */
     char gname[8]; int gj = 0;
     for (int i = 1; id[i] && id[i] != '*' && gj < 6; i++) gname[gj++] = id[i];
     gname[gj] = 0;
-    if (net) aprs_send_bulletin_multi(g_sock, g_call, gname, text, APRS_MAX_MSG_LEN);
+    if (net) aprs_send_bulletin_multi(g_sock, g_call, gname, wire, APRS_MAX_MSG_LEN);
     if (g_ble_on) {
       char bid[10]; bid[0] = '#'; s_cpy(bid + 1, gname, sizeof(bid) - 1);
-      ble_tx_msg(bid, text);            /* compact BLE: to = "#group" (no scope) */
+      ble_tx_msg(bid, wire);            /* compact BLE: to = "#group" (no scope) */
     }
   } else {
-    if (net) aprs_send_message_multi(g_sock, g_call, id, text, APRS_MAX_MSG_LEN, &g_seq);
-    if (g_ble_on) ble_tx_msg(id, text);
+    if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
+    if (g_ble_on) ble_tx_msg(id, wire);
   }
-  convo_deliver(id, "out", g_call, text, text, 0, "");
+  convo_deliver(id, "out", g_call, wire, text, 0, "");
   status(loc ? "TX message + position" : "TX message");
 }
 
@@ -974,10 +1185,12 @@ static void norm_group(const char *src, char *out) {
 /* "+" add-group: ask the host to show the preset/custom group picker. */
 static const char *PRESET_GROUPS[] = {
   "ALL", "MISC", "TECH", "FUN", "WARN", "INFO", "NEWS", "TRADE",
-  "WX", "EMCOM", "ARES", "NET", "DX", "EVENT", "HELP", "SOS"
+  "WX", "EMCOM", "ARES", "NET", "DX", "EVENT", "HELP", "SOS",
+  /* 4chan-style boards */
+  "B", "POL", "FIN", "G"
 };
 static void prompt_group(void) {
-  char chips[700] = "";
+  char chips[1000] = "";
   for (unsigned i = 0; i < sizeof(PRESET_GROUPS) / sizeof(PRESET_GROUPS[0]); i++) {
     if (i) s_cat(chips, ",", sizeof(chips));
     s_cat(chips, "{\"label\":\"#", sizeof(chips));
@@ -986,7 +1199,7 @@ static void prompt_group(void) {
     s_cat(chips, PRESET_GROUPS[i], sizeof(chips));
     s_cat(chips, "\"}", sizeof(chips));
   }
-  char m[1200] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"title\":\"Add a group\","
+  char m[1600] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"title\":\"Add a group\","
                  "\"body\":\"Pick or type a group (max 5 letters). Global follows it "
                  "worldwide; local follows it only within your radius.\",\"chips\":[";
   s_cat(m, chips, sizeof(m));
@@ -1247,6 +1460,27 @@ static void groups_load(void) {
   }
 }
 
+/* The public-key beacon on/off state persists in KV "pkbeacon" ("1"/"0"), so
+ * the user's choice survives a restart (unlike the per-session BLE toggle). */
+static void pkbeacon_save(void) {
+  hal_kv_set("pkbeacon", 8, g_pubkey_beacon ? "1" : "0", 1);
+}
+static void pkbeacon_load(void) {
+  char b[4];
+  uint32_t n = hal_kv_get("pkbeacon", 8, b, sizeof(b) - 1);
+  if (n >= 1) g_pubkey_beacon = (b[0] != '0');   /* absent -> keep default (on) */
+}
+/* Broadcast our npub once: APRS-IS bulletin to group "NOSTR" + same over BLE.
+ * Receivers map the sender callsign (frame from-field) to the npub text. */
+static void pkbeacon_send(void) {
+  if (!g_pubkey_beacon || !g_pubkey[0]) return;
+  if (g_sock >= 0 && g_logged)
+    aprs_send_bulletin_multi(g_sock, g_call, PKBEACON_GROUP, g_pubkey, APRS_MAX_MSG_LEN);
+  if (g_ble_on)
+    ble_tx_msg("#" PKBEACON_GROUP, g_pubkey);
+  g_last_pkbeacon = hal_time_epoch();
+}
+
 /* ---- per-callsign mailbox (KV "m.<call>", lines "<from>|<text>") ---- */
 static void mailbox_key(char *out, unsigned max, const char *call) {
   out[0] = 0; s_cat(out, "m.", max); s_cat(out, call, max);
@@ -1373,21 +1607,141 @@ static void deliver_bulletin(const char *gname, const char *from,
   for (int i = 0; gname[i] && gname[i] != '*' && nj < 6; i++) nm[nj++] = gname[i];
   nm[nj] = 0;
   if (!nm[0]) return;
+  /* NOSTR key beacon: record the sender's pubkey and stop (not a chat). */
+  if (pk_intercept(nm, from, text)) return;
   char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
   char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
   int has_g = convo_known(gid), has_l = convo_known(lid);
   if (!has_g && !has_l) return;            /* only listen to groups we subscribed */
+  /* Strip any APRX signature for the preview / like detection; convo_deliver
+   * still gets the full text and re-verifies the signature. */
+  char core[400]; char sg[80]; const char *cbody = text;
+  if (sig_split(text, core, sizeof(core), sg, sizeof(sg))) cbody = core;
+  /* A like vote is silent (no notification): convo_deliver registers it. */
+  int is_like; { char tgt[5]; int u; is_like = like_parse(cbody, tgt, &u); }
   char preview[140] = ""; s_cpy(preview, from, sizeof(preview)); s_cat(preview, ": ", sizeof(preview));
-  { char par[5]; const char *d; thread_parse(text, par, &d); s_cat(preview, d, sizeof(preview)); }
+  { char par[5]; const char *d; thread_parse(cbody, par, &d); s_cat(preview, d, sizeof(preview)); }
   if (has_g) {                              /* global: every bulletin for the group */
     convo_deliver(gid, "in", from, text, preview, 0, via);
-    notify_msg(gid, from, text, preview);
+    if (!is_like) notify_msg(gid, from, cbody, preview);
   }
   /* Local: a nearby sender, OR — when no global pull is active (g/BLN* off) —
    * trust the region filter that the bulletin is in-range. */
   if (has_l && (within || !any_global_group())) {
     convo_deliver(lid, "in", from, text, preview, 0, via);
-    notify_msg(lid, from, text, preview);
+    if (!is_like) notify_msg(lid, from, cbody, preview);
+  }
+}
+
+/* A standalone APRX signature line: "~" + exactly 60 base85 chars. The signed
+ * body's word-split puts the signature on its own final line, so this marks the
+ * end of a multi-line signed message. */
+static int is_sig_line(const char *t) {
+  if (t[0] != '~' || s_len(t) != SIG_B85_LEN + 1) return 0;
+  for (int i = 1; i <= SIG_B85_LEN; i++) if (!is_b85(t[i])) return 0;
+  return 1;
+}
+
+/* ── Multi-line bulletin reassembly (APRS-IS) ─────────────────────────────
+ * aprs_send_bulletin_multi splits a long body (incl. a signed message, whose
+ * 60-char signature is its own final line) across BLN0..BLNk; rejoin them.
+ * Buffer lines per (from,group), keyed by line id, flush after a brief idle,
+ * joining the contiguous run from line 0 with single spaces (matching the
+ * splitter). Single-line bulletins flush the same way. BLE arrives whole. */
+#define RA_MAX 4
+#define RA_FLUSH 2            /* seconds idle before flushing */
+typedef struct {
+  int used; char from[16]; char grp[8]; char line[10][72];
+  int seen; uint64_t t; int within; char via[4];
+} ra_t;
+static ra_t g_ra[RA_MAX];
+static void ra_emit(ra_t *e) {
+  char full[720]; full[0] = 0;
+  for (int i = 0; i < 10; i++) {
+    if (!(e->seen & (1 << i))) break;
+    if (full[0]) s_cat(full, " ", sizeof(full));
+    s_cat(full, e->line[i], sizeof(full));
+  }
+  e->used = 0; e->seen = 0;
+  if (full[0]) deliver_bulletin(e->grp, e->from, full, e->within, e->via);
+}
+static void ra_add(const char *grp, const char *from, char line_id,
+                   const char *text, int within, const char *via) {
+  int idx = (int)(line_id - '0'); if (idx < 0 || idx > 9) idx = 0;
+  ra_t *e = 0;
+  for (int i = 0; i < RA_MAX; i++)
+    if (g_ra[i].used && s_eq(g_ra[i].from, from) && s_eq(g_ra[i].grp, grp)) { e = &g_ra[i]; break; }
+  if (!e) {
+    for (int i = 0; i < RA_MAX; i++) if (!g_ra[i].used) { e = &g_ra[i]; break; }
+    if (!e) { e = &g_ra[0]; for (int i = 1; i < RA_MAX; i++) if (g_ra[i].t < e->t) e = &g_ra[i]; ra_emit(e); }
+    e->used = 1; e->seen = 0; e->within = 0;
+    s_cpy(e->from, from, sizeof(e->from)); s_cpy(e->grp, grp, sizeof(e->grp));
+    s_cpy(e->via, via, sizeof(e->via));
+  }
+  s_cpy(e->line[idx], text, sizeof(e->line[idx]));
+  e->seen |= (1 << idx); e->t = hal_time_epoch();
+  if (within) e->within = 1;
+}
+/* Flush every cycle (after the read loop): a single-line bulletin is delivered
+ * the same cycle it arrived (no delay); a multi-line bulletin's lines arrive in
+ * the same cycle and reassemble by line id. */
+static void ra_flush(void) {
+  for (int i = 0; i < RA_MAX; i++)
+    if (g_ra[i].used) ra_emit(&g_ra[i]);
+}
+
+/* ── Multi-line direct-message reassembly (APRS-IS) ───────────────────────
+ * aprs_send_message_multi splits a long DM into parts with consecutive seq;
+ * a signed DM's last part is a pure signature line. Buffer parts per sender,
+ * flush after a brief idle: each run from a body up to a signature line is one
+ * signed message (rejoined); any trailing run with no signature line is
+ * delivered as separate plain messages (no spurious merging of normal chat). */
+#define DA_MAX 6
+#define DA_PARTS 8
+typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][72]; int n; } da_t;
+static da_t g_da[DA_MAX];
+static void da_emit_one(const char *from, const char *full, const char *via) {
+  char prev[256], sg[80]; const char *pv = full;
+  if (sig_split(full, prev, sizeof(prev), sg, sizeof(sg))) pv = prev;
+  convo_deliver(from, "in", from, full, pv, 0, via);
+}
+/* Buffer one direct-message part, keyed by (from, transport). A message that
+ * arrives over BOTH transports (directly from APRS-IS AND re-broadcast by a BLE
+ * iGate) is reassembled per-transport and dedups in convo_deliver — shown once. */
+static void da_add(const char *from, const char *text, const char *via) {
+  da_t *e = 0;
+  for (int i = 0; i < DA_MAX; i++)
+    if (g_da[i].used && s_eq(g_da[i].from, from) && s_eq(g_da[i].via, via)) { e = &g_da[i]; break; }
+  if (!e) {
+    for (int i = 0; i < DA_MAX; i++) if (!g_da[i].used) { e = &g_da[i]; break; }
+    if (!e) { e = &g_da[0]; e->used = 0; e->n = 0; }   /* spill: drop oldest slot (rare) */
+    e->used = 1; e->n = 0;
+    s_cpy(e->from, from, sizeof(e->from)); s_cpy(e->via, via, sizeof(e->via));
+  }
+  if (e->n < DA_PARTS) s_cpy(e->part[e->n++], text, sizeof(e->part[0]));
+}
+/* Flush every cycle (after both poll loops): a complete message delivered in the
+ * same cycle it arrived = no delay; a multi-line message's parts arrive in the
+ * same cycle and reassemble. Runs from a body up to a signature line = one signed
+ * message; a lone signature with no body is dropped; other parts are delivered
+ * as separate plain messages. */
+static void da_flush(void) {
+  for (int x = 0; x < DA_MAX; x++) {
+    if (!g_da[x].used) continue;
+    da_t *d = &g_da[x]; int i = 0;
+    while (i < d->n) {
+      int j = i; while (j < d->n && !is_sig_line(d->part[j])) j++;
+      if (j < d->n) {                       /* parts i..j-1 = body, j = signature */
+        if (j == i) { i = j + 1; continue; }  /* lone signature fragment → drop */
+        char full[600]; full[0] = 0;
+        for (int k = i; k <= j; k++) { if (full[0]) s_cat(full, " ", sizeof(full)); s_cat(full, d->part[k], sizeof(full)); }
+        da_emit_one(d->from, full, d->via); i = j + 1;
+      } else {                              /* no signature → deliver separately */
+        for (int k = i; k < d->n; k++) da_emit_one(d->from, d->part[k], d->via);
+        i = d->n;
+      }
+    }
+    d->used = 0; d->n = 0;
   }
 }
 
@@ -1416,28 +1770,36 @@ static void route_frame(const char *line) {
   } else if (p.type == APRS_MESSAGE) {
     if (p.text[0] && !is_ack_text(p.text)) {
       if (p.is_bulletin) {
-        deliver_bulletin(p.group, p.from, p.text, within_radius(p.from), "NET");
+        /* Buffer the line; multi-line bulletins are reassembled before delivery. */
+        ra_add(p.group, p.from, p.bulletin_id ? p.bulletin_id : '0', p.text,
+               within_radius(p.from), "NET");
         if (g_ble_relay && g_ble_on) {
           char convo[12]; convo[0] = '#'; s_cpy(convo + 1, p.group, sizeof(convo) - 1);
           ble_tx_from(p.from, convo, p.text);
         }
       } else {
+        /* A bare signature line is a continuation fragment, not a message:
+         * keep it off the Live tab + notifications; da_ reassembles it. */
+        int sigln = is_sig_line(p.text);
         char meta[24] = ""; double slat = 0, slon = 0;
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
-        if (!geo_dup(p.from, p.text))
+        if (!sigln && !geo_dup(p.from, p.text))
           chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon, "NET");
         int amine = 1;
         for (int i = 0; g_call[i] || p.addressee[i]; i++) {
           if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
         }
-        if (amine) convo_deliver(p.from, "in", p.from, p.text, p.text, 0, "NET");
+        /* Buffer DM parts; multi-line (incl. signed) messages reassemble in da_. */
+        if (amine) da_add(p.from, p.text, "NET");
         else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
           mailbox_add(p.addressee, p.from, p.text);
         /* Direct message to us, or a message on the Live tab — pop a notice. */
-        notify_msg(p.from, p.from, p.text, p.text);
-        /* Bridge to BLE: when relay is on, OR always for a heard station's mail
-         * (immediate delivery if it's in range right now). */
-        if (g_ble_on && (g_ble_relay || sdev_has(p.addressee)))
+        if (!sigln) notify_msg(p.from, p.from, p.text, p.text);
+        /* Bridge to BLE only for messages NOT addressed to us — we are the
+         * endpoint of our own mail, so re-broadcasting it would just echo back
+         * as a duplicate. Relay (general bridge) or store-and-forward to a heard
+         * station are the only reasons to put a message on BLE. */
+        if (g_ble_on && !amine && (g_ble_relay || sdev_has(p.addressee)))
           ble_tx_from(p.from, p.addressee, p.text);
       }
     }
@@ -1810,17 +2172,26 @@ static void ble_handle(const char *compact, int rssi) {
     for (int i = 0; g_call[i] || to[i]; i++) {
       if (up(g_call[i]) != up(to[i])) { amine = 0; break; }
     }
+    int sigln = is_sig_line(text);
+    char dcore[256], dsg[80]; const char *dprev = text;
+    if (sig_split(text, dcore, sizeof(dcore), dsg, sizeof(dsg))) dprev = dcore;
     if (amine) {
-      convo_deliver(from, "in", from, text, text, 0, "BLE");
+      /* Buffer through the same reassembler as APRS-IS: a multi-line message
+       * forwarded by a BLE iGate as separate parts is rejoined, and a message
+       * also received directly over APRS-IS dedups (shown once). */
+      da_add(from, text, "BLE");
     } else {
       char meta[24] = ""; double slat = 0, slon = 0;
       if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
       if (!geo_dup(from, text))
         chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
     }
-    /* Direct message to us, or a message shown on the Live tab — pop a notice. */
-    notify_msg(from, from, text, text);
-    if (g_ble_relay && g_logged) {
+    /* Direct message to us, or a message shown on the Live tab — pop a notice
+     * (but not for a bare signature fragment). */
+    if (!sigln) notify_msg(from, from, dprev, dprev);
+    /* Bridge BLE -> APRS-IS, but never for a message addressed to us (we are the
+     * endpoint; re-injecting it would loop back as a duplicate). */
+    if (g_ble_relay && g_logged && !amine) {
       char line[260]; aprs_build_message(line, sizeof(line), from, to, text, 0);
       char tp[340]; s_cpy(tp, g_call, sizeof(tp));
       s_cat(tp, ">APRS,TCPIP*:}", sizeof(tp)); s_cat(tp, line, sizeof(tp));
@@ -1854,6 +2225,13 @@ void module_init(void) {
   if (n > 0 && n < sizeof(id)) { id[n] = 0; if (id[0]) s_cpy(g_call, id, sizeof(g_call)); }
   sdev_load();     /* restore the seen-devices registry (store-and-forward) */
   groups_load();   /* restore subscribed groups so the g/ filter is correct now */
+  /* Cache our public key (base64url) and the persisted pubkey-beacon pref. */
+  { uint32_t pn = hal_identity_pubkey(g_pubkey, sizeof(g_pubkey) - 1);
+    if (pn < sizeof(g_pubkey)) g_pubkey[pn] = 0; else g_pubkey[0] = 0; }
+  pkbeacon_load();
+  pk_load();       /* restore known callsign -> pubkey map (for verification) */
+  { char b[4]; uint32_t n = hal_kv_get("signmsgs", 8, b, sizeof(b) - 1);
+    if (n >= 1) g_sign_msgs = (b[0] != '0'); }
   status("APRS ready - connecting to APRS-IS automatically...");
   /* Ask the host to run our "connect" command with the current settings
    * (auto-connect on load; no manual Connect needed). */
@@ -1978,6 +2356,8 @@ void module_tick(void) {
     if (n <= 0) break;
     route_frame(line);
   }
+  ra_flush();   /* deliver multi-line bulletins once their parts have arrived */
+  da_flush();   /* deliver multi-line direct messages (reassemble signed ones) */
 
   /* timed beacon */
   if (g_auto && g_logged) {
@@ -1988,6 +2368,12 @@ void module_tick(void) {
       g_last_beacon = now;
       status("TX auto-beacon");
     }
+  }
+
+  /* Public-key beacon: broadcast our pubkey on whatever transport is up. */
+  if (g_pubkey_beacon && g_pubkey[0] && (g_logged || g_ble_on)) {
+    uint64_t now = hal_time_epoch();
+    if (now - g_last_pkbeacon >= (uint64_t)PKBEACON_INTERVAL) pkbeacon_send();
   }
 
   /* recurring group bulletins: re-broadcast every 5 min until the period ends */
@@ -2040,6 +2426,32 @@ void module_handle_event(void) {
     g_ble_on = jbool_def(buf, "ble_enabled", 1);
     g_ble_relay = jbool_def(buf, "ble_relay", 0);
     ble_reconcile();
+  }
+  else if (s_eq(cmd, "pubkey_apply")) {
+    /* Explicit apply (like ble_apply) so the on-by-default state isn't clobbered
+     * by an unset checkbox serialised as false on unrelated commands. */
+    g_pubkey_beacon = jbool_def(buf, "pubkey_beacon", 1);
+    pkbeacon_save();
+    if (g_pubkey_beacon) {
+      if (!g_pubkey[0]) { notify("warning", "No profile public key to broadcast"); }
+      else { g_last_pkbeacon = 0; pkbeacon_send();    /* send one now */
+             status("Public-key broadcast ON");
+             notify("success", "Broadcasting your public key"); }
+    } else {
+      status("Public-key broadcast OFF");
+      notify("info", "Public-key broadcast disabled");
+    }
+  }
+  else if (s_eq(cmd, "sign_apply")) {
+    g_sign_msgs = jbool_def(buf, "sign_msgs", 0);
+    hal_kv_set("signmsgs", 8, g_sign_msgs ? "1" : "0", 1);
+    if (g_sign_msgs && !g_pubkey[0])
+      notify("warning", "No profile key — messages can't be signed");
+    else {
+      status(g_sign_msgs ? "Message signing ON" : "Message signing OFF");
+      notify("info", g_sign_msgs ? "Signing outgoing messages"
+                                 : "Message signing disabled");
+    }
   }
   else if (s_eq(cmd, "marker_tap")) {
     char id[24] = ""; jstr(buf, "id", id, sizeof(id));

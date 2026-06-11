@@ -179,6 +179,17 @@
       },
       {
         "$": "group",
+        "name": "identity_broadcast",
+        "tip": "Periodically broadcast your public key so other stations can map your callsign to it and send you encrypted messages.",
+        "children": [
+          { "$": "field", "name": "pubkey_beacon", "$type": "bool", "label": "Broadcast my public key", "default": true, "tip": "Every 30 min, send your profile's public key (base64, ~43 chars) as a bulletin to group NOSTR over APRS-IS and Bluetooth. Peers learn your callsign → pubkey so they can message you encrypted." },
+          { "$": "action", "name": "pubkey_apply", "label": "Apply key broadcast", "style": "primary", "tip": "Save the setting above and send one broadcast now." },
+          { "$": "field", "name": "sign_msgs", "$type": "bool", "label": "Sign my messages", "default": false, "tip": "Append a short cryptographic signature (~60 chars, one extra APRS line) to outgoing messages so others can verify they came from your callsign. Verifying needs the sender's broadcast public key." },
+          { "$": "action", "name": "sign_apply", "label": "Apply signing", "style": "primary", "tip": "Save the message-signing setting above." }
+        ]
+      },
+      {
+        "$": "group",
         "name": "control",
         "children": [
           { "$": "action", "name": "connect", "label": "Connect", "style": "primary", "tip": "Connect to APRS-IS and start receiving." },

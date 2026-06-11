@@ -50,6 +50,31 @@ uint32_t hal_platform(char *buf, uint32_t buf_len);
 __attribute__((import_module("hal"), import_name("identity")))
 uint32_t hal_identity(char *buf, uint32_t buf_len);
 
+/* This device's public key — the active profile's Nostr public key in bech32
+ * form ("npub1..."), written into buf. Returns bytes written (0 if none).
+ * Lets a wapp publish its identity key so peers can map callsign -> pubkey
+ * (e.g. to later send it encrypted messages). */
+__attribute__((import_module("hal"), import_name("identity_pubkey")))
+uint32_t hal_identity_pubkey(char *buf, uint32_t buf_len);
+
+/* Sign [msg_len] bytes with THIS device's private key and write the signature,
+ * as a compact ASCII string, into out_buf. The private key never leaves the
+ * host. Returns bytes written (0 if no key / no room). The scheme is APRX
+ * short-Schnorr over secp256k1: a 48-byte signature, base85-encoded (60 chars).
+ * Verify with hal_verify against the signer's hal_identity_pubkey. */
+__attribute__((import_module("hal"), import_name("identity_sign")))
+uint32_t hal_identity_sign(const char *msg, uint32_t msg_len,
+                           char *out_buf, uint32_t out_len);
+
+/* Verify a signature produced by hal_identity_sign. [pubkey] is the signer's
+ * public key string exactly as hal_identity_pubkey returns it (base64url of the
+ * 32-byte key); [msg] is the signed bytes; [sig] is the base85 signature string.
+ * Returns 1 if valid, 0 otherwise. */
+__attribute__((import_module("hal"), import_name("verify")))
+uint32_t hal_verify(const char *pubkey, uint32_t pubkey_len,
+                    const char *msg, uint32_t msg_len,
+                    const char *sig, uint32_t sig_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);
