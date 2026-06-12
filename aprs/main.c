@@ -1220,6 +1220,86 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
 }
 
+/* ── decentralized file discovery (FILES group, files DESIGN.md §7) ────────
+ * A media token (file:<sha256>.<ext>) only names content. When we send a
+ * message carrying one, we also broadcast where the bytes can be fetched —
+ * a FILES bulletin "HAVE <token> <blossom-url> ih:<infohash>" — so receivers
+ * record the source and pull the file (becoming providers themselves). The
+ * group is never shown as chat; it's intercepted like the NOSTR key beacon. */
+#define FILES_GROUP "FILES"
+
+/* Find the first file:<43>.<ext> token in [text]; 1 + copy to out, else 0. */
+static int find_file_token(const char *text, char *out, unsigned max) {
+  for (const char *p = text; *p; p++) {
+    if (p[0]=='f'&&p[1]=='i'&&p[2]=='l'&&p[3]=='e'&&p[4]==':') {
+      const char *q = p + 5; int n = 0;
+      while (((*q>='A'&&*q<='Z')||(*q>='a'&&*q<='z')||(*q>='0'&&*q<='9')||
+              *q=='-'||*q=='_') && n < 43) { q++; n++; }
+      if (n != 43 || *q != '.') continue;
+      const char *r = q + 1; int e = 0;
+      while (((*r>='a'&&*r<='z')||(*r>='0'&&*r<='9')) && e < 18) { r++; e++; }
+      if (e < 1) continue;
+      unsigned len = (unsigned)(r - p);
+      if (len >= max) return 0;
+      for (unsigned i = 0; i < len; i++) out[i] = p[i];
+      out[len] = 0;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Broadcast a HAVE for every media token in [text] we can serve. */
+static void files_announce(const char *text) {
+  char token[80];
+  if (!find_file_token(text, token, sizeof(token))) return;
+  /* Where can peers fetch it? Our Blossom URL and/or BitTorrent infohash. */
+  char st[1024]; uint32_t n = hal_share_status(st, sizeof(st) - 1);
+  char url[120] = ""; if (n) { st[n] = 0; jstr(st, "url", url, sizeof(url)); }
+  char ih[48] = ""; hal_media_infohash(token, s_len(token), ih, sizeof(ih) - 1);
+  if (!url[0] && !ih[0]) return;            /* nothing to point peers at */
+  char body[220]; body[0] = 0;
+  s_cat(body, "HAVE ", sizeof(body)); s_cat(body, token, sizeof(body));
+  if (url[0]) { s_cat(body, " ", sizeof(body)); s_cat(body, url, sizeof(body)); }
+  if (ih[0]) { s_cat(body, " ih:", sizeof(body)); s_cat(body, ih, sizeof(body)); }
+  if (g_sock >= 0 && g_logged)
+    aprs_send_bulletin_multi(g_sock, g_call, FILES_GROUP, body, APRS_MAX_MSG_LEN);
+  if (g_ble_on) ble_tx_msg("#" FILES_GROUP, body);
+}
+
+/* Handle a FILES bulletin (returns 1 = consumed, not chat). On "HAVE <token>
+ * <url|ih:..>" record each source and pull the file so we can render + reseed
+ * it. On "WANT <token>" answer with our own HAVE when we hold the bytes. */
+static int files_intercept(const char *group, const char *from, const char *text) {
+  (void)from;
+  if (!s_eq(group, FILES_GROUP)) return 0;
+  char token[80] = "";
+  if (!find_file_token(text, token, sizeof(token))) return 1;
+  if (text[0]=='W'&&text[1]=='A'&&text[2]=='N'&&text[3]=='T') {
+    char meta[600]; uint32_t mn = hal_media_meta(token, s_len(token), meta, sizeof(meta)-1);
+    if (mn > 0) files_announce(token);      /* we have it → re-announce */
+    return 1;
+  }
+  /* HAVE: scan the remaining words for a blossom URL and an ih:<hex>. */
+  for (const char *p = text; *p; p++) {
+    if (p[0]=='h'&&p[1]=='t'&&p[2]=='t'&&p[3]=='p') {
+      char url[120]; int i = 0;
+      while (p[i] && p[i] != ' ' && i < 119) { url[i] = p[i]; i++; }
+      url[i] = 0;
+      hal_media_add_source(token, s_len(token), "blossom", 7, url, s_len(url));
+      p += i ? i - 1 : 0;
+    } else if (p[0]=='i'&&p[1]=='h'&&p[2]==':') {
+      char ih[48]; int i = 0; const char *q = p + 3;
+      while (q[i] && q[i] != ' ' && i < 47) { ih[i] = q[i]; i++; }
+      ih[i] = 0;
+      if (i >= 32) hal_media_add_source(token, s_len(token), "infohash", 8, ih, s_len(ih));
+      p += 2 + i;
+    }
+  }
+  hal_media_fetch(token, s_len(token));     /* pull now → render + reseed */
+  return 1;
+}
+
 static void do_convo_send(const char *buf) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
@@ -1294,6 +1374,7 @@ static void do_convo_send(const char *buf) {
     if (g_ble_on) ble_tx_msg(id, wire);
   }
   convo_deliver(id, "out", g_call, wire, text, 0, "");
+  files_announce(text);   /* if it carries a file: token, advertise the source */
   status(loc ? "TX message + position" : "TX message");
 }
 
@@ -1358,6 +1439,7 @@ static void do_geochat_send(const char *buf) {
   /* Geo-tag our own message with our position so it is archived for this
    * area and reappears in the Live history later. */
   chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", g_lat, g_lon, "");
+  files_announce(body);
   status("TX geo-chat");
 }
 
@@ -1387,6 +1469,7 @@ static void do_activity_send(const char *buf) {
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
   /* Local echo of our own post (plaintext, no #group prefix). */
   chat_append("activity", "", "out", g_call, text, "msg", 0, "", g_lat, g_lon, "");
+  files_announce(text);
   status("TX post");
 }
 
@@ -1922,6 +2005,7 @@ static void deliver_bulletin(const char *gname, const char *from,
   if (!nm[0]) return;
   /* NOSTR key beacon: record the sender's pubkey and stop (not a chat). */
   if (pk_intercept(nm, from, text)) return;
+  if (files_intercept(nm, from, text)) return;   /* file source announcements */
   /* Strip any APRX signature for the preview / like detection; convo_deliver
    * still gets the full text and re-verifies the signature. */
   char core[400]; char sg[80]; const char *cbody = text;
