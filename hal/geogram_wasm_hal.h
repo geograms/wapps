@@ -82,6 +82,23 @@ __attribute__((import_module("hal"), import_name("npub")))
 uint32_t hal_npub(const char *pubkey, uint32_t pubkey_len,
                   char *out_buf, uint32_t out_len);
 
+/* Encrypt [msg] for [pubkey] (base64url of the 32 raw bytes) with THIS device's
+ * private key (ECDH + AES-256-CBC). Writes base64url(iv||ciphertext) into
+ * out_buf. Returns bytes written (0 on error). Decrypt with hal_decrypt on the
+ * peer using the sender's pubkey. The private key never leaves the host. */
+__attribute__((import_module("hal"), import_name("encrypt")))
+uint32_t hal_encrypt(const char *pubkey, uint32_t pubkey_len,
+                     const char *msg, uint32_t msg_len,
+                     char *out_buf, uint32_t out_len);
+
+/* Decrypt a base64url blob (from hal_encrypt) sent by [pubkey] (base64url),
+ * using this device's private key. Writes the plaintext into out_buf. Returns
+ * bytes written (0 on failure / not for us). */
+__attribute__((import_module("hal"), import_name("decrypt")))
+uint32_t hal_decrypt(const char *pubkey, uint32_t pubkey_len,
+                     const char *blob, uint32_t blob_len,
+                     char *out_buf, uint32_t out_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);

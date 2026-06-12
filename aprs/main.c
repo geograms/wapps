@@ -196,6 +196,34 @@ static uint64_t g_pk_ts[PK_MAX];          /* last time we heard this station's k
 static int  g_pk_n = 0;
 static void pk_render(void);              /* fwd: refresh the Keys list view */
 
+/* ── followed callsigns (Activity feed) ─────────────────────────────────────
+ * A Twitter-style stream: callsigns we "follow" have their public activity
+ * (posts, replies, likes, status) surfaced in the Activity tab. We pull their
+ * packets from APRS-IS with a b/ budlist filter (every packet FROM them) and,
+ * over BLE, hear them whenever they're in range. The list persists in KV
+ * "follows" (";"-joined). Our own micro-posts go out as bulletins to a shared
+ * feed group so followers see them too. */
+#define FOLLOW_MAX 32
+#define FEED_GROUP  "FEED"                 /* shared micro-blog group for posts */
+static char g_follow[FOLLOW_MAX][16];
+static char g_ftag[FOLLOW_MAX][48];        /* space-separated tags, per follow */
+static int  g_follow_n = 0;
+/* Stations that follow US — learned from directed "?FOLLOW"/"?UNFOLLOW"
+ * control messages peers send when they (un)follow a callsign. */
+static char g_follower[FOLLOW_MAX][16];
+static int  g_follower_n = 0;
+static void follow_render(void);          /* fwd: push the people list */
+static void profile_show(const char *call);   /* fwd: station profile sheet */
+static void prompt_ftag(const char *call);    /* fwd: edit-tags prompt */
+static int is_following(const char *call) {
+  for (int i = 0; i < g_follow_n; i++) if (s_eq(g_follow[i], call)) return 1;
+  return 0;
+}
+static int is_follower(const char *call) {
+  for (int i = 0; i < g_follower_n; i++) if (s_eq(g_follower[i], call)) return 1;
+  return 0;
+}
+
 /* ── BLE ping (Tools tab): local reach test across digipeaters ──────────
  * A ping is a BLE-only broadcast (never APRS-IS, never shown on the Live
  * feed). Every BLE station answers once with its callsign + position and
@@ -726,16 +754,18 @@ static void cat_pos(char *m, unsigned sz, double lat, double lon) {
  * the id it replies to). Empty values are omitted so non-threaded chats and the
  * host's generic store are unaffected. */
 static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent,
-                       const char *auth) {
+                       const char *auth, int enc) {
   if (mid && mid[0]) { s_cat(m, ",\"mid\":\"", sz); s_cat(m, mid, sz); s_cat(m, "\"", sz); }
   if (parent && parent[0]) { s_cat(m, ",\"parent\":\"", sz); s_cat(m, parent, sz); s_cat(m, "\"", sz); }
   /* Signature verdict (APRX): verified / bad / unverified. Empty = unsigned. */
   if (auth && auth[0]) { s_cat(m, ",\"auth\":\"", sz); s_cat(m, auth, sz); s_cat(m, "\"", sz); }
+  /* Encrypted (APRX 1:1): host shows a lock badge. */
+  if (enc) s_cat(m, ",\"enc\":true", sz);
 }
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
                       double lat, double lon, const char *via,
-                      const char *mid, const char *parent, const char *auth) {
+                      const char *mid, const char *parent, const char *auth, int enc) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -751,14 +781,14 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
-  cat_thread(m, sizeof(m), mid, parent, auth);
+  cat_thread(m, sizeof(m), mid, parent, auth, enc);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void convo_pin(const char *id, const char *key, const char *dir,
                       const char *from, const char *text, const char *meta,
                       double lat, double lon, const char *via,
-                      const char *mid, const char *parent, const char *auth) {
+                      const char *mid, const char *parent, const char *auth, int enc) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.pin\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -774,7 +804,7 @@ static void convo_pin(const char *id, const char *key, const char *dir,
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
-  cat_thread(m, sizeof(m), mid, parent, auth);
+  cat_thread(m, sizeof(m), mid, parent, auth, enc);
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -944,6 +974,158 @@ static int pk_intercept(const char *group, const char *from, const char *text) {
   return 1;
 }
 
+/* ── follow list persistence + mutation ─────────────────────────────────── */
+/* KV "follows": "CALL=tag1 tag2;CALL;…" — '=' starts the optional tag list
+ * (callsigns never contain '='); the legacy "CALL;" form still parses. */
+static void follows_save(void) {
+  char buf[FOLLOW_MAX * 64]; buf[0] = 0;
+  for (int i = 0; i < g_follow_n; i++) {
+    s_cat(buf, g_follow[i], sizeof(buf));
+    if (g_ftag[i][0]) { s_cat(buf, "=", sizeof(buf)); s_cat(buf, g_ftag[i], sizeof(buf)); }
+    s_cat(buf, ";", sizeof(buf));
+  }
+  hal_kv_set("follows", 7, buf, s_len(buf));
+}
+static void follows_load(void) {
+  char buf[FOLLOW_MAX * 64];
+  uint32_t n = hal_kv_get("follows", 7, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  char c[16], t[48]; int j = 0, ti = 0, stage = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? buf[i] : ';';
+    if (ch == ';') {
+      c[j] = 0; t[ti] = 0;
+      if (c[0] && g_follow_n < FOLLOW_MAX && !is_following(c)) {
+        s_cpy(g_follow[g_follow_n], c, 16);
+        s_cpy(g_ftag[g_follow_n], t, 48);
+        g_follow_n++;
+      }
+      j = 0; ti = 0; stage = 0;
+    } else if (ch == '=' && stage == 0) stage = 1;
+    else if (stage == 0) { if (j < 15) c[j++] = ch; }
+    else { if (ti < 47) t[ti++] = ch; }
+  }
+}
+static void followers_save(void) {
+  char buf[FOLLOW_MAX * 17]; buf[0] = 0;
+  for (int i = 0; i < g_follower_n; i++) {
+    s_cat(buf, g_follower[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf));
+  }
+  hal_kv_set("followers", 9, buf, s_len(buf));
+}
+static void followers_load(void) {
+  char buf[FOLLOW_MAX * 17];
+  uint32_t n = hal_kv_get("followers", 9, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  char c[16]; int j = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? buf[i] : ';';
+    if (ch == ';') { c[j] = 0; if (c[0] && g_follower_n < FOLLOW_MAX && !is_follower(c)) s_cpy(g_follower[g_follower_n++], c, 16); j = 0; }
+    else if (j < 15) c[j++] = ch;
+  }
+}
+static void follow_add(const char *call) {
+  char up_call[16]; int j = 0;            /* callsigns are upper-case on the wire */
+  for (int i = 0; call[i] && j < 15; i++) up_call[j++] = up(call[i]);
+  up_call[j] = 0;
+  if (!up_call[0] || s_eq(up_call, g_call) || is_following(up_call)) return;
+  if (g_follow_n >= FOLLOW_MAX) { notify("warning", "Following list is full"); return; }
+  s_cpy(g_follow[g_follow_n], up_call, 16);
+  g_ftag[g_follow_n][0] = 0;
+  g_follow_n++;
+  follows_save();
+  follow_render();
+  /* Tell the station (Twitter-style): a directed ?FOLLOW control message on
+   * both transports; their wapp records us in its Followers list. */
+  if (g_sock >= 0 && g_logged)
+    aprs_send_message_multi(g_sock, g_call, up_call, "?FOLLOW", APRS_MAX_MSG_LEN, &g_seq);
+  if (g_ble_on) ble_tx_msg(up_call, "?FOLLOW");
+  { char b[40] = "Following "; s_cat(b, up_call, sizeof(b)); notify("info", b); }
+}
+static void follow_remove(const char *call) {
+  for (int i = 0; i < g_follow_n; i++) if (s_eq(g_follow[i], call)) {
+    char gone[16]; s_cpy(gone, g_follow[i], sizeof(gone));
+    for (int k = i; k < g_follow_n - 1; k++) {
+      s_cpy(g_follow[k], g_follow[k + 1], 16);
+      s_cpy(g_ftag[k], g_ftag[k + 1], 48);
+    }
+    g_follow_n--;
+    follows_save();
+    follow_render();
+    if (g_sock >= 0 && g_logged)
+      aprs_send_message_multi(g_sock, g_call, gone, "?UNFOLLOW", APRS_MAX_MSG_LEN, &g_seq);
+    if (g_ble_on) ble_tx_msg(gone, "?UNFOLLOW");
+    { char b[40] = "Unfollowed "; s_cat(b, gone, sizeof(b)); notify("info", b); }
+    return;
+  }
+}
+/* Set (or clear) the space-separated tags on a followed callsign. */
+static void ftag_set(const char *call, const char *tags) {
+  for (int i = 0; i < g_follow_n; i++) if (s_eq(g_follow[i], call)) {
+    s_cpy(g_ftag[i], tags, sizeof(g_ftag[i]));
+    follows_save();
+    follow_render();
+    return;
+  }
+}
+/* A peer announced they (un)followed us. Update the Followers list; this is
+ * control traffic, never shown as a chat message. */
+static void follower_add(const char *call) {
+  if (!call[0] || s_eq(call, g_call) || is_follower(call)) return;
+  if (g_follower_n >= FOLLOW_MAX) return;
+  s_cpy(g_follower[g_follower_n++], call, 16);
+  followers_save();
+  follow_render();
+  { char b[48] = ""; s_cat(b, call, sizeof(b));
+    s_cat(b, " started following you", sizeof(b)); notify("info", b); }
+}
+static void follower_remove(const char *call) {
+  for (int i = 0; i < g_follower_n; i++) if (s_eq(g_follower[i], call)) {
+    for (int k = i; k < g_follower_n - 1; k++) s_cpy(g_follower[k], g_follower[k + 1], 16);
+    g_follower_n--;
+    followers_save();
+    follow_render();
+    return;
+  }
+}
+/* Intercept a directed ?FOLLOW / ?UNFOLLOW control message (returns 1). */
+static int follow_intercept(const char *from, const char *text) {
+  if (s_eq(text, "?FOLLOW"))   { follower_add(from);    return 1; }
+  if (s_eq(text, "?UNFOLLOW")) { follower_remove(from); return 1; }
+  return 0;
+}
+
+/* Activity dedup: the same packet can reach us twice (APRS-IS + a BLE iGate), so
+ * collapse identical (sender,line) entries to one feed item. */
+#define ACT_SEEN 64
+static unsigned g_act_seen[ACT_SEEN];
+static unsigned g_act_seen_n = 0;
+static int act_seen_has(unsigned h) {
+  unsigned n = g_act_seen_n < ACT_SEEN ? g_act_seen_n : ACT_SEEN;
+  for (unsigned i = 0; i < n; i++) if (g_act_seen[i] == h) return 1;
+  return 0;
+}
+static void act_seen_add(unsigned h) { g_act_seen[g_act_seen_n % ACT_SEEN] = h; g_act_seen_n++; }
+
+/* Surface one activity item from a followed station into the Activity feed.
+ * [grp] is the group context ("" for a direct/status item). Deduped on the
+ * sender + rendered line so dual-path delivery shows once. */
+static void activity_capture(const char *from, const char *grp,
+                             const char *text, const char *via) {
+  if (!is_following(from)) return;
+  char line[300]; line[0] = 0;
+  if (grp && grp[0]) { s_cat(line, "#", sizeof(line)); s_cat(line, grp, sizeof(line)); s_cat(line, ": ", sizeof(line)); }
+  s_cat(line, text, sizeof(line));
+  unsigned h = sig_hash("act", from, line);
+  if (act_seen_has(h)) return;
+  act_seen_add(h);
+  double lat = 0, lon = 0; pos_get(from, &lat, &lon);
+  char meta[24] = ""; if (lat != 0 || lon != 0) distance_to(lat, lon, meta, sizeof(meta));
+  chat_append("activity", "", "in", from, line, "msg", 0, meta, lat, lon, via);
+}
+
 /* Deliver one conversation message: dedup by signature — first time shows in
  * the flow, a repeat is promoted to a pinned item (and further repeats are
  * ignored as updates of the same pin). [forcePin] is set for our own
@@ -957,10 +1139,39 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   char mid[5] = "", parent[5] = "";
   /* APRX signature: split off a trailing " ~<sig>" and verify it. The core
    * (sig stripped) is what we thread/id/display; the sig never affects mid. */
-  char core[400]; char sigstr[80]; char auth[12] = "";
+  char core[700]; char sigstr[80]; char auth[12] = ""; int have_sig = 0;
   const char *body = text;
-  if (sig_split(text, core, sizeof(core), sigstr, sizeof(sigstr))) {
-    body = core;
+  if (sig_split(text, core, sizeof(core), sigstr, sizeof(sigstr))) { body = core; have_sig = 1; }
+
+  /* Encrypted 1:1 message ("ENC1:<base64>"): canonicalise (strip spaces that
+   * multi-line reassembly inserts into the space-less base64) so the signature
+   * matches, then decrypt with the peer's key (sender for incoming, recipient
+   * for our own echo). Groups are never encrypted. */
+  int enc = 0; char plain[460]; char canon_content[700];
+  s_cpy(canon_content, body, sizeof(canon_content));
+  const char *disp = body;
+  if (id[0] != '#' && s_len(body) > 5 &&
+      body[0]=='E'&&body[1]=='N'&&body[2]=='C'&&body[3]=='1'&&body[4]==':') {
+    enc = 1;
+    char b64[680]; unsigned bi = 0;
+    for (const char *p = body + 5; *p; p++) if (*p != ' ' && bi + 1 < sizeof(b64)) b64[bi++] = *p;
+    b64[bi] = 0;
+    s_cpy(canon_content, "ENC1:", sizeof(canon_content)); s_cat(canon_content, b64, sizeof(canon_content));
+    const char *peer = s_eq(dir, "out") ? id : from;
+    const char *ppk = pk_get(peer);
+    plain[0] = 0;
+    if (ppk) {
+      uint32_t pn = hal_decrypt(ppk, s_len(ppk), b64, s_len(b64), plain, sizeof(plain) - 1);
+      if (pn > 0 && pn < sizeof(plain)) plain[pn] = 0;
+      else s_cpy(plain, "[encrypted - cannot decrypt]", sizeof(plain));
+    } else {
+      s_cpy(plain, "[encrypted - no key]", sizeof(plain));
+    }
+    disp = plain;
+  }
+
+  /* Verify the signature over the canonical (space-normalised) content. */
+  if (have_sig) {
     if (s_eq(dir, "out")) {
       s_cpy(auth, "verified", sizeof(auth));     /* we signed it ourselves */
     } else {
@@ -968,13 +1179,13 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
       if (!pk) {
         s_cpy(auth, "unverified", sizeof(auth)); /* sender's key not known yet */
       } else {
-        char canon[460]; sig_canon(canon, sizeof(canon), from, core);
+        char canon[760]; sig_canon(canon, sizeof(canon), from, canon_content);
         int ok = hal_verify(pk, s_len(pk), canon, s_len(canon), sigstr, s_len(sigstr));
         s_cpy(auth, ok ? "verified" : "bad", sizeof(auth));
       }
     }
   }
-  const char *disp = body;
+
   if (id[0] == '#') {
     /* A like vote ("<4hex>:like") is not a chat message: register the reaction
      * and stop (no bubble). Works for our own echo (mine) and others' votes. */
@@ -986,10 +1197,10 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
     msg_id(from, body, mid);
     thread_parse(body, parent, &disp);
   }
-  /* Dedup on the signature-stripped core, so the SAME message arriving via two
-   * transports (e.g. directly from APRS-IS and re-broadcast by a BLE iGate),
-   * or signed vs unsigned forms, collapses to one. */
-  unsigned h = sig_hash(id, from, body);
+  /* Dedup on the signature-stripped (and for encrypted, space-normalised) core,
+   * so the SAME message arriving via two transports (APRS-IS + a BLE iGate), or
+   * signed vs unsigned forms, collapses to one. */
+  unsigned h = sig_hash(id, from, enc ? canon_content : body);
   char key[16]; u_itoa(h, key);
   /* Distance + position of the sender (incoming only), so the host can show
    * them on the map when the distance is tapped. */
@@ -1004,9 +1215,9 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
    * APRS-IS + a BLE iGate, or a resend) — drop it. Repeated bulletins are
    * intentional (recurring) → promote to pinned; our own sends are never dropped. */
   if (rep && id[0] != '#' && s_eq(dir, "in")) return;
-  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent, auth);
-  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth);
-  convo_touch(id, preview, 0);
+  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent, auth, enc);
+  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc);
+  convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
 }
 
 static void do_convo_send(const char *buf) {
@@ -1029,16 +1240,35 @@ static void do_convo_send(const char *buf) {
     if (g_ble_on) ble_tx_pos(g_lat, g_lon, "");
     push_marker(g_call, g_lat, g_lon, "blue", "");
   }
-  /* Sign the message (APRX) when enabled: append " ~<base85 sig>". The signed
-   * body is then word-split by the multi-line senders so the 60-char signature
-   * lands on its own final APRS line (≤67 chars/line, retro-compatible). The
-   * receiver reassembles and verifies. Likes are left unsigned (kept compact). */
-  char wire[480];
-  s_cpy(wire, text, sizeof(wire));
+  /* Encrypt a 1:1 message to a callsign whose public key we know (ENC1: + a
+   * base64url AES blob); group messages are never encrypted. The encrypted body
+   * is what gets signed + transmitted, so only the recipient can read it but
+   * anyone can still verify who sent it. */
+  char core[700]; s_cpy(core, text, sizeof(core));
+  int encrypted = 0;
+  if (id[0] != '#') {
+    const char *rpk = pk_get(id);
+    if (rpk) {
+      char ct[640];
+      uint32_t cn = hal_encrypt(rpk, s_len(rpk), text, s_len(text), ct, sizeof(ct) - 1);
+      if (cn > 0 && cn < sizeof(ct)) {
+        ct[cn] = 0;
+        s_cpy(core, "ENC1:", sizeof(core)); s_cat(core, ct, sizeof(core));
+        encrypted = 1;
+      }
+    }
+  }
+
+  /* Sign (APRX) when enabled OR when encrypted (encryption always carries a
+   * signature). The signed body is word-split by the multi-line senders so the
+   * 60-char signature lands on its own final APRS line; the receiver
+   * reassembles and verifies. Likes are left unsigned. */
+  char wire[800];
+  s_cpy(wire, core, sizeof(wire));
   {
     char tgt[5]; int ul;
-    if (g_sign_msgs && !like_parse(text, tgt, &ul)) {
-      char canon[460]; sig_canon(canon, sizeof(canon), g_call, text);
+    if ((g_sign_msgs || encrypted) && !like_parse(text, tgt, &ul)) {
+      char canon[720]; sig_canon(canon, sizeof(canon), g_call, core);
       char sg[80];
       uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
       if (sn > 0 && sn < sizeof(sg)) {
@@ -1129,6 +1359,58 @@ static void do_geochat_send(const char *buf) {
    * area and reappears in the Live history later. */
   chat_append("geochat", "", "out", g_call, echo, "msg", 0, "", g_lat, g_lon, "");
   status("TX geo-chat");
+}
+
+/* Post a micro-update to the shared feed group (FEED): a Twitter-style status
+ * that everyone following us sees in their Activity tab. Sent as a bulletin
+ * (multi-line, optionally signed) over APRS-IS and BLE, then echoed into our own
+ * Activity feed. */
+static void do_activity_send(const char *buf) {
+  read_config(buf);
+  int net = (g_sock >= 0 && g_logged);
+  if (!net && !g_ble_on) {
+    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+    return;
+  }
+  char text[400] = "";
+  jstr(buf, "activity_input", text, sizeof(text));
+  if (!text[0]) return;
+  /* Sign when enabled (the receiver reassembles + verifies the trailing line). */
+  char wire[480]; s_cpy(wire, text, sizeof(wire));
+  if (g_sign_msgs) {
+    char canon[480]; sig_canon(canon, sizeof(canon), g_call, text);
+    char sg[80];
+    uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
+    if (sn > 0 && sn < sizeof(sg)) { sg[sn] = 0; s_cat(wire, " ~", sizeof(wire)); s_cat(wire, sg, sizeof(wire)); }
+  }
+  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
+  if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
+  /* Local echo of our own post (plaintext, no #group prefix). */
+  chat_append("activity", "", "out", g_call, text, "msg", 0, "", g_lat, g_lon, "");
+  status("TX post");
+}
+
+/* Prompt to follow a callsign. */
+static void prompt_follow(void) {
+  const char *m = "{\"type\":\"ui.prompt\",\"id\":\"follow\",\"title\":\"Follow a callsign\","
+    "\"body\":\"Enter a callsign to follow. Their posts, replies, likes and status "
+    "will appear in your Activity feed.\","
+    "\"input\":{\"hint\":\"Callsign e.g. N0CALL\",\"max\":15},\"confirm\":\"Follow\"}";
+  hal_msg_send(m, s_len(m));
+}
+/* Prompt to unfollow: chips of the currently-followed callsigns. */
+static void prompt_unfollow(void) {
+  if (g_follow_n == 0) { notify("info", "You aren't following anyone yet"); return; }
+  char m[900] = "{\"type\":\"ui.prompt\",\"id\":\"unfollow\",\"title\":\"Unfollow\","
+                "\"body\":\"Pick a callsign to stop following.\",\"chips\":[";
+  for (int i = 0; i < g_follow_n; i++) {
+    if (i) s_cat(m, ",", sizeof(m));
+    s_cat(m, "{\"label\":\"", sizeof(m)); jesc(m, sizeof(m), g_follow[i]);
+    s_cat(m, "\",\"value\":\"", sizeof(m)); jesc(m, sizeof(m), g_follow[i]);
+    s_cat(m, "\"}", sizeof(m));
+  }
+  s_cat(m, "],\"chipMode\":\"select\",\"confirm\":\"Unfollow\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 
 /* Send one recurring bulletin now and echo it pinned at the top of the room. */
@@ -1286,6 +1568,18 @@ static void do_prompt_result(const char *buf) {
   } else if (s_eq(pid, "recur")) {
     char id[40] = ""; jstr(buf, "conversations_convo", id, sizeof(id));
     if (id[0] == '#' && inp[0]) recur_begin(id + 1, inp, to_int(val));
+  } else if (s_eq(pid, "follow")) {
+    if (inp[0]) follow_add(inp);
+  } else if (s_eq(pid, "unfollow")) {
+    if (val[0]) follow_remove(val);
+  } else if (pid[0]=='p'&&pid[1]=='r'&&pid[2]=='o'&&pid[3]=='f'&&pid[4]==':') {
+    /* Profile sheet action for pid "prof:<CALL>". */
+    const char *call = pid + 5;
+    if (s_eq(val, "follow")) follow_add(call);
+    else if (s_eq(val, "unfollow")) follow_remove(call);
+    else if (s_eq(val, "tags")) prompt_ftag(call);
+  } else if (pid[0]=='f'&&pid[1]=='t'&&pid[2]=='a'&&pid[3]=='g'&&pid[4]==':') {
+    ftag_set(pid + 5, inp);    /* empty input clears the tags */
   }
 }
 
@@ -1351,7 +1645,7 @@ static uint64_t g_last_igate_beacon = 0;   /* we (iGate) last announced ourselve
 static uint64_t g_last_mail_query   = 0;
 static uint64_t g_last_filter_check = 0;
 static uint64_t g_sdev_saved        = 0;
-static char g_gfilter[256] = "";           /* g/ extra filter currently in use */
+static char g_gfilter[600] = "";           /* g/ + b/ extra filter currently in use */
 
 static int sdev_find(const char *c) {
   for (int i = 0; i < g_sdev_n; i++) if (s_eq(g_sdev[i].call, c)) return i;
@@ -1438,6 +1732,13 @@ static void build_gfilter(char *out, unsigned max) {
     const char *id = g_convo_ids[i];
     unsigned L = s_len(id);
     if (id[0] == '#' && L >= 3 && id[L - 1] == '*') { s_cat(out, "/BLN*", max); break; }
+  }
+  /* Followed stations: a b/ budlist pulls EVERY packet FROM them (posts,
+   * replies, likes, status) regardless of group, so their Activity stream
+   * arrives even for groups we don't subscribe to. */
+  if (g_follow_n) {
+    s_cat(out, " b", max);
+    for (int i = 0; i < g_follow_n; i++) { s_cat(out, "/", max); s_cat(out, g_follow[i], max); }
   }
 }
 /* True if any global group (#NAME*) is subscribed — i.e. g/BLN* is active and
@@ -1621,18 +1922,28 @@ static void deliver_bulletin(const char *gname, const char *from,
   if (!nm[0]) return;
   /* NOSTR key beacon: record the sender's pubkey and stop (not a chat). */
   if (pk_intercept(nm, from, text)) return;
-  char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
-  char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
-  int has_g = convo_known(gid), has_l = convo_known(lid);
-  if (!has_g && !has_l) return;            /* only listen to groups we subscribed */
   /* Strip any APRX signature for the preview / like detection; convo_deliver
    * still gets the full text and re-verifies the signature. */
   char core[400]; char sg[80]; const char *cbody = text;
   if (sig_split(text, core, sizeof(core), sg, sizeof(sg))) cbody = core;
   /* A like vote is silent (no notification): convo_deliver registers it. */
-  int is_like; { char tgt[5]; int u; is_like = like_parse(cbody, tgt, &u); }
+  int is_like; char ltgt[5]; { int u; is_like = like_parse(cbody, ltgt, &u); }
+  char par[5]; const char *disp_body; thread_parse(cbody, par, &disp_body);
+  /* Followed station → surface this in the Activity feed, BEFORE the group
+   * subscription gate (we want their stream even for groups we don't follow).
+   * The feed group (FEED) is the plain micro-post stream; other groups are
+   * shown with their #group context; likes/replies are summarised. */
+  if (is_following(from)) {
+    if (is_like) activity_capture(from, "", "liked a post", via);
+    else if (par[0]) { char t[300]; s_cpy(t, "replied: ", sizeof(t)); s_cat(t, disp_body, sizeof(t)); activity_capture(from, s_eq(nm, FEED_GROUP) ? "" : nm, t, via); }
+    else activity_capture(from, s_eq(nm, FEED_GROUP) ? "" : nm, disp_body, via);
+  }
+  char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
+  char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
+  int has_g = convo_known(gid), has_l = convo_known(lid);
+  if (!has_g && !has_l) return;            /* only listen to groups we subscribed */
   char preview[140] = ""; s_cpy(preview, from, sizeof(preview)); s_cat(preview, ": ", sizeof(preview));
-  { char par[5]; const char *d; thread_parse(cbody, par, &d); s_cat(preview, d, sizeof(preview)); }
+  s_cat(preview, disp_body, sizeof(preview));
   if (has_g) {                              /* global: every bulletin for the group */
     convo_deliver(gid, "in", from, text, preview, 0, via);
     if (!is_like) notify_msg(gid, from, cbody, preview);
@@ -1709,8 +2020,8 @@ static void ra_flush(void) {
  * signed message (rejoined); any trailing run with no signature line is
  * delivered as separate plain messages (no spurious merging of normal chat). */
 #define DA_MAX 6
-#define DA_PARTS 8
-typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][72]; int n; } da_t;
+#define DA_PARTS 16        /* an encrypted message can span ~10 APRS lines */
+typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][72]; int n; uint64_t t; } da_t;
 static da_t g_da[DA_MAX];
 static void da_emit_one(const char *from, const char *full, const char *via) {
   char prev[256], sg[80]; const char *pv = full;
@@ -1731,21 +2042,32 @@ static void da_add(const char *from, const char *text, const char *via) {
     s_cpy(e->from, from, sizeof(e->from)); s_cpy(e->via, via, sizeof(e->via));
   }
   if (e->n < DA_PARTS) s_cpy(e->part[e->n++], text, sizeof(e->part[0]));
+  e->t = hal_time_epoch();
 }
-/* Flush every cycle (after both poll loops): a complete message delivered in the
- * same cycle it arrived = no delay; a multi-line message's parts arrive in the
- * same cycle and reassemble. Runs from a body up to a signature line = one signed
- * message; a lone signature with no body is dropped; other parts are delivered
- * as separate plain messages. */
+/* Decide whether a buffered entry is ready to deliver. A complete single plain
+ * message (one short, non-ENC, non-signature part) flushes immediately — no
+ * delay. A multi-part message (signed/encrypted, whose parts may arrive across
+ * poll cycles via APRS-IS) is held until its trailing signature line arrives;
+ * an idle safety net flushes anything stuck after ~2s. */
+static int da_ready(da_t *d, uint64_t now) {
+  if (d->n == 0) return 1;
+  const char *last = d->part[d->n - 1];
+  if (is_sig_line(last)) return 1;                 /* complete signed/encrypted */
+  int enc_head = (s_len(d->part[0]) > 5 && d->part[0][0]=='E' && d->part[0][1]=='N'
+                  && d->part[0][2]=='C' && d->part[0][3]=='1' && d->part[0][4]==':');
+  if (d->n == 1 && !enc_head && s_len(last) < 66) return 1; /* plain short single */
+  return now - d->t >= 2;                           /* idle safety net */
+}
 static void da_flush(void) {
+  uint64_t now = hal_time_epoch();
   for (int x = 0; x < DA_MAX; x++) {
-    if (!g_da[x].used) continue;
+    if (!g_da[x].used || !da_ready(&g_da[x], now)) continue;
     da_t *d = &g_da[x]; int i = 0;
     while (i < d->n) {
       int j = i; while (j < d->n && !is_sig_line(d->part[j])) j++;
       if (j < d->n) {                       /* parts i..j-1 = body, j = signature */
         if (j == i) { i = j + 1; continue; }  /* lone signature fragment → drop */
-        char full[600]; full[0] = 0;
+        char full[1200]; full[0] = 0;
         for (int k = i; k <= j; k++) { if (full[0]) s_cat(full, " ", sizeof(full)); s_cat(full, d->part[k], sizeof(full)); }
         da_emit_one(d->from, full, d->via); i = j + 1;
       } else {                              /* no signature → deliver separately */
@@ -1778,6 +2100,13 @@ static void route_frame(const char *line) {
       char meta[24] = ""; distance_to(p.lat, p.lon, meta, sizeof(meta));
       if (!geo_dup(p.from, p.comment))
         chat_append("geochat", "", "in", p.from, p.comment, "pos", 0, meta, p.lat, p.lon, "NET");
+      /* Followed station's status/geo-chat comment → Activity feed. A ">>"
+       * geo-chat message is shown as a plain post; anything else as a status. */
+      if (is_following(p.from)) {
+        const char *c = p.comment;
+        if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; if (c[0]) activity_capture(p.from, "", c, "NET"); }
+        else { char t[300]; s_cpy(t, "status: ", sizeof(t)); s_cat(t, c, sizeof(t)); activity_capture(p.from, "", t, "NET"); }
+      }
     }
   } else if (p.type == APRS_MESSAGE) {
     if (p.text[0] && !is_ack_text(p.text)) {
@@ -1790,6 +2119,13 @@ static void route_frame(const char *line) {
           ble_tx_from(p.from, convo, p.text);
         }
       } else {
+        int amine = 1;
+        for (int i = 0; g_call[i] || p.addressee[i]; i++) {
+          if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
+        }
+        /* ?FOLLOW / ?UNFOLLOW notifications are control traffic — record the
+         * follower and keep them off the Live tab / chat / notifications. */
+        if (amine && follow_intercept(p.from, p.text)) return;
         /* A bare signature line is a continuation fragment, not a message:
          * keep it off the Live tab + notifications; da_ reassembles it. */
         int sigln = is_sig_line(p.text);
@@ -1797,10 +2133,6 @@ static void route_frame(const char *line) {
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
         if (!sigln && !geo_dup(p.from, p.text))
           chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon, "NET");
-        int amine = 1;
-        for (int i = 0; g_call[i] || p.addressee[i]; i++) {
-          if (up(g_call[i]) != up(p.addressee[i])) { amine = 0; break; }
-        }
         /* Buffer DM parts; multi-line (incl. signed) messages reassemble in da_. */
         if (amine) da_add(p.from, p.text, "NET");
         else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
@@ -1915,6 +2247,138 @@ static void pk_render(void) {
     if (nn > 0 && nn < sizeof(npub)) { npub[nn] = 0; log_line("keys_list", npub); }
     else log_line("keys_list", g_pk_key[i]);   /* fallback: raw base64url key */
   }
+}
+
+/* One row of the Follows people list. [following] selects the trailing
+ * button: "Following" (outlined, unfollows) vs "Follow back" (filled). */
+static void people_item(char *m, unsigned sz, const char *call, int following) {
+  s_cat(m, "{\"id\":\"", sz); jesc(m, sz, call);
+  s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, call);
+  /* subtitle: known pubkey -> npub prefix + how long since their key beacon */
+  char sub[64] = "";
+  for (int k = 0; k < g_pk_n; k++) if (s_eq(g_pk_call[k], call)) {
+    char npub[72];
+    uint32_t nn = hal_npub(g_pk_key[k], s_len(g_pk_key[k]), npub, sizeof(npub) - 1);
+    if (nn > 14) { npub[14] = 0; s_cat(sub, npub, sizeof(sub)); s_cat(sub, "...", sizeof(sub)); }
+    char age[12]; rel_time(g_pk_ts[k], age, sizeof(age));
+    if (sub[0]) s_cat(sub, " - ", sizeof(sub));
+    s_cat(sub, "heard ", sizeof(sub)); s_cat(sub, age, sizeof(sub));
+    s_cat(sub, " ago", sizeof(sub));
+    break;
+  }
+  s_cat(m, "\",\"subtitle\":\"", sz); jesc(m, sz, sub);
+  s_cat(m, "\",\"tags\":[", sz);
+  for (int k = 0; k < g_follow_n; k++) if (s_eq(g_follow[k], call)) {
+    const char *t = g_ftag[k]; int first = 1; char one[48]; int oi = 0;
+    for (int x = 0;; x++) {
+      char ch = t[x];
+      if (ch == ' ' || ch == 0) {
+        if (oi) {
+          one[oi] = 0;
+          if (!first) s_cat(m, ",", sz);
+          s_cat(m, "\"", sz); jesc(m, sz, one); s_cat(m, "\"", sz);
+          first = 0; oi = 0;
+        }
+        if (!ch) break;
+      } else if (oi < 47) one[oi++] = ch;
+    }
+    break;
+  }
+  s_cat(m, "],", sz);
+  if (following)
+    s_cat(m, "\"action\":\"row_unfollow\",\"actionLabel\":\"Following\","
+             "\"actionStyle\":\"outlined\"}", sz);
+  else
+    s_cat(m, "\"action\":\"row_follow\",\"actionLabel\":\"Follow back\","
+             "\"actionStyle\":\"filled\"}", sz);
+}
+
+/* Push the Follows people list (Following | Followers sections) to the host's
+ * social-style list view. */
+static char g_people[8192];
+static void follow_render(void) {
+  char *m = g_people; const unsigned sz = sizeof(g_people);
+  m[0] = 0;
+  s_cat(m, "{\"type\":\"ui.people.set\",\"field\":\"follows_list\",\"sections\":[", sz);
+  s_cat(m, "{\"title\":\"Following\",\"items\":[", sz);
+  for (int i = 0; i < g_follow_n; i++) {
+    if (i) s_cat(m, ",", sz);
+    people_item(m, sz, g_follow[i], 1);
+  }
+  s_cat(m, "]},{\"title\":\"Followers\",\"items\":[", sz);
+  for (int i = 0; i < g_follower_n; i++) {
+    if (i) s_cat(m, ",", sz);
+    people_item(m, sz, g_follower[i], is_following(g_follower[i]));
+  }
+  s_cat(m, "]}]}", sz);
+  hal_msg_send(m, s_len(m));
+}
+
+/* Station profile sheet: identity facts + instant Follow/Unfollow/tags
+ * actions. Rendered by the host's generic prompt (chips act on tap). */
+static void profile_show(const char *call) {
+  char up_call[16]; int j = 0;
+  for (int i = 0; call[i] && j < 15; i++) up_call[j++] = up(call[i]);
+  up_call[j] = 0;
+  if (!up_call[0] || s_eq(up_call, g_call)) return;
+  int fol = is_following(up_call);
+  int fan = is_follower(up_call);
+  char body[420] = "";
+  if (fol && fan) s_cat(body, "You follow each other.", sizeof(body));
+  else if (fol)   s_cat(body, "You are following.", sizeof(body));
+  else if (fan)   s_cat(body, "Follows you.", sizeof(body));
+  else            s_cat(body, "Not following.", sizeof(body));
+  for (int i = 0; i < g_follow_n; i++)
+    if (s_eq(g_follow[i], up_call) && g_ftag[i][0]) {
+      s_cat(body, "\nTags: ", sizeof(body));
+      s_cat(body, g_ftag[i], sizeof(body));
+      break;
+    }
+  const char *pk = pk_get(up_call);
+  if (pk) {
+    char npub[72];
+    uint32_t nn = hal_npub(pk, s_len(pk), npub, sizeof(npub) - 1);
+    if (nn > 0 && nn < sizeof(npub)) {
+      npub[nn] = 0;
+      s_cat(body, "\nKey: ", sizeof(body)); s_cat(body, npub, sizeof(body));
+    }
+    for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_call[i], up_call)) {
+      char age[12]; rel_time(g_pk_ts[i], age, sizeof(age));
+      s_cat(body, "\nKey heard ", sizeof(body)); s_cat(body, age, sizeof(body));
+      s_cat(body, " ago", sizeof(body));
+      break;
+    }
+  } else {
+    s_cat(body, "\nNo public key received yet.", sizeof(body));
+  }
+  { double la, lo; char d[24];
+    if (pos_get(up_call, &la, &lo) && distance_to(la, lo, d, sizeof(d))) {
+      s_cat(body, "\nDistance: ", sizeof(body)); s_cat(body, d, sizeof(body));
+    } }
+  char m[1000] = "{\"type\":\"ui.prompt\",\"id\":\"prof:";
+  jesc(m, sizeof(m), up_call);
+  s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), up_call);
+  s_cat(m, "\",\"body\":\"", sizeof(m)); jesc(m, sizeof(m), body);
+  s_cat(m, "\",\"chips\":[", sizeof(m));
+  if (fol)
+    s_cat(m, "{\"label\":\"Unfollow\",\"value\":\"unfollow\"},"
+             "{\"label\":\"Edit tags\",\"value\":\"tags\"}", sizeof(m));
+  else
+    s_cat(m, "{\"label\":\"Follow\",\"value\":\"follow\"}", sizeof(m));
+  s_cat(m, "]}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Edit the tags on a followed callsign (result handled as "ftag:<call>"). */
+static void prompt_ftag(const char *call) {
+  char m[420] = "{\"type\":\"ui.prompt\",\"id\":\"ftag:";
+  jesc(m, sizeof(m), call);
+  s_cat(m, "\",\"title\":\"Tags for ", sizeof(m)); jesc(m, sizeof(m), call);
+  s_cat(m, "\",\"body\":\"Space-separated tags, e.g. dx friend club. "
+           "Leave empty to clear.\","
+           "\"input\":{\"hint\":\"tags\",\"max\":40},\"confirm\":\"Save\"}",
+        sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 
 /* Extract the idx-th comma-separated field of s into out (NUL-terminated). */
@@ -2202,6 +2666,11 @@ static void ble_handle(const char *compact, int rssi) {
       char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
       if (!geo_dup(from, comment))
         chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon, "BLE");
+      if (is_following(from)) {
+        const char *c = comment;
+        if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; if (c[0]) activity_capture(from, "", c, "BLE"); }
+        else { char t[300]; s_cpy(t, "status: ", sizeof(t)); s_cat(t, c, sizeof(t)); activity_capture(from, "", t, "BLE"); }
+      }
     }
   } else if (to[0] == '#') {              /* group bulletin over BLE (in range = local) */
     deliver_bulletin(to + 1, from, text, 1, "BLE");
@@ -2216,12 +2685,19 @@ static void ble_handle(const char *compact, int rssi) {
     if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
     if (!geo_dup(from, text))
       chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
+    if (is_following(from)) {
+      const char *c = text;
+      if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; }
+      if (c[0]) activity_capture(from, "", c, "BLE");
+    }
     notify_msg(from, from, text, text);   /* message on the Live tab */
   } else {                               /* 1:1 to a callsign */
     int amine = 1;
     for (int i = 0; g_call[i] || to[i]; i++) {
       if (up(g_call[i]) != up(to[i])) { amine = 0; break; }
     }
+    /* Follow notifications are control traffic, not chat (see route_frame). */
+    if (amine && follow_intercept(from, text)) return;
     int sigln = is_sig_line(text);
     char dcore[256], dsg[80]; const char *dprev = text;
     if (sig_split(text, dcore, sizeof(dcore), dsg, sizeof(dsg))) dprev = dcore;
@@ -2281,6 +2757,9 @@ void module_init(void) {
   pkbeacon_load();
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   pk_render();     /* populate the Keys list view from the restored database */
+  follows_load();  /* restore followed callsigns so the b/ filter is correct now */
+  followers_load();
+  follow_render(); /* push the Follows people list (Following | Followers) */
   { char b[4]; uint32_t n = hal_kv_get("signmsgs", 8, b, sizeof(b) - 1);
     if (n >= 1) g_sign_msgs = (b[0] != '0'); }
   status("APRS ready - connecting to APRS-IS automatically...");
@@ -2331,7 +2810,7 @@ void module_tick(void) {
     /* Re-evaluate the APRS-IS g/ filter; reconnect to apply it if it changed. */
     if (online && now - g_last_filter_check >= 30) {
       g_last_filter_check = now;
-      char nf[256]; build_gfilter(nf, sizeof(nf));
+      char nf[600]; build_gfilter(nf, sizeof(nf));
       if (!s_eq(nf, g_gfilter)) {
         aprs_disconnect(g_sock); g_sock = -1; g_logged = 0;   /* re-login w/ new filter */
       }
@@ -2472,6 +2951,22 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "set_radius")) do_set_radius(buf);
   else if (s_eq(cmd, "ping")) do_ping(buf);
   else if (s_eq(cmd, "geochat_send")) do_geochat_send(buf);
+  else if (s_eq(cmd, "activity_send")) do_activity_send(buf);
+  else if (s_eq(cmd, "follow")) prompt_follow();
+  else if (s_eq(cmd, "unfollow")) prompt_unfollow();
+  else if (s_eq(cmd, "profile")) {            /* sender name tapped in a chat */
+    char c[16] = ""; jstr(buf, "profile_call", c, sizeof(c));
+    profile_show(c);
+  } else if (s_eq(cmd, "follows_list_tap")) { /* people-list row tapped */
+    char c[16] = ""; jstr(buf, "follows_list_id", c, sizeof(c));
+    profile_show(c);
+  } else if (s_eq(cmd, "row_follow")) {       /* trailing button on a row */
+    char c[16] = ""; jstr(buf, "follows_list_id", c, sizeof(c));
+    follow_add(c);
+  } else if (s_eq(cmd, "row_unfollow")) {
+    char c[16] = ""; jstr(buf, "follows_list_id", c, sizeof(c));
+    follow_remove(c);
+  }
   else if (s_eq(cmd, "ble_apply")) {
     read_config(buf);
     g_ble_on = jbool_def(buf, "ble_enabled", 1);

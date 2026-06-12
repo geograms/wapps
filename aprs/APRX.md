@@ -481,8 +481,65 @@ sig)` to verify. A client SHOULD also check the callsign matches the key
 
 ---
 
+## 15. Encrypted 1:1 messages
+
+Status: **implemented** (APRS wapp ≥ 0.2.28). A direct message to a callsign
+whose public key is in the keys database (§10) is end‑to‑end encrypted so only
+that station can read it. Group messages are never encrypted.
+
+### 15.1 Scheme
+
+ECDH over secp256k1 + AES‑256‑CBC (NIP‑04‑style), using the same key pair behind
+the npub/callsign:
+
+```
+shared = X coordinate of (my_private_scalar × lift_x(their_pubkey))   // 32 bytes
+iv     = 16 random bytes
+ct     = AES-256-CBC(key = shared, iv, PKCS7(plaintext))
+blob   = iv ‖ ct
+```
+
+The X coordinate is parity‑independent, so `ecdh(a, B) == ecdh(b, A)` — sender
+and recipient derive the same key, and the sender can also decrypt its own copy
+(for the local echo). Confidentiality only; **the ciphertext is always signed
+(§14)** so authenticity + integrity (and AES‑CBC malleability) are covered by the
+signature, not by the cipher.
+
+### 15.2 On‑air format
+
+```
+ENC1:<base64url(iv ‖ ct)>  ~<base85 signature>
+```
+
+`ENC1:` marks an encrypted body; the rest is the base64url blob; the message is
+then signed (§14) and word‑split into multi‑line APRS (§5). Because the base64url
+body has no spaces, multi‑line reassembly inserts artifact spaces into it — the
+receiver **strips all spaces after `ENC1:`** before verifying the signature and
+decrypting (the signature is computed over the space‑free `ENC1:<base64>`).
+
+### 15.3 Send / receive
+
+- **Send** (1:1 only): if the recipient's pubkey is known → encrypt to it,
+  prefix `ENC1:`, sign, transmit. Otherwise send plaintext (e.g. to non‑APRX
+  stations). Encryption is automatic when a key is on file.
+- **Receive**: detect `ENC1:`, canonicalise (strip reassembly spaces), verify the
+  signature with the sender's key, then decrypt with the **peer's** key (the
+  sender for incoming; the recipient for our own echo) + our private key. Show
+  the plaintext with a lock badge; if the peer's key is unknown or decryption
+  fails, show `[encrypted - no key]` / `[encrypted - cannot decrypt]`.
+
+### 15.4 Notes
+
+- The private key never leaves the host (HAL `hal_encrypt` / `hal_decrypt`).
+- Local message history is stored decrypted (the device owner reads their own
+  chats); only the wire is encrypted.
+- A station learns peers' keys passively from their §10 `NOSTR` beacons, so
+  encryption “just works” once two APRX stations have heard each other's key.
+
+---
+
 *This spec documents the Aurora APRS wapp implementation (`wapps/aprs`). The
 APRS-IS framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
 `BLE_PROTOCOL.md`; the host-side crypto in `aurora/lib/util/aprx_sign.dart`
-(exposed via `hal_identity_sign`/`hal_verify`). Signed messages (§14) are
-implemented as of wapp 0.2.18.*
+(exposed via `hal_identity_sign`/`hal_verify`/`hal_encrypt`/`hal_decrypt`).
+Signed messages (§14) ship in wapp 0.2.18; encrypted 1:1 (§15) in 0.2.28.*

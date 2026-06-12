@@ -1,26 +1,22 @@
 [
   {
     "$": "screen",
-    "name": "Map",
-    "tip": "Stations and messages received in your filter area.",
+    "name": "Activity",
+    "icon": "home",
+    "tip": "Posts, replies, likes and status from the callsigns you follow.",
     "children": [
       {
-        "$": "group",
-        "name": "map-viewport",
-        "$type": "map",
-        "tile-url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "label-url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        "default-lat": 38.7223,
-        "default-lon": -9.1393,
-        "default-zoom": 9,
-        "min-zoom": 2,
-        "max-zoom": 18
+        "$": "field",
+        "name": "activity",
+        "$type": "chat",
+        "hint": "Share an update…"
       }
     ]
   },
   {
     "$": "screen",
-    "name": "Messenger",
+    "name": "Messages",
+    "icon": "mail",
     "tip": "Direct messages and group bulletins, organised as conversations.",
     "children": [
       {
@@ -34,6 +30,46 @@
           { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
           { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false }
         ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Geochat",
+    "icon": "chat",
+    "children": [
+      {
+        "$": "group",
+        "name": "map-viewport",
+        "$type": "map",
+        "tile-url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "label-url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        "default-lat": 38.7223,
+        "default-lon": -9.1393,
+        "default-zoom": 9,
+        "min-zoom": 2,
+        "max-zoom": 18
+      },
+      {
+        "$": "field",
+        "name": "geochat",
+        "$type": "chat",
+        "hint": "Message…"
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Follows",
+    "icon": "people",
+    "tip": "Callsigns you follow appear in your Activity feed.",
+    "children": [
+      { "$": "action", "name": "follow", "label": "Follow a callsign", "icon": "person_add", "style": "primary", "tip": "Follow a callsign — their posts, replies, likes and status appear in your Activity feed." },
+      {
+        "$": "field",
+        "name": "follows_list",
+        "$type": "people",
+        "tip": "Who you follow and who follows you; tap a row for the profile."
       }
     ]
   },
