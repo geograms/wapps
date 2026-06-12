@@ -1,9 +1,32 @@
 # Files wapp — decentralized media storage (design)
 
-Status: **plan** — nothing here is implemented yet. This document is the
-reference for the upcoming `files` wapp and its host services. It builds on
-APRX.md §16 (media reference tokens) and the existing host `MediaArchive`
-(`aurora/lib/util/media_archive.dart`, `media.sqlite3`).
+Status (2026-06-12): **Phases 1–3 implemented; 4 partial.** Builds on
+APRX.md §16 + the host `MediaArchive` (`aurora/lib/util/media_archive.dart`).
+
+Working and verified on Linux desktop:
+- Files wapp 0.1.0 (`wapps/files`): Library browser (archive as a people-list
+  with tags), details (token / Edit tags / Delete), Find-by-hash prompt,
+  Sharing panel (Blossom + BitTorrent toggles + live status).
+- BlossomServer (`aurora/lib/services/blossom_server.dart`): live —
+  `curl http://<host>:3457/<sha256-hex>` returns the hosted bytes, hash
+  verified; PUT /upload behind a toggle; `fetchFrom` pulls + verifies.
+- TorrentService (`aurora/lib/services/torrent_service.dart`): seeds every
+  archived file with a DETERMINISTIC infohash (same bytes → same infohash,
+  unit-proven); fetch-by-infohash wired.
+- Client fetch proven live: a fresh archive holding only a recorded source
+  fetched a file from an external Blossom origin, verified it, and became a
+  provider (`test/blossom_live_fetch_test.dart`).
+- HAL: hal_media_* + hal_share_* in `wapp_engine.dart` / the HAL header.
+
+Remaining for fully-automatic cross-internet operation (Phase 4–5):
+- **Discovery announce** (§7): a station must learn WHERE a hash lives. The
+  sources index + hal_media_add_source/fetch exist, but nothing yet announces
+  `have`/`want` over APRS-IS (FILES group) or NIP-94 — sources are added
+  manually today. This is the main missing glue.
+- **NAT traversal**: Blossom HTTP needs a reachable host (public IP / port
+  forward / LAN); behind NAT the BitTorrent DHT path is the answer. Seed/fetch
+  code is in place but live cross-internet swarm isn't yet demonstrated.
+- Policy/caps, public-address detection, Android background seeding.
 
 ## 1. Goal
 

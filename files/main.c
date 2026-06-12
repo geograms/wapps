@@ -394,8 +394,13 @@ void module_tick(void) {
 }
 
 __attribute__((export_name("module_handle_event")))
-void module_handle_event(const char *buf, uint32_t len) {
-  (void)len;
+void module_handle_event(void) {
+  if (hal_msg_available() == 0) return;
+  char buf[2048];
+  uint32_t n = hal_msg_recv(buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+
   char cmd[40] = "", typ[24] = "";
   jstr(buf, "command", cmd, sizeof(cmd));
   jstr(buf, "type", typ, sizeof(typ));
