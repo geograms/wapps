@@ -137,22 +137,31 @@ uint32_t hal_media_stats(char *out_buf, uint32_t out_len);
 /* Try to obtain the bytes for a token from known sources (Blossom servers,
  * then the torrent swarm). Asynchronous: returns 1 when the lookup started
  * (or the file is already local); poll hal_media_meta to see it arrive. */
+/* Obtain the bytes for a token: scan the LAN for a Blossom peer that has it,
+ * then the BitTorrent swarm via any recorded infohash. Asynchronous: 1 = the
+ * lookup started (or already local); poll hal_media_meta for arrival. */
 __attribute__((import_module("hal"), import_name("media_fetch")))
 uint32_t hal_media_fetch(const char *token, uint32_t token_len);
 
-/* Record an announced source for a hash. kind = "blossom" (base URL),
- * "infohash" (40-hex) or "callsign". */
+/* Fetch from a magnet: link (the cross-internet path). [expected] is an
+ * optional file:token to verify the downloaded content against. */
+__attribute__((import_module("hal"), import_name("media_fetch_magnet")))
+uint32_t hal_media_fetch_magnet(const char *magnet, uint32_t magnet_len,
+                                const char *expected, uint32_t expected_len);
+
+/* Record a source for a hash. kind = "blossom" (base URL), "infohash"
+ * (40-hex) or "callsign". */
 __attribute__((import_module("hal"), import_name("media_add_source")))
 uint32_t hal_media_add_source(const char *token, uint32_t token_len,
                               const char *kind, uint32_t kind_len,
                               const char *value, uint32_t value_len);
 
-/* Deterministic torrent infohash (40-hex) for an archived token — what a
- * station announces so others can swarm-fetch the file. Computed in the
- * background: returns 0 until ready, then the hex on a later call. */
-__attribute__((import_module("hal"), import_name("media_infohash")))
-uint32_t hal_media_infohash(const char *token, uint32_t token_len,
-                            char *out_buf, uint32_t out_len);
+/* A shareable magnet: link for an archived token (the reference handed to a
+ * peer on another network to fetch over BitTorrent). Built in the background:
+ * returns 0 until ready, then the magnet on a later call. */
+__attribute__((import_module("hal"), import_name("media_magnet")))
+uint32_t hal_media_magnet(const char *token, uint32_t token_len,
+                          char *out_buf, uint32_t out_len);
 
 /* Apply sharing controls: {"server":bool,"port":n,"uploads":bool,
  * "seed":bool}. server = Blossom HTTP endpoint; seed = BitTorrent. */

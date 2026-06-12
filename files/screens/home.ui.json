@@ -5,7 +5,7 @@
     "icon": "open",
     "children": [
       { "$": "action", "name": "add_file", "label": "Add file", "icon": "add", "style": "primary", "tip": "Pick a file, archive it, and get its shareable file: token." },
-      { "$": "action", "name": "find_hash", "label": "Find by hash", "icon": "search", "style": "secondary", "tip": "Search the network for a file: token announced by someone else." },
+      { "$": "action", "name": "find_hash", "label": "Find a file", "icon": "search", "style": "secondary", "tip": "Fetch a file by its file: token (local network, Blossom) or a magnet: link (BitTorrent swarm)." },
       {
         "$": "field",
         "name": "library",
@@ -23,12 +23,12 @@
       {
         "$": "group",
         "name": "provide",
-        "tip": "Two complementary transports: a Blossom-compatible HTTP endpoint (NOSTR ecosystem) and BitTorrent swarm seeding.",
+        "tip": "Two transports: Blossom HTTP for devices on the same local network, and BitTorrent for anyone across the internet.",
         "children": [
-          { "$": "field", "name": "blossom_on", "$type": "bool", "label": "Serve files over HTTP (Blossom)", "default": true, "tip": "GET /<sha256> returns the file to anyone who asks — Aurora stations and stock Blossom clients alike." },
+          { "$": "field", "name": "blossom_on", "$type": "bool", "label": "Share on the local network (Blossom)", "default": true, "tip": "Serve GET /<sha256> over HTTP so nearby devices can scan this port and fetch your files. NOSTR-Blossom compatible." },
           { "$": "field", "name": "blossom_port", "$type": "string", "label": "HTTP port", "default": "3457" },
           { "$": "field", "name": "uploads_on", "$type": "bool", "label": "Accept uploads (PUT /upload)", "default": false, "tip": "Allow others to store files on this device. Uploads are keyed by their own hash, so nobody can overwrite an existing file." },
-          { "$": "field", "name": "seed_on", "$type": "bool", "label": "Seed over BitTorrent", "default": true, "tip": "Announce every archived file to the swarm with a deterministic infohash, so any station holding the same file seeds the same torrent." },
+          { "$": "field", "name": "seed_on", "$type": "bool", "label": "Seed over BitTorrent (internet)", "default": true, "tip": "Create a deterministic torrent for every archived file and announce it to well-known public trackers + the DHT, so devices on other networks can fetch it from the swarm via its magnet link." },
           { "$": "action", "name": "share_apply", "label": "Apply sharing", "style": "primary", "tip": "Start/stop the transports with the settings above." }
         ]
       },

@@ -283,11 +283,11 @@ static void render_status(void) {
 /* ── prompts ────────────────────────────────────────────────────────────── */
 static void prompt_search(void) {
   const char *m = "{\"type\":\"ui.prompt\",\"id\":\"fsearch\","
-    "\"title\":\"Find a file by hash\","
-    "\"body\":\"Paste a file: token. The archive, known Blossom servers and "
-    "the torrent swarm are tried in turn.\","
-    "\"input\":{\"hint\":\"file:<sha256>.<ext>\",\"max\":67},"
-    "\"confirm\":\"Search\"}";
+    "\"title\":\"Find a file\","
+    "\"body\":\"Paste a file: token (found on the local network over Blossom) "
+    "or a magnet: link (fetched from the BitTorrent swarm).\","
+    "\"input\":{\"hint\":\"file:<sha256>.<ext>  or  magnet:?xt=...\",\"max\":600},"
+    "\"confirm\":\"Fetch\"}";
   hal_msg_send(m, s_len(m));
 }
 
@@ -299,14 +299,22 @@ static void prompt_details(const char *token) {
   char name[96], ext[20];
   jstr(meta, "name", name, sizeof(name));
   jstr(meta, "ext", ext, sizeof(ext));
-  char body[700]; body[0] = 0;
+  char body[900]; body[0] = 0;
   if (name[0]) { s_cat(body, name, sizeof(body)); s_cat(body, "\n", sizeof(body)); }
   s_cat(body, "Token (paste into any chat):\n", sizeof(body));
   s_cat(body, token, sizeof(body));
   { char fs[24]; fmt_size((unsigned)jnum(meta, "size"), fs, sizeof(fs));
     s_cat(body, "\nSize: ", sizeof(body)); s_cat(body, fs, sizeof(body)); }
+  /* Magnet for cross-network (BitTorrent) sharing. Built in the background —
+   * empty on the first open, present once seeding has computed it. */
+  { char magnet[400];
+    uint32_t mg = hal_media_magnet(token, s_len(token), magnet, sizeof(magnet) - 1);
+    if (mg > 0) { magnet[mg] = 0;
+      s_cat(body, "\n\nMagnet (share to fetch over BitTorrent):\n", sizeof(body));
+      s_cat(body, magnet, sizeof(body)); }
+    else s_cat(body, "\n\nMagnet: computing… (reopen in a moment)", sizeof(body)); }
 
-  char m[1200] = "{\"type\":\"ui.prompt\",\"id\":\"fdet:";
+  char m[1400] = "{\"type\":\"ui.prompt\",\"id\":\"fdet:";
   jesc(m, sizeof(m), token);
   s_cat(m, "\",\"title\":\"", sizeof(m));
   jesc(m, sizeof(m), name[0] ? name : "File");
@@ -354,11 +362,17 @@ static void do_prompt_result(const char *buf) {
   jstr(buf, "prompt_value", val, sizeof(val));
   jstr(buf, "prompt_input", inp, sizeof(inp));
   if (s_eq(pid, "fsearch")) {
-    if (!inp[0]) return;
-    if (hal_media_fetch(inp, s_len(inp))) {
-      notify("info", "Searching known sources for the file…");
+    /* A magnet link can be long, so re-read prompt_input into a big buffer. */
+    char big[600] = "";
+    jstr(buf, "prompt_input", big, sizeof(big));
+    if (!big[0]) return;
+    if (big[0]=='m'&&big[1]=='a'&&big[2]=='g'&&big[3]=='n'&&big[4]=='e'&&big[5]=='t') {
+      hal_media_fetch_magnet(big, s_len(big), "", 0);
+      notify("info", "Joining the BitTorrent swarm…");
+    } else if (hal_media_fetch(big, s_len(big))) {
+      notify("info", "Looking on the local network for the file…");
     } else {
-      notify("warning", "Not a valid file: token");
+      notify("warning", "Paste a file: token or a magnet: link");
     }
   } else if (pid[0]=='f'&&pid[1]=='d'&&pid[2]=='e'&&pid[3]=='t'&&pid[4]==':') {
     const char *token = pid + 5;
