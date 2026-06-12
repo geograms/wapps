@@ -40,6 +40,7 @@
   {
     "$": "screen",
     "name": "Beacon",
+    "menu": true,
     "tip": "Craft and transmit a beacon.",
     "children": [
       {
@@ -115,6 +116,7 @@
   {
     "$": "screen",
     "name": "Settings",
+    "menu": true,
     "tip": "Station identity, position, network and filter.",
     "children": [
       {
@@ -202,6 +204,7 @@
   {
     "$": "screen",
     "name": "Tools",
+    "menu": true,
     "tip": "Network tools — ping the local Bluetooth mesh to test reach.",
     "children": [
       {
@@ -227,6 +230,7 @@
   {
     "$": "screen",
     "name": "Keys",
+    "menu": true,
     "tip": "Public keys collected from other stations' NOSTR beacons — the basis for sending them encrypted messages.",
     "children": [
       {
