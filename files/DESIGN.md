@@ -18,15 +18,22 @@ Working and verified on Linux desktop:
   provider (`test/blossom_live_fetch_test.dart`).
 - HAL: hal_media_* + hal_share_* in `wapp_engine.dart` / the HAL header.
 
-Remaining for fully-automatic cross-internet operation (Phase 4–5):
-- **Discovery announce** (§7): a station must learn WHERE a hash lives. The
-  sources index + hal_media_add_source/fetch exist, but nothing yet announces
-  `have`/`want` over APRS-IS (FILES group) or NIP-94 — sources are added
-  manually today. This is the main missing glue.
+- **Discovery announce** (§7): WORKING. The aprs wapp (≥0.2.36) broadcasts a
+  FILES-group bulletin `HAVE <token> <blossom-url> ih:<infohash>` whenever a
+  sent message carries a media token; receivers intercept FILES bulletins
+  (never shown as chat), record the source (hal_media_add_source) and fetch
+  (hal_media_fetch) so they render + reseed. `WANT <token>` is answered with a
+  HAVE. Discovery rides APRS-IS (global, NAT-agnostic). VERIFIED end-to-end
+  over real APRS-IS: a station knowing only the token fetched the bytes from
+  the host over Blossom (hash-exact) and rendered the thumbnail.
+
+Remaining (Phase 5):
 - **NAT traversal**: Blossom HTTP needs a reachable host (public IP / port
-  forward / LAN); behind NAT the BitTorrent DHT path is the answer. Seed/fetch
-  code is in place but live cross-internet swarm isn't yet demonstrated.
-- Policy/caps, public-address detection, Android background seeding.
+  forward / LAN); behind NAT the BitTorrent DHT path is the answer — the
+  infohash is already announced in the HAVE and the seed/fetch code is in
+  place, but live cross-internet swarm exchange isn't yet demonstrated.
+- Policy/caps, public-address (STUN/UPnP) detection, Android background
+  seeding, NIP-94 announce on internet NOSTR.
 
 ## 1. Goal
 
