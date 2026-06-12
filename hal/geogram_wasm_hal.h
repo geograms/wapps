@@ -99,6 +99,71 @@ uint32_t hal_decrypt(const char *pubkey, uint32_t pubkey_len,
                      const char *blob, uint32_t blob_len,
                      char *out_buf, uint32_t out_len);
 
+/* ── Media archive + decentralized sharing (APRX §16 / Files wapp) ─────
+ * The host keeps a device-wide content-addressed archive (sha256 → bytes,
+ * media.sqlite3) plus a Blossom-compatible HTTP provider endpoint and a
+ * BitTorrent seeder. Hashes are accepted as a full "file:<sha256>.<ext>"
+ * token, a bare 43-char base64url digest, or 64-char hex. All JSON I/O. */
+
+/* Page of archive metadata (newest first) as a JSON array. Returns bytes
+ * written (0 = none/unavailable). */
+__attribute__((import_module("hal"), import_name("media_list")))
+uint32_t hal_media_list(int32_t offset, int32_t limit,
+                        char *out_buf, uint32_t out_len);
+
+/* One entry's metadata as JSON. 0 = unknown hash. */
+__attribute__((import_module("hal"), import_name("media_meta")))
+uint32_t hal_media_meta(const char *hash, uint32_t hash_len,
+                        char *out_buf, uint32_t out_len);
+
+/* Import a host file (absolute path, e.g. from a file.pick result) into the
+ * archive. Writes the wire token "file:<sha256>.<ext>". 0 = failure. */
+__attribute__((import_module("hal"), import_name("media_put_file")))
+uint32_t hal_media_put_file(const char *path, uint32_t path_len,
+                            char *out_buf, uint32_t out_len);
+
+/* Update {"name","description","tags":[..]} (absent keys unchanged). */
+__attribute__((import_module("hal"), import_name("media_set_meta")))
+uint32_t hal_media_set_meta(const char *hash, uint32_t hash_len,
+                            const char *json, uint32_t json_len);
+
+__attribute__((import_module("hal"), import_name("media_delete")))
+uint32_t hal_media_delete(const char *hash, uint32_t hash_len);
+
+/* {"count":n,"bytes":n,"screenshots":n} */
+__attribute__((import_module("hal"), import_name("media_stats")))
+uint32_t hal_media_stats(char *out_buf, uint32_t out_len);
+
+/* Try to obtain the bytes for a token from known sources (Blossom servers,
+ * then the torrent swarm). Asynchronous: returns 1 when the lookup started
+ * (or the file is already local); poll hal_media_meta to see it arrive. */
+__attribute__((import_module("hal"), import_name("media_fetch")))
+uint32_t hal_media_fetch(const char *token, uint32_t token_len);
+
+/* Record an announced source for a hash. kind = "blossom" (base URL),
+ * "infohash" (40-hex) or "callsign". */
+__attribute__((import_module("hal"), import_name("media_add_source")))
+uint32_t hal_media_add_source(const char *token, uint32_t token_len,
+                              const char *kind, uint32_t kind_len,
+                              const char *value, uint32_t value_len);
+
+/* Deterministic torrent infohash (40-hex) for an archived token — what a
+ * station announces so others can swarm-fetch the file. Computed in the
+ * background: returns 0 until ready, then the hex on a later call. */
+__attribute__((import_module("hal"), import_name("media_infohash")))
+uint32_t hal_media_infohash(const char *token, uint32_t token_len,
+                            char *out_buf, uint32_t out_len);
+
+/* Apply sharing controls: {"server":bool,"port":n,"uploads":bool,
+ * "seed":bool}. server = Blossom HTTP endpoint; seed = BitTorrent. */
+__attribute__((import_module("hal"), import_name("share_ctl")))
+uint32_t hal_share_ctl(const char *json, uint32_t json_len);
+
+/* {"server":{"running":b,"port":n,"uploads":b,"requests":n,"bytes":n},
+ *  "torrents":[{"infohash","token","seeding","progress","peers"},..]} */
+__attribute__((import_module("hal"), import_name("share_status")))
+uint32_t hal_share_status(char *out_buf, uint32_t out_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);

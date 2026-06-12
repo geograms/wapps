@@ -1,0 +1,25 @@
+{
+  "id":              "tools.geogram.files",
+  "version":         "0.1.0",
+  "kind":            "app",
+  "title":           "Files",
+  "description":     "Decentralized file archive — share media over Blossom HTTP and BitTorrent.",
+  "summary":         "The device's content-addressed media archive: every file referenced by an APRX file: token lives here, deduplicated by its SHA-256. Add files to get shareable tokens, search for hashes announced by others, and make your archive available to the network through a Blossom-compatible HTTP endpoint and a BitTorrent seeder — anyone who downloads a file can become a provider of it.",
+  "icon":            "media/icons/files.svg",
+  "tags":            ["files", "share", "torrent", "blossom", "media"],
+  "entry_ui":        "screens/home.ui.json",
+  "tick_interval_ms": 1000,
+  "permissions":     ["network", "storage"],
+  "platforms":       ["linux", "windows", "macos", "android"],
+  "provides": {
+    "functions": [],
+    "events":    [],
+    "variables": []
+  },
+  "requires": {
+    "hal":       ["log", "kv", "msg"],
+    "events":    [],
+    "libraries": [],
+    "variables": []
+  }
+}

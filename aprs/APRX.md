@@ -359,6 +359,9 @@ To receive APRX:
 7. If `GROUP == NOSTR` → it's a **key record**: store `from → base64url_decode(body)`.
 8. Otherwise it's a normal group message.
 9. Position comments beginning `>>` → geo‑chat.
+10. Any word matching `file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}` → an **embedded
+    media reference** (§16): classify it by its extension and look the hash up
+    in the local media archive.
 
 To send APRX: emit the same forms. Keep each frame within the limits in §1;
 split long bodies per §5.
@@ -538,8 +541,118 @@ decrypting (the signature is computed over the space‑free `ENC1:<base64>`).
 
 ---
 
+## 16. Embedded media references
+
+Status: **specified** (token grammar + local archive implemented host‑side;
+sending/rendering in the wapp is future work).
+
+An APRS text message cannot carry a picture — but it can carry a **name for
+one**. APRX references a file by its content: the SHA‑256 of the bytes plus
+the original file extension, embedded as a single word anywhere in a normal
+message body:
+
+```
+file:<sha256-base64url>.<ext>
+```
+
+- `<sha256-base64url>` — the **unpadded base64url** encoding of the file's
+  32‑byte SHA‑256: exactly **43 characters** of `A‑Z a‑z 0‑9 - _` (the same
+  encoding as the §10 key beacons; base64url was chosen over hex for length —
+  43 chars instead of 64 — and over base85 because `-`/`_` survive every APRS
+  path untouched).
+- `.` — a literal dot. The dot is not in the base64url alphabet, so the hash /
+  extension boundary is unambiguous.
+- `<ext>` — the original file extension, **lowercase**, 1–18 of `a‑z 0‑9`,
+  no dot inside. Senders normalise to lowercase; receivers compare lowercase.
+
+The extension is what lets a receiver decide **how the reference could be
+shown before it has any bytes**: as an inline image, a playable video, audio,
+or a generic file attachment.
+
+Example (token embedded mid‑sentence, then as the entire body):
+
+```
+X1ABCD>APRS,TCPIP*::BLN0FEED :sunset from the hill file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.jpg
+X1ABCD>APRS,TCPIP*::X1WXYZ   :file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.pdf{42
+```
+
+### 16.1 Grammar
+
+```
+token   = "file:" hash "." ext
+hash    = 43 * b64url-char          ; unpadded base64url of SHA-256(bytes)
+ext     = 1*18 ( %x61-7A / DIGIT )  ; lowercase letters / digits
+b64url-char = ALPHA / DIGIT / "-" / "_"
+```
+
+Receiver extraction regex: `file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}`
+
+- A token contains no spaces and no punctuation characters, so it is always a
+  single word: adjacent sentence punctuation (`file:….png.` at the end of a
+  sentence) falls naturally outside the match.
+- A message may contain **multiple tokens**, separated by ordinary text.
+- Tokens compose with everything else in this spec: they are plain body text,
+  so threading (§8), signing (§14) and encryption (§15) apply unchanged.
+
+### 16.2 Length invariant
+
+`5 ("file:") + 43 (hash) + 1 (".") + 18 (max ext) = 67` — exactly the APRS
+message‑text limit (§1). A token therefore always fits on one line: the §5
+word‑splitter never breaks words, so even a worst‑case token travels intact
+(real extensions are 2–4 chars, ≈ 52 chars total).
+
+### 16.3 Display classification
+
+| Kind    | Extensions                                                          |
+|---------|---------------------------------------------------------------------|
+| `image` | `png` `jpg` `jpeg` `webp` `bmp` `svg` `avif` `heic` `tif` `tiff` `ico` |
+| `video` | `gif` `webm` `mpeg` `mpg` `mp4` `mov` `avi` `mkv` `ogv`              |
+| `audio` | `mp3` `ogg` `aac` `flac` `wav` `opus`                                |
+| `file`  | anything else (attachment; offer to save / open externally)          |
+
+`gif` is classified as video — it is presented as a looping clip. Unknown
+extensions degrade gracefully to a generic file attachment.
+
+### 16.4 Local media archive
+
+Each station keeps a **content‑addressed local archive** mapping
+`sha256 → bytes`: when a token arrives and the hash is in the archive, the
+media renders immediately; identical content is stored once no matter how
+many messages, senders or apps reference it. Per entry the archive keeps:
+
+| Field         | Meaning                                                       |
+|---------------|---------------------------------------------------------------|
+| `sha256`      | primary key — unpadded base64url, 43 chars (the token hash)   |
+| `sha1`        | secondary hash of the same bytes (base64url, 27 chars)        |
+| `tlsh`        | TLSH fuzzy hash — *reserved*, null until an implementation exists |
+| `name`        | original file name, when available                            |
+| `ext`         | lowercase extension (as in the token)                         |
+| `description` | free‑text description                                         |
+| `tags`        | user/app tags (JSON array)                                    |
+| `first_seen`  | when the entry was first stored (epoch ms)                    |
+| `last_seen`   | when it was last accessed (epoch ms)                          |
+| `size`        | byte length of the data                                       |
+| `screenshot`  | a reusable preview image (thumbnail/poster), shown before/instead of the full media |
+| `data`        | the file bytes themselves                                     |
+
+The reference implementation is a single SQLite database (`media.sqlite3`,
+WAL‑journalled) shared by all wapps on the device.
+
+### 16.5 Out of scope (for now)
+
+**How the bytes travel is deliberately not specified here.** A token only
+*identifies* media; fetching the content for an unknown hash (peer query,
+BLE parcel transfer, internet gateway, …) is a separate, future layer. A
+station that cannot resolve a hash simply shows the token as text — which is
+also exactly what a non‑APRX client sees: retro‑compatible by construction.
+
+---
+
 *This spec documents the Aurora APRS wapp implementation (`wapps/aprs`). The
 APRS-IS framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
 `BLE_PROTOCOL.md`; the host-side crypto in `aurora/lib/util/aprx_sign.dart`
-(exposed via `hal_identity_sign`/`hal_verify`/`hal_encrypt`/`hal_decrypt`).
-Signed messages (§14) ship in wapp 0.2.18; encrypted 1:1 (§15) in 0.2.28.*
+(exposed via `hal_identity_sign`/`hal_verify`/`hal_encrypt`/`hal_decrypt`);
+the media token parser in `aurora/lib/util/media_ref.dart` and the media
+archive in `aurora/lib/util/media_archive.dart`. Signed messages (§14) ship
+in wapp 0.2.18; encrypted 1:1 (§15) in 0.2.28; media references (§16) are
+specified as of 0.2.35.*

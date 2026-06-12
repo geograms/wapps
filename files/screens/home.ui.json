@@ -1,0 +1,38 @@
+[
+  {
+    "$": "screen",
+    "name": "Library",
+    "icon": "open",
+    "children": [
+      { "$": "action", "name": "add_file", "label": "Add file", "icon": "add", "style": "primary", "tip": "Pick a file, archive it, and get its shareable file: token." },
+      { "$": "action", "name": "find_hash", "label": "Find by hash", "icon": "search", "style": "secondary", "tip": "Search the network for a file: token announced by someone else." },
+      {
+        "$": "field",
+        "name": "library",
+        "$type": "people",
+        "tip": "Every file in the device's content-addressed archive. Tap an entry for details."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Sharing",
+    "menu": true,
+    "tip": "Make your archive available to others.",
+    "children": [
+      {
+        "$": "group",
+        "name": "provide",
+        "tip": "Two complementary transports: a Blossom-compatible HTTP endpoint (NOSTR ecosystem) and BitTorrent swarm seeding.",
+        "children": [
+          { "$": "field", "name": "blossom_on", "$type": "bool", "label": "Serve files over HTTP (Blossom)", "default": true, "tip": "GET /<sha256> returns the file to anyone who asks — Aurora stations and stock Blossom clients alike." },
+          { "$": "field", "name": "blossom_port", "$type": "string", "label": "HTTP port", "default": "3457" },
+          { "$": "field", "name": "uploads_on", "$type": "bool", "label": "Accept uploads (PUT /upload)", "default": false, "tip": "Allow others to store files on this device. Uploads are keyed by their own hash, so nobody can overwrite an existing file." },
+          { "$": "field", "name": "seed_on", "$type": "bool", "label": "Seed over BitTorrent", "default": true, "tip": "Announce every archived file to the swarm with a deterministic infohash, so any station holding the same file seeds the same torrent." },
+          { "$": "action", "name": "share_apply", "label": "Apply sharing", "style": "primary", "tip": "Start/stop the transports with the settings above." }
+        ]
+      },
+      { "$": "field", "name": "share_log", "$type": "log", "label": "Status", "tip": "Server and swarm activity." }
+    ]
+  }
+]
