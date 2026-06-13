@@ -181,6 +181,13 @@ uint32_t hal_share_ctl(const char *json, uint32_t json_len);
 __attribute__((import_module("hal"), import_name("share_status")))
 uint32_t hal_share_status(char *out_buf, uint32_t out_len);
 
+/* Routine LAN scan for Blossom servers: probes the local network and refreshes
+ * the host's cached directory of reachable Aurora Blossom servers. Call it
+ * periodically (NOT per message). Writes a JSON array of base URLs to out_buf;
+ * returns the count of reachable servers. */
+__attribute__((import_module("hal"), import_name("lan_scan")))
+uint32_t hal_lan_scan(char *out_buf, uint32_t out_len);
+
 /* Free heap bytes available to this module */
 __attribute__((import_module("hal"), import_name("heap_free")))
 uint32_t hal_heap_free(void);

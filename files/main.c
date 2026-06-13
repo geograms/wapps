@@ -400,9 +400,18 @@ void module_init(void) {
   hal_log(1, "files: ready", 12);
 }
 
+/* Routine LAN scan: refresh the host's directory of reachable Blossom servers
+ * so media resolution can query nearby devices by hash without scanning per
+ * message. Run shortly after start and then every ~60s. */
+static void lan_scan(void) {
+  char servers[512];
+  hal_lan_scan(servers, sizeof(servers) - 1);
+}
+
 __attribute__((export_name("module_tick")))
 void module_tick(void) {
   g_tick++;
+  if (g_tick == 3 || g_tick % 60 == 0) lan_scan();
   if (g_tick % 5 == 0) render_status();
   if (g_tick % 15 == 0) render_library();   /* pick up async fetches */
 }
