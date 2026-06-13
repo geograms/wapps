@@ -1220,6 +1220,47 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
 }
 
+/* ── media share helper (APRX §16 + BitTorrent) ───────────────────────────
+ * When a message we send embeds a media token (file:<sha256>.<ext>) for a file
+ * we host, append the deterministic torrent infohash ("ih:<40hex>") to the
+ * SAME message so receivers can join the swarm and fetch it over BitTorrent.
+ * One message — no separate discovery traffic. */
+static int find_file_token(const char *text, char *out, unsigned max) {
+  for (const char *p = text; *p; p++) {
+    if (p[0]=='f'&&p[1]=='i'&&p[2]=='l'&&p[3]=='e'&&p[4]==':') {
+      const char *q = p + 5; int n = 0;
+      while (((*q>='A'&&*q<='Z')||(*q>='a'&&*q<='z')||(*q>='0'&&*q<='9')||
+              *q=='-'||*q=='_') && n < 43) { q++; n++; }
+      if (n != 43 || *q != '.') continue;
+      const char *r = q + 1; int e = 0;
+      while (((*r>='a'&&*r<='z')||(*r>='0'&&*r<='9')) && e < 18) { r++; e++; }
+      if (e < 1) continue;
+      unsigned len = (unsigned)(r - p);
+      if (len >= max) return 0;
+      for (unsigned i = 0; i < len; i++) out[i] = p[i];
+      out[len] = 0;
+      return 1;
+    }
+  }
+  return 0;
+}
+/* If [text] already carries a media token (and no ih: yet), append our
+ * infohash for it. Mutates [text] in place (buffer must have room). */
+static void add_infohash(char *text, unsigned sz) {
+  char token[80];
+  if (!find_file_token(text, token, sizeof(token))) return;
+  for (const char *p = text; *p; p++)        /* already has an ih:? leave it */
+    if (p[0]=='i'&&p[1]=='h'&&p[2]==':') return;
+  char ih[48] = "";
+  hal_media_infohash(token, s_len(token), ih, sizeof(ih) - 1);
+  if (s_len(ih) < 32) return;                /* not ready / not hosted */
+  s_cat(text, " ih:", sz); s_cat(text, ih, sz);
+  /* Only the content hash (file:) + the BitTorrent infohash (ih:) ride on the
+   * radio line — both are short and meaningful anywhere. Peer discovery is the
+   * receiver's job: the swarm (DHT/trackers) over the internet, or a Blossom
+   * LAN scan on the same network. No IP addresses go on the air. */
+}
+
 static void do_convo_send(const char *buf) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
@@ -1278,6 +1319,10 @@ static void do_convo_send(const char *buf) {
       }
     }
   }
+  /* If this message references a media file we host, append the BitTorrent
+   * infohash (cleartext, unsigned) so the receiver can fetch it. The content
+   * is still verified against the signed file: sha256 token. */
+  add_infohash(wire, sizeof(wire));
   if (id[0] == '#') {
     /* Strip the scope marker: a global group "#NEWS*" transmits the same
      * "NEWS" bulletin as the local "#NEWS" — scope is only a local view. */
@@ -1376,13 +1421,15 @@ static void do_activity_send(const char *buf) {
   jstr(buf, "activity_input", text, sizeof(text));
   if (!text[0]) return;
   /* Sign when enabled (the receiver reassembles + verifies the trailing line). */
-  char wire[480]; s_cpy(wire, text, sizeof(wire));
+  char wire[560]; s_cpy(wire, text, sizeof(wire));
   if (g_sign_msgs) {
     char canon[480]; sig_canon(canon, sizeof(canon), g_call, text);
     char sg[80];
     uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
     if (sn > 0 && sn < sizeof(sg)) { sg[sn] = 0; s_cat(wire, " ~", sizeof(wire)); s_cat(wire, sg, sizeof(wire)); }
   }
+  /* Append the BitTorrent infohash if this post references media we host. */
+  add_infohash(wire, sizeof(wire));
   if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
   /* Local echo of our own post (plaintext, no #group prefix). */
@@ -2005,12 +2052,17 @@ static void ra_add(const char *grp, const char *from, char line_id,
   e->seen |= (1 << idx); e->t = hal_time_epoch();
   if (within) e->within = 1;
 }
-/* Flush every cycle (after the read loop): a single-line bulletin is delivered
- * the same cycle it arrived (no delay); a multi-line bulletin's lines arrive in
- * the same cycle and reassemble by line id. */
+/* Flush after a brief idle (RA_FLUSH seconds with no new line for that entry):
+ * the lines of a multi-line bulletin (e.g. "…file:…" on BLN0 and "ih:… pa:…" on
+ * BLN1) can arrive in DIFFERENT poll cycles over APRS-IS, so flushing every
+ * cycle would emit BLN0 alone — splitting a media token from its ih:/pa: hints
+ * and breaking the auto-fetch. Waiting for the entry to go idle lets the
+ * remaining lines arrive and reassemble; a single-line bulletin just waits the
+ * same short idle. */
 static void ra_flush(void) {
+  uint64_t now = hal_time_epoch();
   for (int i = 0; i < RA_MAX; i++)
-    if (g_ra[i].used) ra_emit(&g_ra[i]);
+    if (g_ra[i].used && now - g_ra[i].t >= RA_FLUSH) ra_emit(&g_ra[i]);
 }
 
 /* ── Multi-line direct-message reassembly (APRS-IS) ───────────────────────

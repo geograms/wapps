@@ -163,6 +163,14 @@ __attribute__((import_module("hal"), import_name("media_magnet")))
 uint32_t hal_media_magnet(const char *token, uint32_t token_len,
                           char *out_buf, uint32_t out_len);
 
+/* The deterministic torrent infohash (40-hex) for an archived token. The
+ * sender appends "ih:<hex>" to a share message so the receiver can join the
+ * swarm. Built in the background: 0 until ready, then the hex on a later
+ * call. */
+__attribute__((import_module("hal"), import_name("media_infohash")))
+uint32_t hal_media_infohash(const char *token, uint32_t token_len,
+                            char *out_buf, uint32_t out_len);
+
 /* Apply sharing controls: {"server":bool,"port":n,"uploads":bool,
  * "seed":bool}. server = Blossom HTTP endpoint; seed = BitTorrent. */
 __attribute__((import_module("hal"), import_name("share_ctl")))
