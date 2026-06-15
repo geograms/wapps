@@ -1525,7 +1525,7 @@ static void norm_group(const char *src, char *out) {
 
 /* "+" add-group: ask the host to show the preset/custom group picker. */
 static const char *PRESET_GROUPS[] = {
-  "ALL", "MISC", "TECH", "FUN", "WARN", "INFO", "NEWS", "TRADE",
+  "ALL", "DEV", "MISC", "TECH", "FUN", "WARN", "INFO", "NEWS", "TRADE",
   "WX", "EMCOM", "ARES", "NET", "DX", "EVENT", "HELP", "SOS",
   /* 4chan-style boards */
   "B", "POL", "FIN", "G"
