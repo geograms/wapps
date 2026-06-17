@@ -5,13 +5,32 @@
     "icon": "open",
     "children": [
       { "$": "action", "name": "add_file", "label": "Add file", "icon": "add", "style": "primary", "tip": "Pick a file, archive it, and get its shareable file: token." },
-      { "$": "action", "name": "find_hash", "label": "Find a file", "icon": "search", "style": "secondary", "tip": "Fetch a file by its file: token (local network, Blossom) or a magnet: link (BitTorrent swarm)." },
+      { "$": "action", "name": "find_hash", "label": "Fetch", "icon": "download", "style": "secondary", "tip": "Fetch a file from others by its file: token (local network, Blossom) or a magnet: link (BitTorrent swarm)." },
+      { "$": "field", "name": "q", "$type": "string", "label": "Search", "hint": "name, tag, or sha256", "tip": "Search your archive by text (name, description, tag, folder) or paste a sha256 to find one file." },
+      { "$": "action", "name": "search", "label": "Search", "icon": "search", "style": "secondary" },
+      { "$": "action", "name": "folders", "label": "Folders", "icon": "folder", "style": "secondary", "tip": "Browse files grouped into virtual folders." },
+      { "$": "action", "name": "show_all", "label": "All files", "icon": "list", "style": "secondary" },
       {
         "$": "field",
         "name": "library",
         "$type": "people",
         "tip": "Every file in the device's content-addressed archive. Tap an entry for details."
       }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Folders",
+    "menu": true,
+    "tip": "Shared mutable folders. Each has a permanent id (its key); contents can change but the id stays. Others browse it by id; you grant moderators by their npub.",
+    "children": [
+      { "$": "action", "name": "folder_new", "label": "New folder", "icon": "add", "style": "primary", "tip": "Create a folder you own (you hold its master key)." },
+      { "$": "action", "name": "folder_add_disk", "label": "Add from disk", "icon": "folder", "style": "secondary", "tip": "Pick a directory on this device to share; files are served from disk (not copied). The master key is kept inside that folder." },
+      { "$": "action", "name": "folder_use", "label": "Use this folder", "icon": "check", "style": "primary", "tip": "While browsing disk: share the current directory." },
+      { "$": "action", "name": "folder_open_id", "label": "Open by id", "icon": "search", "style": "secondary", "tip": "Browse any folder by its id (hex) or npub address." },
+      { "$": "action", "name": "folder_back", "label": "My folders", "icon": "list", "style": "secondary" },
+      { "$": "action", "name": "folder_manage", "label": "Manage", "icon": "settings", "style": "secondary", "tip": "Download all, auto-sync, and owner edits (add files, rename, link, admins, rescan)." },
+      { "$": "field", "name": "folders", "$type": "people", "tip": "Your folders, or the open folder's contents. Tap to open." }
     ]
   },
   {

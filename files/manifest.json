@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.files",
-  "version":         "0.1.2",
+  "version":         "0.4.0",
   "kind":            "app",
   "title":           "Files",
   "description":     "Decentralized file archive — share media over Blossom HTTP and BitTorrent.",

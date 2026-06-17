@@ -134,6 +134,91 @@ uint32_t hal_media_delete(const char *hash, uint32_t hash_len);
 __attribute__((import_module("hal"), import_name("media_stats")))
 uint32_t hal_media_stats(char *out_buf, uint32_t out_len);
 
+/* Search the archive. An exact sha256 (token / 43-char base64url / 64-hex)
+ * returns that single entry; any other text is a full-text query over
+ * name/description/tags/folder/parent. → JSON array of metadata objects. */
+__attribute__((import_module("hal"), import_name("media_search")))
+uint32_t hal_media_search(const char *query, uint32_t query_len,
+                          char *out_buf, uint32_t out_len);
+
+/* Virtual-folder tree: JSON array of {"parent","folder","count"}. */
+__attribute__((import_module("hal"), import_name("media_folders")))
+uint32_t hal_media_folders(char *out_buf, uint32_t out_len);
+
+/* Files inside one virtual folder. Input JSON {"parent":..,"folder":..}
+ * (empty strings = uncategorized). → JSON array of metadata objects. */
+__attribute__((import_module("hal"), import_name("media_list_folder")))
+uint32_t hal_media_list_folder(const char *json, uint32_t json_len,
+                               char *out_buf, uint32_t out_len);
+
+/* ── Mutable folders (IPNS-like; folder = secp256k1 identity on the relay) ──
+ * Create a folder: input {"name":..,"desc":..} → folderId hex written to out. */
+__attribute__((import_module("hal"), import_name("folder_create")))
+uint32_t hal_folder_create(const char *json, uint32_t json_len,
+                           char *out_buf, uint32_t out_len);
+
+/* Owned folders → JSON array of {"folderId","npub","name"}. */
+__attribute__((import_module("hal"), import_name("folder_list")))
+uint32_t hal_folder_list(char *out_buf, uint32_t out_len);
+
+/* Apply an edit to a folder. op JSON is one of:
+ *   {"op":"addFile","x":<sha256hex>,"name":..,"desc":..,"mime":..,"size":..}
+ *   {"op":"rmFile","x":<sha256hex>} / {"op":"setMeta","name":..,"desc":..}
+ *   {"op":"link","f":<folderId>,"name":..} / {"op":"unlink","f":<folderId>}
+ *   {"op":"grant","p":<npub-hex>,"role":..} / {"op":"revoke","p":<npub-hex>}
+ * Asynchronous: returns 1 when the edit was accepted for publishing. */
+__attribute__((import_module("hal"), import_name("folder_edit")))
+uint32_t hal_folder_edit(const char *folder_id, uint32_t id_len,
+                         const char *json, uint32_t json_len);
+
+/* Browse a folder by id → its cached FolderState JSON {folderId,name,desc,
+ * files[],links[],admins[]}. Triggers a background refresh; poll again for
+ * fresh data (empty/partial on the first call). */
+__attribute__((import_module("hal"), import_name("folder_browse")))
+uint32_t hal_folder_browse(const char *folder_id, uint32_t id_len,
+                           char *out_buf, uint32_t out_len);
+
+/* ── Disk-backed owner folders + consumer downloads ──
+ * Register an on-disk directory as an owned folder (files served from disk, not
+ * copied to the archive). Asynchronous: returns 1 when started; poll
+ * hal_folder_owned for the resulting folderId. */
+__attribute__((import_module("hal"), import_name("folder_add_disk")))
+uint32_t hal_folder_add_disk(const char *path, uint32_t path_len);
+
+/* Re-scan owned disk folders and sync changes (one if folder_id given, else
+ * all when id_len==0). Asynchronous; returns 1 when started. */
+__attribute__((import_module("hal"), import_name("folder_rescan")))
+uint32_t hal_folder_rescan(const char *folder_id, uint32_t id_len);
+
+/* Download from a folder. json is {"sha":..,"name":..} for one file, or
+ * {"all":true} for the whole folder. Asynchronous; returns 1 when started. */
+__attribute__((import_module("hal"), import_name("folder_download")))
+uint32_t hal_folder_download(const char *folder_id, uint32_t id_len,
+                            const char *json, uint32_t json_len);
+
+/* Turn auto-sync on/off for a folder (on != 0). */
+__attribute__((import_module("hal"), import_name("folder_autosync")))
+uint32_t hal_folder_autosync(const char *folder_id, uint32_t id_len, int32_t on);
+
+/* Owned disk folders → JSON [{"folderId","dir","files"}]. */
+__attribute__((import_module("hal"), import_name("folder_owned")))
+uint32_t hal_folder_owned(char *out_buf, uint32_t out_len);
+
+/* Folder subscriptions → JSON [{"folderId","autoSync","downloaded"}]. */
+__attribute__((import_module("hal"), import_name("folder_subs")))
+uint32_t hal_folder_subs(char *out_buf, uint32_t out_len);
+
+/* List a real directory for an in-app folder browser → JSON array of
+ * {"name","path","dir"} (directories first). Empty/0 if not accessible. */
+__attribute__((import_module("hal"), import_name("fs_listdir")))
+uint32_t hal_fs_listdir(const char *path, uint32_t path_len,
+                        char *out_buf, uint32_t out_len);
+
+/* Request broad file access (Android "all files"). Returns 1 (the system access
+ * screen opens on Android); poll hal_fs_listdir afterwards. */
+__attribute__((import_module("hal"), import_name("storage_request")))
+uint32_t hal_storage_request(int32_t unused);
+
 /* Try to obtain the bytes for a token from known sources (Blossom servers,
  * then the torrent swarm). Asynchronous: returns 1 when the lookup started
  * (or the file is already local); poll hal_media_meta to see it arrive. */
