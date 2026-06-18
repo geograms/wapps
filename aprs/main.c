@@ -155,9 +155,10 @@ static uint64_t g_last_reconnect = 0;
 
 /* BLE transport (shared adapter via hal_ble_*). g_ble_on = exchange enabled
  * (on by default — matches the "Exchange over Bluetooth" default in
- * screens/home.ui.json); g_ble_relay = bridge frames between BLE and APRS-IS;
+ * screens/home.ui.json); g_ble_relay = act as a full iGate, bridging frames
+ * both ways between BLE and APRS-IS (ON by default; persisted in KV "igate");
  * g_ble_started tracks whether we've told the HAL to scan. */
-static int g_ble_on = 1, g_ble_relay = 0, g_ble_started = 0;
+static int g_ble_on = 1, g_ble_relay = 1, g_ble_started = 0;
 static uint64_t g_ble_last_beacon = 0;
 /* compact BLE senders, defined with the module entry points */
 static void ble_tx_msg(const char *to, const char *text);
@@ -175,7 +176,7 @@ static void ble_tx_pos(double lat, double lon, const char *comment);
  * Settings (persisted to KV). Receivers base64url-decode it back to 32 bytes.
  */
 #define PKBEACON_GROUP    "NOSTR"
-#define PKBEACON_INTERVAL 1800            /* seconds (30 min) */
+#define PKBEACON_INTERVAL 3600            /* seconds (hourly) */
 static char  g_pubkey[80] = "";           /* our pubkey (base64url), cached at init */
 static int   g_pubkey_beacon = 1;         /* broadcast it? (default on) */
 static uint64_t g_last_pkbeacon = 0;
@@ -280,7 +281,7 @@ static void push_status(void) {
   g_ind_net = net; g_ind_ble = ble;
   char m[256];
   s_cpy(m, "{\"type\":\"ui.map.status\",\"items\":["
-           "{\"id\":\"aprsis\",\"label\":\"APRS-IS\",\"on\":", sizeof(m));
+           "{\"id\":\"aprsis\",\"label\":\"NET\",\"on\":", sizeof(m));
   s_cat(m, net ? "true" : "false", sizeof(m));
   s_cat(m, "},{\"id\":\"ble\",\"label\":\"BLE\",\"on\":", sizeof(m));
   s_cat(m, ble ? "true" : "false", sizeof(m));
@@ -575,14 +576,37 @@ static int like_parse(const char *wire, char tgt[5], int *unlike) {
   tgt[4] = 0;
   return 1;
 }
-static unsigned g_seen[128];
-static unsigned g_seen_cnt = 0;
+/* Conversation-message dedup. A plain count ring used to evict a hash after 128
+ * other messages, so a station that re-broadcasts the SAME bulletin on a
+ * schedule (e.g. KA2DDO's "test of multi-line bulletins." every 30 min) kept
+ * reappearing once enough other traffic cycled the ring. Time-windowed with
+ * refresh-on-hit instead: an identical message is suppressed for CSEEN_WINDOW
+ * after it was LAST seen, so a recurring bulletin that keeps arriving inside the
+ * window is shown exactly once — only a genuinely new copy (text changed, or a
+ * quiet gap longer than the window) gets through. */
+#define CSEEN_MAX 256
+#define CSEEN_WINDOW 5400   /* 90 min; > any sane re-broadcast interval */
+static struct { unsigned h; uint64_t t; } g_seen[CSEEN_MAX];
 static int seen_has(unsigned h) {
-  unsigned n = g_seen_cnt < 128 ? g_seen_cnt : 128;
-  for (unsigned i = 0; i < n; i++) if (g_seen[i] == h) return 1;
+  uint64_t now = hal_time_epoch();
+  for (unsigned i = 0; i < CSEEN_MAX; i++)
+    if (g_seen[i].t && g_seen[i].h == h && now - g_seen[i].t < CSEEN_WINDOW) {
+      g_seen[i].t = now;   /* refresh: keep suppressing while it keeps arriving */
+      return 1;
+    }
   return 0;
 }
-static void seen_add(unsigned h) { g_seen[g_seen_cnt % 128] = h; g_seen_cnt++; }
+static void seen_add(unsigned h) {
+  uint64_t now = hal_time_epoch();
+  unsigned oldest = 0;
+  for (unsigned i = 0; i < CSEEN_MAX; i++) {
+    if (!g_seen[i].t || now - g_seen[i].t >= CSEEN_WINDOW) {   /* free/expired slot */
+      g_seen[i].h = h; g_seen[i].t = now; return;
+    }
+    if (g_seen[i].t < g_seen[oldest].t) oldest = i;
+  }
+  g_seen[oldest].h = h; g_seen[oldest].t = now;   /* all fresh: drop oldest */
+}
 
 /* Separate raw-frame dedup (cross-transport + relay loop guard), kept apart
  * from the conversation seen-ring above so it can't evict pin-detection keys.
@@ -668,6 +692,7 @@ static void rpt_mark(unsigned h, uint64_t now) {
 /* Last-known station positions, for the 1:1 distance badge. */
 typedef struct { char call[16]; double lat, lon; int used; } pos_t;
 static pos_t g_pos[64];
+static unsigned g_pos_evict = 0;   /* rotating eviction cursor when the table is full */
 static void pos_set(const char *call, double lat, double lon) {
   int free_i = -1;
   for (int i = 0; i < 64; i++) {
@@ -675,7 +700,7 @@ static void pos_set(const char *call, double lat, double lon) {
       if (s_eq(g_pos[i].call, call)) { g_pos[i].lat = lat; g_pos[i].lon = lon; return; }
     } else if (free_i < 0) free_i = i;
   }
-  if (free_i < 0) free_i = (int)(g_seen_cnt % 64);
+  if (free_i < 0) free_i = (int)(g_pos_evict++ % 64);
   s_cpy(g_pos[free_i].call, call, sizeof(g_pos[free_i].call));
   g_pos[free_i].lat = lat; g_pos[free_i].lon = lon; g_pos[free_i].used = 1;
 }
@@ -785,35 +810,101 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
-static void convo_pin(const char *id, const char *key, const char *dir,
-                      const char *from, const char *text, const char *meta,
-                      double lat, double lon, const char *via,
-                      const char *mid, const char *parent, const char *auth, int enc) {
-  char t[8]; fmt_time(t);
-  char m[640] = "{\"type\":\"ui.convo.pin\",\"id\":\"";
-  jesc(m, sizeof(m), id);
-  s_cat(m, "\",\"key\":\"", sizeof(m)); s_cat(m, key, sizeof(m));
-  s_cat(m, "\",\"dir\":\"", sizeof(m)); s_cat(m, dir, sizeof(m));
-  s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
-  s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), text);
-  s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
-  s_cat(m, "\"", sizeof(m));
-  if (via && via[0]) {
-    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
-    s_cat(m, "\"", sizeof(m));
-  }
-  s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
-  s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
-  cat_thread(m, sizeof(m), mid, parent, auth, enc);
-  s_cat(m, "}", sizeof(m));
-  hal_msg_send(m, s_len(m));
-}
-static void convo_unpin(const char *id, const char *key) {
-  char m[160] = "{\"type\":\"ui.convo.unpin\",\"id\":\"";
+/* Ask the host to drop already-shown bubbles. Two forms (both local-only, never
+ * transmitted): {id,key} removes one message from one conversation (hide); {from}
+ * removes every message by a sender across all conversations (block). */
+static void convo_remove_key(const char *id, const char *key) {
+  char m[160] = "{\"type\":\"ui.convo.remove\",\"id\":\"";
   jesc(m, sizeof(m), id);
   s_cat(m, "\",\"key\":\"", sizeof(m)); s_cat(m, key, sizeof(m));
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
+}
+static void convo_remove_from(const char *from) {
+  char m[160] = "{\"type\":\"ui.convo.remove\",\"from\":\"";
+  jesc(m, sizeof(m), from);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* ── Local hide / block (never transmitted) ───────────────────────────────
+ * Two purely-local filters the user controls per device:
+ *  - blocked callsigns: we drop every message from them, on any transport, and
+ *    hide their conversation. Persisted in KV "blocked" (";"-joined).
+ *  - hidden messages: a single message the user dismissed, keyed by the same
+ *    content signature ("key") the host shows the bubble under, so it stays gone
+ *    even if the same frame arrives again on another transport. KV "hidden". */
+#define BLOCK_MAX 64
+#define HIDE_MAX  128
+static char g_blocked[BLOCK_MAX][16];
+static int  g_blocked_n = 0;
+static char g_hidden[HIDE_MAX][16];   /* sig_hash keys (decimal) */
+static int  g_hidden_n = 0;
+
+static int is_blocked(const char *call) {
+  for (int i = 0; i < g_blocked_n; i++) if (s_eq(g_blocked[i], call)) return 1;
+  return 0;
+}
+static int is_hidden_key(const char *key) {
+  for (int i = 0; i < g_hidden_n; i++) if (s_eq(g_hidden[i], key)) return 1;
+  return 0;
+}
+static void blocked_save(void) {
+  char buf[BLOCK_MAX * 17]; buf[0] = 0;
+  for (int i = 0; i < g_blocked_n; i++) { s_cat(buf, g_blocked[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+  hal_kv_set("blocked", 7, buf, s_len(buf));
+}
+static void hidden_save(void) {
+  char buf[HIDE_MAX * 17]; buf[0] = 0;
+  for (int i = 0; i < g_hidden_n; i++) { s_cat(buf, g_hidden[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+  hal_kv_set("hidden", 6, buf, s_len(buf));
+}
+static void csv_load(const char *kv, int klen, char dst[][16], int *cnt, int cap) {
+  char buf[HIDE_MAX * 17];
+  uint32_t n = hal_kv_get(kv, (uint32_t)klen, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0;
+  char c[16]; int j = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? buf[i] : ';';
+    if (ch == ';') { c[j] = 0; if (c[0] && *cnt < cap) s_cpy(dst[(*cnt)++], c, 16); j = 0; }
+    else if (j < 15) c[j++] = ch;
+  }
+}
+static void blockhide_load(void) {
+  csv_load("blocked", 7, g_blocked, &g_blocked_n, BLOCK_MAX);
+  csv_load("hidden", 6, g_hidden, &g_hidden_n, HIDE_MAX);
+}
+static void block_add(const char *call) {
+  char up_call[16]; int j = 0;
+  for (int i = 0; call[i] && j < 15; i++) up_call[j++] = up(call[i]);
+  up_call[j] = 0;
+  if (!up_call[0] || s_eq(up_call, g_call) || is_blocked(up_call)) return;
+  if (g_blocked_n >= BLOCK_MAX) { notify("warning", "Block list is full"); return; }
+  s_cpy(g_blocked[g_blocked_n++], up_call, 16);
+  blocked_save();
+  convo_remove_from(up_call);   /* drop their already-shown bubbles + DM convo */
+}
+static void block_remove(const char *call) {
+  char up_call[16]; int j = 0;
+  for (int i = 0; call[i] && j < 15; i++) up_call[j++] = up(call[i]);
+  up_call[j] = 0;
+  for (int i = 0; i < g_blocked_n; i++) if (s_eq(g_blocked[i], up_call)) {
+    for (int k = i; k < g_blocked_n - 1; k++) s_cpy(g_blocked[k], g_blocked[k + 1], 16);
+    g_blocked_n--; blocked_save(); return;
+  }
+}
+static void hide_add(const char *id, const char *key) {
+  if (!key[0]) return;
+  if (!is_hidden_key(key)) {
+    if (g_hidden_n >= HIDE_MAX) {            /* drop the oldest to make room */
+      for (int k = 0; k < g_hidden_n - 1; k++) s_cpy(g_hidden[k], g_hidden[k + 1], 16);
+      g_hidden_n--;
+    }
+    s_cpy(g_hidden[g_hidden_n++], key, 16);
+    hidden_save();
+  }
+  convo_remove_key(id, key);
 }
 /* A "like" vote on message [mid] by station [from]. The host owns the tally:
  * it keeps the set of likers per message id (so each callsign counts once) and
@@ -916,6 +1007,32 @@ static const char *pk_get(const char *call) {
   for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_call[i], call)) return g_pk_key[i];
   return 0;
 }
+/* Bridge a callsign follow to the host's generic NOSTR follow set: when we know
+ * a followed callsign's public key, tell the host to host that pubkey's notes/
+ * files with the "followed" retention tier. [follow]=1 follow, 0 unfollow. The
+ * host normalises the base64url key to hex. No-op without a known key. */
+static void host_follow_emit(const char *call, int follow) {
+  const char *key = pk_get(call);
+  if (!key || !key[0]) return;
+  char m[160] = "{\"type\":\"social.";
+  s_cat(m, follow ? "follow" : "unfollow", sizeof(m));
+  s_cat(m, "\",\"pubkey\":\"", sizeof(m));
+  jesc(m, sizeof(m), key);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+/* Ask the host to store one of OUR posts (a public group bulletin or an Activity
+ * message) as a signed NOSTR note, so peers can request our posts later. [topic]
+ * tags the group/context. Only for public content — never 1:1 DMs. */
+static void host_note_emit(const char *text, const char *topic) {
+  if (!text || !text[0]) return;
+  char m[640] = "{\"type\":\"social.note\",\"text\":\"";
+  jesc(m, sizeof(m), text);
+  s_cat(m, "\",\"topic\":\"", sizeof(m));
+  if (topic) jesc(m, sizeof(m), topic);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
 static void pk_save(void) {
   g_pk_scratch[0] = 0;
   for (int i = 0; i < g_pk_n; i++) {
@@ -935,6 +1052,7 @@ static void pk_store(const char *call, const char *key) {
     g_pk_ts[i] = hal_time_epoch();
     if (!s_eq(g_pk_key[i], key)) { s_cpy(g_pk_key[i], key, sizeof(g_pk_key[i])); pk_save(); }
     pk_render();
+    if (is_following(call)) host_follow_emit(call, 1);
     return;
   }
   if (g_pk_n >= PK_MAX) return;
@@ -944,6 +1062,8 @@ static void pk_store(const char *call, const char *key) {
   g_pk_n++;
   pk_save();
   pk_render();
+  /* Key arrived for a callsign we already follow → bridge the follow now. */
+  if (is_following(call)) host_follow_emit(call, 1);
 }
 static void pk_load(void) {
   uint32_t n = hal_kv_get("pubkeys", 7, g_pk_scratch, sizeof(g_pk_scratch) - 1);
@@ -966,11 +1086,54 @@ static void pk_load(void) {
     else { if (ti < 11) ts[ti++] = c; }
   }
 }
-/* Intercept a NOSTR key beacon (group "NOSTR"): record from->pubkey and report
- * it was handled (so it isn't shown as a chat message). */
+/* ── interaction-scoped pubkey capture ────────────────────────────────────
+ * We only persist the public keys of callsigns we actually interact with (chat
+ * with, or follow) — not every station whose hourly NOSTR beacon we overhear.
+ * A NOSTR beacon from a station we don't (yet) interact with is parked in a
+ * small in-memory pending cache; the moment we interact with that callsign it is
+ * promoted into the persistent store. Interaction noticed first, beacon later,
+ * works too: the callsign is marked "wanted" and the next beacon stores it. */
+#define PEER_MAX 64
+static char g_peer[PEER_MAX][16];          /* callsigns we interact with */
+static int  g_peer_n = 0;
+#define PEND_MAX 24
+static char g_pend_call[PEND_MAX][16];     /* heard-but-not-yet-wanted keys */
+static char g_pend_key[PEND_MAX][48];
+static int  g_pend_n = 0;
+static int  g_pend_head = 0;               /* ring write cursor */
+
+static int peer_known(const char *call) {
+  for (int i = 0; i < g_peer_n; i++) if (s_eq(g_peer[i], call)) return 1;
+  return 0;
+}
+static const char *pend_get(const char *call) {
+  for (int i = 0; i < g_pend_n; i++) if (s_eq(g_pend_call[i], call)) return g_pend_key[i];
+  return 0;
+}
+static void pend_set(const char *call, const char *key) {
+  for (int i = 0; i < g_pend_n; i++) if (s_eq(g_pend_call[i], call)) {
+    s_cpy(g_pend_key[i], key, sizeof(g_pend_key[0])); return;
+  }
+  int slot = (g_pend_n < PEND_MAX) ? g_pend_n++ : g_pend_head;   /* ring-evict oldest */
+  g_pend_head = (g_pend_head + 1) % PEND_MAX;
+  s_cpy(g_pend_call[slot], call, sizeof(g_pend_call[0]));
+  s_cpy(g_pend_key[slot], key, sizeof(g_pend_key[0]));
+}
+/* Note that we interact with [call]: remember it and, if its key was parked,
+ * promote it to the persistent store now. */
+static void peer_note(const char *call) {
+  if (!call[0] || call[0] == '#' || s_eq(call, g_call)) return;
+  if (!peer_known(call) && g_peer_n < PEER_MAX) s_cpy(g_peer[g_peer_n++], call, 16);
+  const char *k = pend_get(call);
+  if (k && !pk_get(call)) pk_store(call, k);
+}
+/* Intercept a NOSTR key beacon (group "NOSTR"): record from->pubkey only for
+ * callsigns we interact with (others are parked); report it was handled so it is
+ * never shown as a chat message. */
 static int pk_intercept(const char *group, const char *from, const char *text) {
   if (!s_eq(group, "NOSTR")) return 0;
-  pk_store(from, text);
+  if (peer_known(from) || pk_get(from)) pk_store(from, text);   /* interacting -> keep */
+  else pend_set(from, text);                                    /* overheard -> park */
   return 1;
 }
 
@@ -1037,6 +1200,8 @@ static void follow_add(const char *call) {
   g_follow_n++;
   follows_save();
   follow_render();
+  peer_note(up_call);   /* following counts as interaction: keep their key */
+  host_follow_emit(up_call, 1);   /* bridge to host NOSTR-follow tier (if key known) */
   /* Tell the station (Twitter-style): a directed ?FOLLOW control message on
    * both transports; their wapp records us in its Followers list. */
   if (g_sock >= 0 && g_logged)
@@ -1054,6 +1219,7 @@ static void follow_remove(const char *call) {
     g_follow_n--;
     follows_save();
     follow_render();
+    host_follow_emit(gone, 0);   /* drop from host NOSTR-follow tier (if key known) */
     if (g_sock >= 0 && g_logged)
       aprs_send_message_multi(g_sock, g_call, gone, "?UNFOLLOW", APRS_MAX_MSG_LEN, &g_seq);
     if (g_ble_on) ble_tx_msg(gone, "?UNFOLLOW");
@@ -1109,30 +1275,58 @@ static int act_seen_has(unsigned h) {
 }
 static void act_seen_add(unsigned h) { g_act_seen[g_act_seen_n % ACT_SEEN] = h; g_act_seen_n++; }
 
-/* Surface one activity item from a followed station into the Activity feed.
- * [grp] is the group context ("" for a direct/status item). Deduped on the
- * sender + rendered line so dual-path delivery shows once. */
+/* Surface one item in the Activity feed — the unified stream of everything that
+ * happens: every incoming group bulletin and direct message, plus BLE-spot
+ * events. [convo] is the conversation the item belongs to ("#GROUP" or a
+ * callsign), so tapping it in the host jumps straight to that conversation; ""
+ * for an item with no conversation (e.g. a followed station's status). Deduped
+ * on the sender + rendered line so dual-path delivery (NET + a BLE iGate) shows
+ * once. A group prefix ("#NAME: ") is added so the feed reads at a glance. */
+static void activity_feed(const char *convo, const char *from,
+                          const char *text, const char *via,
+                          double lat, double lon) {
+  char line[300]; line[0] = 0;
+  if (convo && convo[0] == '#') {            /* group context, scope star dropped */
+    char g[10]; int j = 0;
+    for (int i = 1; convo[i] && convo[i] != '*' && j < 8; i++) g[j++] = convo[i];
+    g[j] = 0;
+    s_cat(line, "#", sizeof(line)); s_cat(line, g, sizeof(line)); s_cat(line, ": ", sizeof(line));
+  }
+  s_cat(line, text, sizeof(line));
+  unsigned h = sig_hash("actf", from, line);
+  if (act_seen_has(h)) return;
+  act_seen_add(h);
+  char meta[24] = ""; if (lat != 0 || lon != 0) distance_to(lat, lon, meta, sizeof(meta));
+  chat_append("activity", convo ? convo : "", "in", from, line, "msg", 0, meta, lat, lon, via);
+}
+/* A followed station's non-message activity (status / geo-chat post). [grp] is
+ * the group context ("" for a status). Kept follow-gated so the feed isn't
+ * flooded by every station's position comment. */
 static void activity_capture(const char *from, const char *grp,
                              const char *text, const char *via) {
   if (!is_following(from)) return;
-  char line[300]; line[0] = 0;
-  if (grp && grp[0]) { s_cat(line, "#", sizeof(line)); s_cat(line, grp, sizeof(line)); s_cat(line, ": ", sizeof(line)); }
-  s_cat(line, text, sizeof(line));
-  unsigned h = sig_hash("act", from, line);
-  if (act_seen_has(h)) return;
-  act_seen_add(h);
+  char convo[10] = "";
+  if (grp && grp[0]) { convo[0] = '#'; s_cpy(convo + 1, grp, sizeof(convo) - 1); }
   double lat = 0, lon = 0; pos_get(from, &lat, &lon);
-  char meta[24] = ""; if (lat != 0 || lon != 0) distance_to(lat, lon, meta, sizeof(meta));
-  chat_append("activity", "", "in", from, line, "msg", 0, meta, lat, lon, via);
+  activity_feed(convo, from, text, via, lat, lon);
 }
 
 /* Deliver one conversation message: dedup by signature — first time shows in
  * the flow, a repeat is promoted to a pinned item (and further repeats are
  * ignored as updates of the same pin). [forcePin] is set for our own
  * recurring sends (pinned from the first beat). */
-static void convo_deliver(const char *id, const char *dir, const char *from,
-                          const char *text, const char *preview, int forcePin,
+/* Returns 1 if a message bubble was delivered, 0 if dropped (a like vote or a
+ * repeated/duplicate message) — callers gate notifications on this so recurring
+ * bulletins/duplicates don't re-notify. */
+static int convo_deliver(const char *id, const char *dir, const char *from,
+                          const char *text, const char *preview,
                           const char *via) {
+  /* Local block: never show anything from a blocked station (their own echoes of
+   * our messages — dir "out" from g_call — are unaffected). */
+  if (s_eq(dir, "in") && is_blocked(from)) return 0;
+  /* Interacting with this callsign: capture its public key if we'd parked one. */
+  if (s_eq(dir, "in")) peer_note(from);
+  else if (id[0] != '#') peer_note(id);
   /* Threading is group-only: derive this message's id from the wire text and,
    * if it carries a "+<4hex> " reply marker, split off the parent + show the
    * text without the marker. 1:1 chats are untouched. */
@@ -1192,7 +1386,7 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
     char tgt[5]; int unlike;
     if (like_parse(body, tgt, &unlike)) {
       convo_react(id, tgt, from, unlike, s_eq(from, g_call));
-      return;
+      return 0;
     }
     msg_id(from, body, mid);
     thread_parse(body, parent, &disp);
@@ -1202,6 +1396,9 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
    * signed vs unsigned forms, collapses to one. */
   unsigned h = sig_hash(id, from, enc ? canon_content : body);
   char key[16]; u_itoa(h, key);
+  /* Locally hidden message: stays gone even if it arrives again on another
+   * transport (the key is the same content signature the host hid it under). */
+  if (is_hidden_key(key)) return 0;
   /* Distance + position of the sender (incoming only), so the host can show
    * them on the map when the distance is tapped. */
   char meta[24] = "";
@@ -1211,13 +1408,18 @@ static void convo_deliver(const char *id, const char *dir, const char *from,
   }
   int rep = seen_has(h);
   if (!rep) seen_add(h);
-  /* A repeated INCOMING direct message is a duplicate (dual-path delivery from
-   * APRS-IS + a BLE iGate, or a resend) — drop it. Repeated bulletins are
-   * intentional (recurring) → promote to pinned; our own sends are never dropped. */
-  if (rep && id[0] != '#' && s_eq(dir, "in")) return;
-  if (forcePin || rep) convo_pin(id, key, dir, from, disp, meta, lat, lon, via, mid, parent, auth, enc);
-  else convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc);
+  /* A repeated INCOMING message (direct OR a recurring bulletin) is a duplicate
+   * — dual-path delivery (APRS-IS + a BLE iGate), a resend, or a station
+   * re-broadcasting the same bulletin on a schedule. Drop it so the chat shows
+   * each distinct message once and recurring bulletins don't pile up or get
+   * auto-pinned (that banner was just noise). Our own sends are never dropped. */
+  if (rep && s_eq(dir, "in")) return 0;
+  convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc);
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
+  /* Mirror every incoming message into the unified Activity feed (tappable to
+   * jump back to this conversation). Our own sends aren't activity. */
+  if (s_eq(dir, "in")) activity_feed(id, from, disp, via, lat, lon);
+  return 1;
 }
 
 /* ── media share helper (APRX §16 + BitTorrent) ───────────────────────────
@@ -1334,11 +1536,14 @@ static void do_convo_send(const char *buf) {
       char bid[10]; bid[0] = '#'; s_cpy(bid + 1, gname, sizeof(bid) - 1);
       ble_tx_msg(bid, wire);            /* compact BLE: to = "#group" (no scope) */
     }
+    /* Public group post → also store as our own NOSTR note (peers can request
+     * it later). Not for 1:1 DMs, which are private. */
+    host_note_emit(text, gname);
   } else {
     if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
     if (g_ble_on) ble_tx_msg(id, wire);
   }
-  convo_deliver(id, "out", g_call, wire, text, 0, "");
+  convo_deliver(id, "out", g_call, wire, text, "");
   status(loc ? "TX message + position" : "TX message");
 }
 
@@ -1434,6 +1639,8 @@ static void do_activity_send(const char *buf) {
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
   /* Local echo of our own post (plaintext, no #group prefix). */
   chat_append("activity", "", "out", g_call, text, "msg", 0, "", g_lat, g_lon, "");
+  /* Store the post as our own NOSTR note so peers can request it later. */
+  host_note_emit(text, "activity");
   status("TX post");
 }
 
@@ -1460,8 +1667,10 @@ static void prompt_unfollow(void) {
   hal_msg_send(m, s_len(m));
 }
 
-/* Send one recurring bulletin now and echo it pinned at the top of the room. */
-static void recur_broadcast(recur_t *r) {
+/* Transmit one recurring bulletin. [echo] shows it once in our own room (only on
+ * the first send); the periodic re-broadcasts transmit silently so our view
+ * doesn't fill with copies (receivers dedup the repeats). */
+static void recur_broadcast(recur_t *r, int echo) {
   if (g_sock >= 0 && g_logged)
     aprs_send_bulletin_multi(g_sock, g_call, r->group, r->text, APRS_MAX_MSG_LEN);
   char convo[40];
@@ -1469,7 +1678,7 @@ static void recur_broadcast(recur_t *r) {
   for (int i = 0; r->group[i] && j < 39; i++) convo[j++] = r->group[i];
   convo[j] = 0;
   if (g_ble_on) ble_tx_msg(convo, r->text);
-  convo_deliver(convo, "out", g_call, r->text, r->text, 1, "");
+  if (echo) convo_deliver(convo, "out", g_call, r->text, r->text, "");
 }
 
 /* Begin a recurring bulletin into [group] (re-broadcast every 5 min for
@@ -1497,7 +1706,7 @@ static void recur_begin(const char *group, const char *text, int secs) {
   uint64_t now = hal_time_epoch();
   r->end = now + (uint64_t)secs;
   r->last = now;
-  recur_broadcast(r);
+  recur_broadcast(r, 1);
   status("Recurring bulletin every 5 min");
   notify("info", "Recurring bulletin started");
 }
@@ -1511,6 +1720,17 @@ static void recur_stop_group(const char *group) {
       if (up(group[k]) != g_recur[i].group[k]) { gmatch = 0; break; }
     if (gmatch) { g_recur[i].active = 0; status("Recurring bulletin stopped"); }
   }
+}
+/* True if [group] (no '#') currently has an active recurring bulletin. */
+static int recur_active_group(const char *group) {
+  for (int i = 0; i < RECUR_MAX; i++) {
+    if (!g_recur[i].active) continue;
+    int gmatch = 1;
+    for (int k = 0; group[k] || g_recur[i].group[k]; k++)
+      if (up(group[k]) != g_recur[i].group[k]) { gmatch = 0; break; }
+    if (gmatch) return 1;
+  }
+  return 0;
 }
 
 /* normalise to a 1-5 char uppercased alnum group name (no leading '#') */
@@ -1577,16 +1797,26 @@ static void do_add_group(void) { prompt_group(); }
 static void do_recur(const char *buf) {
   char id[40] = ""; jstr(buf, "conversations_convo", id, sizeof(id));
   if (id[0] != '#') { notify("info", "Recurring is for groups only"); return; }
+  /* Toggle: a second tap on a group that already has a recurring bulletin stops
+   * it (this used to be the pinned banner's dismiss button). */
+  char g[8]; norm_group(id, g);
+  if (recur_active_group(g)) { recur_stop_group(g); notify("info", "Recurring bulletin stopped"); return; }
   prompt_recur(id);
 }
 
-/* Unpin a pinned item; if it is a group's recurring bulletin, also stop it. */
-static void do_convo_unpin(const char *buf) {
+/* Local message actions from the chat bubble menu (host-driven, never on the
+ * wire): hide one message, block / unblock a station. */
+static void do_convo_hide(const char *buf) {
   char id[40] = "", key[16] = "";
   jstr(buf, "conversations_convo", id, sizeof(id));
-  jstr(buf, "conversations_pinkey", key, sizeof(key));
-  if (id[0] == '#') recur_stop_group(id + 1);
-  convo_unpin(id, key);
+  jstr(buf, "conversations_hidekey", key, sizeof(key));
+  hide_add(id, key);
+}
+static void do_convo_block(const char *buf) {
+  char c[16] = ""; jstr(buf, "conversations_blockcall", c, sizeof(c));
+  if (!c[0]) return;
+  block_add(c);
+  notify("info", "Blocked — you won't see their messages");
 }
 
 /* Result of a ui.prompt the host showed for us. */
@@ -1625,6 +1855,8 @@ static void do_prompt_result(const char *buf) {
     if (s_eq(val, "follow")) follow_add(call);
     else if (s_eq(val, "unfollow")) follow_remove(call);
     else if (s_eq(val, "tags")) prompt_ftag(call);
+    else if (s_eq(val, "block")) { block_add(call); notify("info", "Blocked — you won't see their messages"); }
+    else if (s_eq(val, "unblock")) { block_remove(call); notify("info", "Unblocked"); }
   } else if (pid[0]=='f'&&pid[1]=='t'&&pid[2]=='a'&&pid[3]=='g'&&pid[4]==':') {
     ftag_set(pid + 5, inp);    /* empty input clears the tags */
   }
@@ -1717,6 +1949,9 @@ static void sdev_touch(const char *c) {
   }
   s_cpy(g_sdev[i].call, c, sizeof(g_sdev[i].call));
   g_sdev[i].ts = now; g_sdev_dirty = 1;
+  /* Newly spotted BLE station → note it in the Activity feed (tap opens a 1:1). */
+  { double sl = 0, so = 0; pos_get(c, &sl, &so);
+    activity_feed(c, c, "spotted on Bluetooth", "BLE", sl, so); }
 }
 
 static void sdev_save(void) {
@@ -1829,6 +2064,16 @@ static void pkbeacon_load(void) {
   char b[4];
   uint32_t n = hal_kv_get("pkbeacon", 8, b, sizeof(b) - 1);
   if (n >= 1) g_pubkey_beacon = (b[0] != '0');   /* absent -> keep default (on) */
+}
+/* iGate (BLE ↔ APRS-IS bridge) on/off persists in KV "igate" ("1"/"0"); absent
+ * keeps the on-by-default state. */
+static void igate_save(void) {
+  hal_kv_set("igate", 5, g_ble_relay ? "1" : "0", 1);
+}
+static void igate_load(void) {
+  char b[4];
+  uint32_t n = hal_kv_get("igate", 5, b, sizeof(b) - 1);
+  if (n >= 1) g_ble_relay = (b[0] != '0');
 }
 /* Broadcast our npub once: APRS-IS bulletin to group "NOSTR" + same over BLE.
  * Receivers map the sender callsign (frame from-field) to the npub text. */
@@ -1976,15 +2221,12 @@ static void deliver_bulletin(const char *gname, const char *from,
   /* A like vote is silent (no notification): convo_deliver registers it. */
   int is_like; char ltgt[5]; { int u; is_like = like_parse(cbody, ltgt, &u); }
   char par[5]; const char *disp_body; thread_parse(cbody, par, &disp_body);
-  /* Followed station → surface this in the Activity feed, BEFORE the group
-   * subscription gate (we want their stream even for groups we don't follow).
-   * The feed group (FEED) is the plain micro-post stream; other groups are
-   * shown with their #group context; likes/replies are summarised. */
-  if (is_following(from)) {
-    if (is_like) activity_capture(from, "", "liked a post", via);
-    else if (par[0]) { char t[300]; s_cpy(t, "replied: ", sizeof(t)); s_cat(t, disp_body, sizeof(t)); activity_capture(from, s_eq(nm, FEED_GROUP) ? "" : nm, t, via); }
-    else activity_capture(from, s_eq(nm, FEED_GROUP) ? "" : nm, disp_body, via);
-  }
+  /* A followed station's like is a non-message event, so surface it here (the
+   * universal Activity feed below only carries real delivered messages). Posts
+   * and replies arrive as normal bulletins and reach Activity via convo_deliver,
+   * so they are NOT re-captured here (that would double them up). */
+  (void)par;
+  if (is_following(from) && is_like) activity_capture(from, "", "liked a post", via);
   char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
   char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
   int has_g = convo_known(gid), has_l = convo_known(lid);
@@ -1992,14 +2234,16 @@ static void deliver_bulletin(const char *gname, const char *from,
   char preview[140] = ""; s_cpy(preview, from, sizeof(preview)); s_cat(preview, ": ", sizeof(preview));
   s_cat(preview, disp_body, sizeof(preview));
   if (has_g) {                              /* global: every bulletin for the group */
-    convo_deliver(gid, "in", from, text, preview, 0, via);
-    if (!is_like) notify_msg(gid, from, cbody, preview);
+    /* Notify only on a freshly-delivered bubble — recurring/duplicate bulletins
+     * return 0 and stay silent. */
+    if (convo_deliver(gid, "in", from, text, preview, via) && !is_like)
+      notify_msg(gid, from, cbody, preview);
   }
   /* Local: a nearby sender, OR — when no global pull is active (g/BLN* off) —
    * trust the region filter that the bulletin is in-range. */
   if (has_l && (within || !any_global_group())) {
-    convo_deliver(lid, "in", from, text, preview, 0, via);
-    if (!is_like) notify_msg(lid, from, cbody, preview);
+    if (convo_deliver(lid, "in", from, text, preview, via) && !is_like)
+      notify_msg(lid, from, cbody, preview);
   }
 }
 
@@ -2078,7 +2322,7 @@ static da_t g_da[DA_MAX];
 static void da_emit_one(const char *from, const char *full, const char *via) {
   char prev[256], sg[80]; const char *pv = full;
   if (sig_split(full, prev, sizeof(prev), sg, sizeof(sg))) pv = prev;
-  convo_deliver(from, "in", from, full, pv, 0, via);
+  convo_deliver(from, "in", from, full, pv, via);
 }
 /* Buffer one direct-message part, keyed by (from, transport). A message that
  * arrives over BOTH transports (directly from APRS-IS AND re-broadcast by a BLE
@@ -2189,8 +2433,9 @@ static void route_frame(const char *line) {
         if (amine) da_add(p.from, p.text, "NET");
         else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
           mailbox_add(p.addressee, p.from, p.text);
-        /* Direct message to us, or a message on the Live tab — pop a notice. */
-        if (!sigln) notify_msg(p.from, p.from, p.text, p.text);
+        /* Notify ONLY for a direct message addressed to us — Live-tab / geochat
+         * traffic from other stations stays on the Live tab without a notice. */
+        if (!sigln && amine) notify_msg(p.from, p.from, p.text, p.text);
         /* Bridge to BLE only for messages NOT addressed to us — we are the
          * endpoint of our own mail, so re-broadcasting it would just echo back
          * as a duplicate. Relay (general bridge) or store-and-forward to a heard
@@ -2200,14 +2445,12 @@ static void route_frame(const char *line) {
       }
     }
   }
-  /* relay a position to BLE with its real coords/comment */
-  if (g_ble_relay && g_ble_on && p.type == APRS_POSITION && p.has_pos) {
-    char t[96] = "";
-    append_dbl(t, sizeof(t), p.lat); s_cat(t, ",", sizeof(t));
-    append_dbl(t, sizeof(t), p.lon);
-    if (p.comment[0]) { s_cat(t, ",", sizeof(t)); s_cat(t, p.comment, sizeof(t)); }
-    ble_tx_from(p.from, "!", t);
-  }
+  /* NOTE: we deliberately do NOT relay APRS-IS position beacons onto BLE. The
+   * iGate bridges MESSAGES (group bulletins + directed messages), not position
+   * telemetry — flooding every internet beacon onto BLE made internet-only
+   * stations appear on neighbours as if they were local BLE stations (their
+   * geo-chat/beacon then carried a BLE origin tag, which was wrong). Messages
+   * still gate both ways above; positions stay on the transport they arrived on. */
 }
 
 /* Handle one compact frame received over BLE; bridge to APRS-IS when relaying. */
@@ -2410,13 +2653,18 @@ static void profile_show(const char *call) {
   char m[1000] = "{\"type\":\"ui.prompt\",\"id\":\"prof:";
   jesc(m, sizeof(m), up_call);
   s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), up_call);
+  if (is_blocked(up_call)) s_cat(body, "\nBlocked — their messages are hidden.", sizeof(body));
   s_cat(m, "\",\"body\":\"", sizeof(m)); jesc(m, sizeof(m), body);
   s_cat(m, "\",\"chips\":[", sizeof(m));
   if (fol)
     s_cat(m, "{\"label\":\"Unfollow\",\"value\":\"unfollow\"},"
-             "{\"label\":\"Edit tags\",\"value\":\"tags\"}", sizeof(m));
+             "{\"label\":\"Edit tags\",\"value\":\"tags\"},", sizeof(m));
   else
-    s_cat(m, "{\"label\":\"Follow\",\"value\":\"follow\"}", sizeof(m));
+    s_cat(m, "{\"label\":\"Follow\",\"value\":\"follow\"},", sizeof(m));
+  if (is_blocked(up_call))
+    s_cat(m, "{\"label\":\"Unblock\",\"value\":\"unblock\"}", sizeof(m));
+  else
+    s_cat(m, "{\"label\":\"Block\",\"value\":\"block\"}", sizeof(m));
   s_cat(m, "]}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -2726,11 +2974,14 @@ static void ble_handle(const char *compact, int rssi) {
     }
   } else if (to[0] == '#') {              /* group bulletin over BLE (in range = local) */
     deliver_bulletin(to + 1, from, text, 1, "BLE");
+    /* iGate BLE → APRS-IS: re-originate the bulletin under the sender's
+     * callsign with a qAR q-construct (we are the gateway). A clean RF-gated
+     * path is essential — a TCPIP* path makes APRS-IS treat it as a loop and
+     * drop it, which is why the old third-party form never appeared. */
     if (g_ble_relay && g_logged) {
-      char line[260]; aprs_build_bulletin(line, sizeof(line), from, to + 1, '0', text);
-      char tp[340]; s_cpy(tp, g_call, sizeof(tp));
-      s_cat(tp, ">APRS,TCPIP*:}", sizeof(tp)); s_cat(tp, line, sizeof(tp));
-      aprs_send_raw(g_sock, tp);
+      char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
+      char line[260]; aprs_build_bulletin_via(line, sizeof(line), from, to + 1, '0', text, via);
+      aprs_send_raw(g_sock, line);
     }
   } else if (!to[0]) {                    /* area / geo-chat broadcast text */
     char meta[24] = ""; double slat = 0, slon = 0;
@@ -2742,7 +2993,7 @@ static void ble_handle(const char *compact, int rssi) {
       if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; }
       if (c[0]) activity_capture(from, "", c, "BLE");
     }
-    notify_msg(from, from, text, text);   /* message on the Live tab */
+    /* Geochat/Live-tab broadcast: shown on the Live tab, no notification. */
   } else {                               /* 1:1 to a callsign */
     int amine = 1;
     for (int i = 0; g_call[i] || to[i]; i++) {
@@ -2764,16 +3015,18 @@ static void ble_handle(const char *compact, int rssi) {
       if (!geo_dup(from, text))
         chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
     }
-    /* Direct message to us, or a message shown on the Live tab — pop a notice
-     * (but not for a bare signature fragment). */
-    if (!sigln) notify_msg(from, from, dprev, dprev);
-    /* Bridge BLE -> APRS-IS, but never for a message addressed to us (we are the
-     * endpoint; re-injecting it would loop back as a duplicate). */
+    /* Notify only for a direct message addressed to us (not a bare signature
+     * fragment, and not Live-tab traffic for other stations). */
+    if (!sigln && amine) notify_msg(from, from, dprev, dprev);
+    /* iGate BLE -> APRS-IS, but never for a message addressed to us (we are the
+     * endpoint; re-injecting it would loop back as a duplicate). Gated under the
+     * sender's call with a qAR q-construct (clean RF path, not TCPIP*). Any ack
+     * the addressee sends back is addressed to the sender — a spotted BLE device
+     * — so the IS->BLE path relays it home automatically. */
     if (g_ble_relay && g_logged && !amine) {
-      char line[260]; aprs_build_message(line, sizeof(line), from, to, text, 0);
-      char tp[340]; s_cpy(tp, g_call, sizeof(tp));
-      s_cat(tp, ">APRS,TCPIP*:}", sizeof(tp)); s_cat(tp, line, sizeof(tp));
-      aprs_send_raw(g_sock, tp);
+      char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
+      char line[260]; aprs_build_message_via(line, sizeof(line), from, to, text, 0, via);
+      aprs_send_raw(g_sock, line);
     }
   }
 }
@@ -2784,7 +3037,8 @@ static void ble_reconcile(void) {
     ble_start();
     g_ble_started = 1;
     status("Bluetooth on");
-    notify("info", "Exchanging APRS over Bluetooth");
+    /* No toast: the BLE channel availability is shown by the BLE chip in the
+     * AppBar (see push_status -> ui.map.status). */
   } else if (!g_ble_on && g_ble_started) {
     ble_stop();
     g_ble_started = 0;
@@ -2807,6 +3061,8 @@ void module_init(void) {
   { uint32_t pn = hal_identity_pubkey(g_pubkey, sizeof(g_pubkey) - 1);
     if (pn < sizeof(g_pubkey)) g_pubkey[pn] = 0; else g_pubkey[0] = 0; }
   pkbeacon_load();
+  igate_load();    /* restore iGate (BLE ↔ APRS-IS bridge) on/off (default on) */
+  blockhide_load(); /* restore local block list + hidden-message keys */
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   pk_render();     /* populate the Keys list view from the restored database */
   follows_load();  /* restore followed callsigns so the b/ filter is correct now */
@@ -2966,7 +3222,7 @@ void module_tick(void) {
       if (!r->active) continue;
       if (now >= r->end) { r->active = 0; continue; }
       if (now - r->last >= RECUR_INTERVAL) {
-        recur_broadcast(r);
+        recur_broadcast(r, 0);   /* silent re-broadcast; no self-echo */
         r->last = now;
       }
     }
@@ -2995,7 +3251,8 @@ void module_handle_event(void) {
     status(g_auto ? "Auto-beacon ON" : "Auto-beacon OFF");
     notify("info", g_auto ? "Auto-beacon enabled" : "Auto-beacon disabled");
   } else if (s_eq(cmd, "conversations_send")) do_convo_send(buf);
-  else if (s_eq(cmd, "conversations_unpin")) do_convo_unpin(buf);
+  else if (s_eq(cmd, "conversations_hide")) do_convo_hide(buf);
+  else if (s_eq(cmd, "conversations_block")) do_convo_block(buf);
   else if (s_eq(cmd, "new_chat")) do_new_chat();
   else if (s_eq(cmd, "add_group")) do_add_group();
   else if (s_eq(cmd, "recur")) do_recur(buf);
@@ -3022,8 +3279,11 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "ble_apply")) {
     read_config(buf);
     g_ble_on = jbool_def(buf, "ble_enabled", 1);
-    g_ble_relay = jbool_def(buf, "ble_relay", 0);
+    g_ble_relay = jbool_def(buf, "ble_relay", 1);   /* iGate on by default */
+    igate_save();
     ble_reconcile();
+    status(g_ble_relay ? "iGate ON (bridging Bluetooth ↔ APRS-IS)"
+                       : "iGate OFF");
   }
   else if (s_eq(cmd, "pubkey_apply")) {
     /* Explicit apply (like ble_apply) so the on-by-default state isn't clobbered

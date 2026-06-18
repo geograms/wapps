@@ -354,11 +354,14 @@ static void fmt_lon(double dd, char *b) {
   b[i++] = h; b[i] = 0;
 }
 
-void aprs_build_message(char *out, unsigned max, const char *from,
-                        const char *to, const char *text, int seq) {
+void aprs_build_message_via(char *out, unsigned max, const char *from,
+                            const char *to, const char *text, int seq,
+                            const char *via) {
   out[0] = 0;
   a_cat(out, from, max);
-  a_cat(out, ">APRS,TCPIP*::", max);
+  a_cat(out, ">APRS", max);
+  if (via && via[0]) { a_cat(out, ",", max); a_cat(out, via, max); }
+  a_cat(out, "::", max);
   /* addressee: callsign uppercased, padded to 9. (Groups use bulletins —
    * see aprs_build_bulletin.) */
   char dest[10];
@@ -369,6 +372,10 @@ void aprs_build_message(char *out, unsigned max, const char *from,
   a_cat(out, text, max);
   a_cat(out, "{", max);
   char nb[16]; a_itoa(seq, nb); a_cat(out, nb, max);
+}
+void aprs_build_message(char *out, unsigned max, const char *from,
+                        const char *to, const char *text, int seq) {
+  aprs_build_message_via(out, max, from, to, text, seq, "TCPIP*");
 }
 
 void aprs_build_beacon(char *out, unsigned max, const char *from,
@@ -478,11 +485,14 @@ int aprs_send_message_multi(int handle, const char *from, const char *to,
 
 /* --- APRS bulletins / group messaging --- */
 
-void aprs_build_bulletin(char *out, unsigned max, const char *from,
-                         const char *group, char line_id, const char *text) {
+void aprs_build_bulletin_via(char *out, unsigned max, const char *from,
+                             const char *group, char line_id, const char *text,
+                             const char *via) {
   out[0] = 0;
   a_cat(out, from, max);
-  a_cat(out, ">APRS,TCPIP*::", max);
+  a_cat(out, ">APRS", max);
+  if (via && via[0]) { a_cat(out, ",", max); a_cat(out, via, max); }
+  a_cat(out, "::", max);
   /* addressee: "BLN" + line id + up to 5 uppercase group chars, padded to 9 */
   char dest[10];
   dest[0] = 'B'; dest[1] = 'L'; dest[2] = 'N';
@@ -495,6 +505,10 @@ void aprs_build_bulletin(char *out, unsigned max, const char *from,
   a_cat(out, dest, max);
   a_cat(out, ":", max);
   a_cat(out, text, max);   /* bulletins carry no {seq */
+}
+void aprs_build_bulletin(char *out, unsigned max, const char *from,
+                         const char *group, char line_id, const char *text) {
+  aprs_build_bulletin_via(out, max, from, group, line_id, text, "TCPIP*");
 }
 
 int aprs_send_bulletin_multi(int handle, const char *from, const char *group,

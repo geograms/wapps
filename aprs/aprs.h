@@ -89,6 +89,12 @@ int aprs_parse(const char *line, aprs_packet_t *out);
  * No trailing CRLF; aprs_send_* append it before transmitting. */
 void aprs_build_message(char *out, unsigned max, const char *from,
                         const char *to, const char *text, int seq);
+/* Like aprs_build_message but with an explicit path (the part after ">APRS,").
+ * Pass "TCPIP*" for IS-originated traffic, or "qAR,<igatecall>" when gating a
+ * message heard on another medium (e.g. BLE) into APRS-IS. Empty/NULL = no via. */
+void aprs_build_message_via(char *out, unsigned max, const char *from,
+                            const char *to, const char *text, int seq,
+                            const char *via);
 void aprs_build_beacon(char *out, unsigned max, const char *from,
                        double lat, double lon, const char *sym,
                        const char *path, const char *comment);
@@ -132,6 +138,10 @@ int  aprs_send_message_multi(int handle, const char *from, const char *to,
  *                             Returns the number of lines sent. */
 void aprs_build_bulletin(char *out, unsigned max, const char *from,
                          const char *group, char line_id, const char *text);
+/* Like aprs_build_bulletin but with an explicit path (see aprs_build_message_via). */
+void aprs_build_bulletin_via(char *out, unsigned max, const char *from,
+                             const char *group, char line_id, const char *text,
+                             const char *via);
 int  aprs_send_bulletin_multi(int handle, const char *from, const char *group,
                               const char *text, int max_len);
 

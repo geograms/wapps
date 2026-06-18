@@ -3,7 +3,7 @@
     "$": "screen",
     "name": "Activity",
     "icon": "home",
-    "tip": "Posts, replies, likes and status from the callsigns you follow.",
+    "tip": "Everything happening: incoming group and direct messages, plus stations spotted over Bluetooth. Tap an item to open its conversation.",
     "children": [
       {
         "$": "field",
@@ -28,7 +28,7 @@
           { "$": "action", "name": "add_group", "icon": "add", "slot": "list", "tip": "Add a group" },
           { "$": "action", "name": "new_chat", "icon": "edit", "slot": "list", "tip": "New message" },
           { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
-          { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false }
+          { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false, "localOnly": true }
         ]
       }
     ]
@@ -210,9 +210,16 @@
         "name": "bluetooth",
         "tip": "Exchange short APRS messages directly over Bluetooth, off-grid.",
         "children": [
-          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": true, "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
-          { "$": "field", "name": "ble_relay", "$type": "bool", "label": "Relay Bluetooth ↔ internet", "default": false, "tip": "Bridge frames between BLE-local stations and APRS-IS." },
-          { "$": "action", "name": "ble_apply", "label": "Apply Bluetooth", "style": "primary", "tip": "Start/stop Bluetooth with the settings above." }
+          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": true, "apply": "ble_apply", "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
+          { "$": "field", "name": "ble_relay", "$type": "bool", "label": "Act as an iGate (bridge Bluetooth ↔ APRS-IS)", "default": true, "apply": "ble_apply", "tip": "When online, gate APRS messages heard over Bluetooth to APRS-IS, and relay APRS-IS messages addressed to Bluetooth stations in range back to them. On by default." }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "media",
+        "tip": "Images shared in messages are fetched over the network. Large ones can wait for an explicit tap.",
+        "children": [
+          { "$": "field", "name": "media_auto_mb", "$type": "string", "label": "Auto-download images up to (MB)", "default": "10", "tip": "Images at or below this size download automatically; larger ones show their size and a tap-to-download button. Set 0 to always tap to download." }
         ]
       },
       {
