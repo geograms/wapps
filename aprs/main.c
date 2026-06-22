@@ -216,6 +216,7 @@ static int  g_follower_n = 0;
 static void follow_render(void);          /* fwd: push the people list */
 static void profile_show(const char *call);   /* fwd: station profile sheet */
 static void prompt_ftag(const char *call);    /* fwd: edit-tags prompt */
+static void host_state_emit(const char *kind, const char *call, int on); /* fwd */
 static int is_following(const char *call) {
   for (int i = 0; i < g_follow_n; i++) if (s_eq(g_follow[i], call)) return 1;
   return 0;
@@ -273,19 +274,30 @@ static void status(const char *text) {
 /* Persistent transport indicators on the map (replaces flickering toasts):
  * APRS-IS connected? and BLE active? Pushed only when a value changes, so a
  * flapping link never spams. -1 = nothing pushed yet. */
-static int g_ind_net = -1, g_ind_ble = -1;
+static int g_ind_net = -1, g_ind_ble = -1, g_ind_adapter = -1;
 static void push_status(void) {
   int net = (g_sock >= 0 && g_logged) ? 1 : 0;
-  int ble = g_ble_on ? 1 : 0;
-  if (net == g_ind_net && ble == g_ind_ble) return;
-  g_ind_net = net; g_ind_ble = ble;
+  /* The physical Bluetooth adapter state (the user can turn Bluetooth off at the
+   * OS level at any time). BLE is "on" only when our setting is enabled AND the
+   * adapter is actually powered. */
+  int adapter = hal_ble_available() ? 1 : 0;
+  int ble = (g_ble_on && adapter) ? 1 : 0;
+  if (net == g_ind_net && ble == g_ind_ble && adapter == g_ind_adapter) return;
+  g_ind_net = net; g_ind_ble = ble; g_ind_adapter = adapter;
   char m[256];
   s_cpy(m, "{\"type\":\"ui.map.status\",\"items\":["
            "{\"id\":\"aprsis\",\"label\":\"NET\",\"on\":", sizeof(m));
   s_cat(m, net ? "true" : "false", sizeof(m));
-  s_cat(m, "},{\"id\":\"ble\",\"label\":\"BLE\",\"on\":", sizeof(m));
-  s_cat(m, ble ? "true" : "false", sizeof(m));
-  s_cat(m, "}]}", sizeof(m));
+  s_cat(m, "}", sizeof(m));
+  /* Only advertise the BLE channel when Bluetooth is actually on. With the
+   * adapter off the channel doesn't exist, so hide the chip entirely rather
+   * than showing it (which wrongly implied BLE was available). */
+  if (adapter) {
+    s_cat(m, ",{\"id\":\"ble\",\"label\":\"BLE\",\"on\":", sizeof(m));
+    s_cat(m, ble ? "true" : "false", sizeof(m));
+    s_cat(m, "}", sizeof(m));
+  }
+  s_cat(m, "]}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 
@@ -762,6 +774,16 @@ static void convo_remember(const char *id) {
   for (int i = 0; i < g_convo_n; i++) if (s_eq(g_convo_ids[i], id)) return;
   if (g_convo_n < 32) s_cpy(g_convo_ids[g_convo_n++], id, 40);
 }
+/* Drop [id] from the subscribed set (so we stop listening to that group/DM). */
+static void convo_forget(const char *id) {
+  for (int i = 0; i < g_convo_n; i++) {
+    if (s_eq(g_convo_ids[i], id)) {
+      for (int j = i; j < g_convo_n - 1; j++) s_cpy(g_convo_ids[j], g_convo_ids[j + 1], 40);
+      g_convo_n--;
+      return;
+    }
+  }
+}
 static int convo_known(const char *id) {
   for (int i = 0; i < g_convo_n; i++) if (s_eq(g_convo_ids[i], id)) return 1;
   return 0;
@@ -884,6 +906,7 @@ static void block_add(const char *call) {
   s_cpy(g_blocked[g_blocked_n++], up_call, 16);
   blocked_save();
   convo_remove_from(up_call);   /* drop their already-shown bubbles + DM convo */
+  host_state_emit("block", up_call, 1);
 }
 static void block_remove(const char *call) {
   char up_call[16]; int j = 0;
@@ -891,7 +914,9 @@ static void block_remove(const char *call) {
   up_call[j] = 0;
   for (int i = 0; i < g_blocked_n; i++) if (s_eq(g_blocked[i], up_call)) {
     for (int k = i; k < g_blocked_n - 1; k++) s_cpy(g_blocked[k], g_blocked[k + 1], 16);
-    g_blocked_n--; blocked_save(); return;
+    g_blocked_n--; blocked_save();
+    host_state_emit("block", up_call, 0);
+    return;
   }
 }
 static void hide_add(const char *id, const char *key) {
@@ -1024,12 +1049,37 @@ static void host_follow_emit(const char *call, int follow) {
 /* Ask the host to store one of OUR posts (a public group bulletin or an Activity
  * message) as a signed NOSTR note, so peers can request our posts later. [topic]
  * tags the group/context. Only for public content — never 1:1 DMs. */
-static void host_note_emit(const char *text, const char *topic) {
+/* Tell the host a callsign's public key (from its NOSTR beacon) so the Activity
+ * feed + profile screen can show the npub. Sent for every key we learn. */
+static void host_identity_emit(const char *call, const char *key) {
+  if (!call || !call[0] || !key || !key[0]) return;
+  char m[160] = "{\"type\":\"social.identity\",\"callsign\":\"";
+  jesc(m, sizeof(m), call);
+  s_cat(m, "\",\"pubkey\":\"", sizeof(m));
+  jesc(m, sizeof(m), key);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+/* Tell the host whether we follow / have blocked [call], so its profile UI shows
+ * the right buttons. [kind]="follow" or "block"; [on]=1/0. */
+static void host_state_emit(const char *kind, const char *call, int on) {
+  if (!call || !call[0]) return;
+  char m[120] = "{\"type\":\"social.";
+  s_cat(m, kind, sizeof(m));
+  s_cat(m, "state\",\"callsign\":\"", sizeof(m));
+  jesc(m, sizeof(m), call);
+  s_cat(m, "\",\"on\":", sizeof(m));
+  s_cat(m, on ? "true" : "false", sizeof(m));
+  s_cat(m, "}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+static void host_note_emit(const char *text, const char *topic, const char *parent) {
   if (!text || !text[0]) return;
   char m[640] = "{\"type\":\"social.note\",\"text\":\"";
   jesc(m, sizeof(m), text);
   s_cat(m, "\",\"topic\":\"", sizeof(m));
   if (topic) jesc(m, sizeof(m), topic);
+  if (parent && parent[0]) { s_cat(m, "\",\"parent\":\"", sizeof(m)); s_cat(m, parent, sizeof(m)); }
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -1052,6 +1102,7 @@ static void pk_store(const char *call, const char *key) {
     g_pk_ts[i] = hal_time_epoch();
     if (!s_eq(g_pk_key[i], key)) { s_cpy(g_pk_key[i], key, sizeof(g_pk_key[i])); pk_save(); }
     pk_render();
+    host_identity_emit(call, key);
     if (is_following(call)) host_follow_emit(call, 1);
     return;
   }
@@ -1062,6 +1113,7 @@ static void pk_store(const char *call, const char *key) {
   g_pk_n++;
   pk_save();
   pk_render();
+  host_identity_emit(call, key);
   /* Key arrived for a callsign we already follow → bridge the follow now. */
   if (is_following(call)) host_follow_emit(call, 1);
 }
@@ -1202,6 +1254,7 @@ static void follow_add(const char *call) {
   follow_render();
   peer_note(up_call);   /* following counts as interaction: keep their key */
   host_follow_emit(up_call, 1);   /* bridge to host NOSTR-follow tier (if key known) */
+  host_state_emit("follow", up_call, 1);   /* profile UI state */
   /* Tell the station (Twitter-style): a directed ?FOLLOW control message on
    * both transports; their wapp records us in its Followers list. */
   if (g_sock >= 0 && g_logged)
@@ -1220,6 +1273,7 @@ static void follow_remove(const char *call) {
     follows_save();
     follow_render();
     host_follow_emit(gone, 0);   /* drop from host NOSTR-follow tier (if key known) */
+    host_state_emit("follow", gone, 0);   /* profile UI state */
     if (g_sock >= 0 && g_logged)
       aprs_send_message_multi(g_sock, g_call, gone, "?UNFOLLOW", APRS_MAX_MSG_LEN, &g_seq);
     if (g_ble_on) ble_tx_msg(gone, "?UNFOLLOW");
@@ -1284,7 +1338,7 @@ static void act_seen_add(unsigned h) { g_act_seen[g_act_seen_n % ACT_SEEN] = h; 
  * once. A group prefix ("#NAME: ") is added so the feed reads at a glance. */
 static void activity_feed(const char *convo, const char *from,
                           const char *text, const char *via,
-                          double lat, double lon) {
+                          double lat, double lon, const char *parent) {
   char line[300]; line[0] = 0;
   if (convo && convo[0] == '#') {            /* group context, scope star dropped */
     char g[10]; int j = 0;
@@ -1297,7 +1351,48 @@ static void activity_feed(const char *convo, const char *from,
   if (act_seen_has(h)) return;
   act_seen_add(h);
   char meta[24] = ""; if (lat != 0 || lon != 0) distance_to(lat, lon, meta, sizeof(meta));
-  chat_append("activity", convo ? convo : "", "in", from, line, "msg", 0, meta, lat, lon, via);
+  /* Stable per-post id (same scheme as group threading) so Like/Reply work: it
+   * is derived from the author + body, so every device computes the same id. */
+  char mid[5]; msg_id(from, text, mid);
+  char t[8]; fmt_time(t);
+  char m[520] = "{\"type\":\"ui.chat.append\",\"field\":\"activity\",\"message\":{\"dir\":\"in\",\"convo\":\"";
+  jesc(m, sizeof(m), convo ? convo : "");
+  s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
+  s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), line);
+  s_cat(m, "\",\"kind\":\"msg\",\"mid\":\"", sizeof(m)); s_cat(m, mid, sizeof(m));
+  if (parent && parent[0]) { s_cat(m, "\",\"parent\":\"", sizeof(m)); s_cat(m, parent, sizeof(m)); }
+  s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
+  s_cat(m, "\"", sizeof(m));
+  if (via && via[0]) { s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via); s_cat(m, "\"", sizeof(m)); }
+  s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m)); s_cat(m, "\"", sizeof(m));
+  cat_pos(m, sizeof(m), lat, lon);
+  s_cat(m, "}}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+/* Tell the host about a like vote on an Activity post (so it can tally it). */
+static void activity_react_emit(const char *mid, const char *from, int like, int mine) {
+  char m[160] = "{\"type\":\"ui.activity.react\",\"mid\":\"";
+  s_cat(m, mid, sizeof(m));
+  s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
+  s_cat(m, "\",\"like\":", sizeof(m)); s_cat(m, like ? "true" : "false", sizeof(m));
+  s_cat(m, ",\"mine\":", sizeof(m)); s_cat(m, mine ? "true" : "false", sizeof(m));
+  s_cat(m, "}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+/* Echo one of OUR Activity posts (dir "out") with a mid so it can receive likes
+ * + replies like any other post. */
+static void activity_echo_self(const char *text, const char *parent) {
+  char mid[5]; msg_id(g_call, text, mid);
+  char t[8]; fmt_time(t);
+  char m[520] = "{\"type\":\"ui.chat.append\",\"field\":\"activity\",\"message\":{\"dir\":\"out\",\"convo\":\"\",\"from\":\"";
+  jesc(m, sizeof(m), g_call);
+  s_cat(m, "\",\"text\":\"", sizeof(m)); jesc(m, sizeof(m), text);
+  s_cat(m, "\",\"kind\":\"msg\",\"mid\":\"", sizeof(m)); s_cat(m, mid, sizeof(m));
+  if (parent && parent[0]) { s_cat(m, "\",\"parent\":\"", sizeof(m)); s_cat(m, parent, sizeof(m)); }
+  s_cat(m, "\",\"meta\":\"\",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m)); s_cat(m, "\"", sizeof(m));
+  cat_pos(m, sizeof(m), g_lat, g_lon);
+  s_cat(m, "}}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 /* A followed station's non-message activity (status / geo-chat post). [grp] is
  * the group context ("" for a status). Kept follow-gated so the feed isn't
@@ -1308,7 +1403,7 @@ static void activity_capture(const char *from, const char *grp,
   char convo[10] = "";
   if (grp && grp[0]) { convo[0] = '#'; s_cpy(convo + 1, grp, sizeof(convo) - 1); }
   double lat = 0, lon = 0; pos_get(from, &lat, &lon);
-  activity_feed(convo, from, text, via, lat, lon);
+  activity_feed(convo, from, text, via, lat, lon, "");
 }
 
 /* Deliver one conversation message: dedup by signature — first time shows in
@@ -1416,9 +1511,18 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   if (rep && s_eq(dir, "in")) return 0;
   convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc);
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
-  /* Mirror every incoming message into the unified Activity feed (tappable to
-   * jump back to this conversation). Our own sends aren't activity. */
-  if (s_eq(dir, "in")) activity_feed(id, from, disp, via, lat, lon);
+  /* One notification per freshly-delivered INCOMING 1:1 message — fired HERE,
+   * after multi-line reassembly + decryption, so a long/signed/encrypted DM
+   * (which arrives as several APRS lines) alerts once with readable text instead
+   * of once per line. The content dedup above means a message arriving over two
+   * transports notifies only once. Group bulletins notify via their own caller;
+   * our own echoes (dir "out") never notify. */
+  if (s_eq(dir, "in") && id[0] != '#') notify_msg(from, from, disp, disp);
+  /* NOTE: group/DM conversation messages are deliberately NOT mirrored into the
+   * Activity feed. The Activity tab is the micro-blog stream (FEED group) only —
+   * group chatter belongs in Messages, not the public stream. FEED posts reach
+   * Activity directly in deliver_bulletin; followed-station status/likes reach it
+   * via activity_capture. */
   return 1;
 }
 
@@ -1538,7 +1642,7 @@ static void do_convo_send(const char *buf) {
     }
     /* Public group post → also store as our own NOSTR note (peers can request
      * it later). Not for 1:1 DMs, which are private. */
-    host_note_emit(text, gname);
+    host_note_emit(text, gname, "");
   } else {
     if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
     if (g_ble_on) ble_tx_msg(id, wire);
@@ -1637,11 +1741,44 @@ static void do_activity_send(const char *buf) {
   add_infohash(wire, sizeof(wire));
   if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
-  /* Local echo of our own post (plaintext, no #group prefix). */
-  chat_append("activity", "", "out", g_call, text, "msg", 0, "", g_lat, g_lon, "");
+  /* Local echo of our own post (with a mid, so it can receive likes/replies). */
+  activity_echo_self(text, "");
   /* Store the post as our own NOSTR note so peers can request it later. */
-  host_note_emit(text, "activity");
+  host_note_emit(text, "activity", "");
   status("TX post");
+}
+
+/* Like / unlike an Activity post (a "<mid>:like" vote to the FEED group). */
+static void do_activity_like(const char *buf) {
+  read_config(buf);
+  char mid[6] = ""; jstr(buf, "activity_mid", mid, sizeof(mid));
+  if (!mid[0]) return;
+  int unlike = jbool(buf, "activity_unlike");
+  char wire[16]; s_cpy(wire, mid, sizeof(wire));
+  s_cat(wire, unlike ? ":unlike" : ":like", sizeof(wire));
+  if (g_sock >= 0 && g_logged)
+    aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
+  if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
+  activity_react_emit(mid, g_call, !unlike, 1);   /* our own vote tallies now */
+}
+
+/* Reply to an Activity post: a threaded "+<mid> text" to the FEED group. */
+static void do_activity_reply(const char *buf) {
+  read_config(buf);
+  int net = (g_sock >= 0 && g_logged);
+  if (!net && !g_ble_on) { notify("warning", "Connect to APRS-IS or enable Bluetooth first"); return; }
+  char mid[6] = "", text[400] = "";
+  jstr(buf, "activity_target_mid", mid, sizeof(mid));
+  jstr(buf, "activity_input", text, sizeof(text));
+  if (!mid[0] || !text[0]) return;
+  char wire[480] = "+"; s_cat(wire, mid, sizeof(wire));
+  s_cat(wire, " ", sizeof(wire)); s_cat(wire, text, sizeof(wire));
+  add_infohash(wire, sizeof(wire));
+  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
+  if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
+  activity_echo_self(text, mid);       /* our reply, threaded under its parent */
+  host_note_emit(text, "activity", mid); /* note carries the parent for backfill */
+  status("TX reply");
 }
 
 /* Prompt to follow a callsign. */
@@ -1760,12 +1897,14 @@ static void prompt_group(void) {
     s_cat(chips, PRESET_GROUPS[i], sizeof(chips));
     s_cat(chips, "\"}", sizeof(chips));
   }
-  char m[1600] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"title\":\"Add a group\","
+  char m[1600] = "{\"type\":\"ui.prompt\",\"id\":\"group\",\"fullscreen\":true,"
+                 "\"title\":\"Add a group\","
                  "\"body\":\"Pick or type a group (max 5 letters). Global follows it "
                  "worldwide; local follows it only within your radius.\",\"chips\":[";
   s_cat(m, chips, sizeof(m));
   s_cat(m, "],\"chipMode\":\"select\",\"input\":{\"hint\":\"Custom\",\"max\":5,"
-          "\"prefix\":\"#\"},\"toggle\":{\"label\":\"Global (worldwide)\"},"
+          "\"prefix\":\"#\"},"
+          "\"toggle\":{\"label\":\"Global (worldwide)\",\"default\":true},"
           "\"confirm\":\"Add\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -1817,6 +1956,24 @@ static void do_convo_block(const char *buf) {
   if (!c[0]) return;
   block_add(c);
   notify("info", "Blocked — you won't see their messages");
+}
+/* Close a conversation: unsubscribe so we stop receiving its messages. For a
+ * group we forget both the local (#NAME) and global (#NAME*) variants and
+ * persist, so the APRS-IS filter drops it and deliver_bulletin no longer
+ * delivers it. The host hides the row on its side. */
+static void do_convo_close(const char *buf) {
+  char id[40] = ""; jstr(buf, "conversations_convo", id, sizeof(id));
+  if (!id[0]) return;
+  convo_forget(id);
+  if (id[0] == '#') {
+    /* also forget the paired scope variant */
+    char other[40];
+    int n = s_len(id);
+    if (n > 0 && id[n - 1] == '*') { s_cpy(other, id, sizeof(other)); other[n - 1] = 0; }
+    else { s_cpy(other, id, sizeof(other)); if (n < 38) { other[n] = '*'; other[n + 1] = 0; } }
+    convo_forget(other);
+    groups_save();
+  }
 }
 
 /* Result of a ui.prompt the host showed for us. */
@@ -1949,9 +2106,8 @@ static void sdev_touch(const char *c) {
   }
   s_cpy(g_sdev[i].call, c, sizeof(g_sdev[i].call));
   g_sdev[i].ts = now; g_sdev_dirty = 1;
-  /* Newly spotted BLE station → note it in the Activity feed (tap opens a 1:1). */
-  { double sl = 0, so = 0; pos_get(c, &sl, &so);
-    activity_feed(c, c, "spotted on Bluetooth", "BLE", sl, so); }
+  /* (No "spotted on Bluetooth" Activity entry — it fired for plain iGated
+   * traffic too and was just noise. The Activity feed is messages only.) */
 }
 
 static void sdev_save(void) {
@@ -2010,10 +2166,20 @@ static void build_gfilter(char *out, unsigned max) {
    * group server-side. Bulletin volume is tiny (a few per minute globally), so
    * one catch-all "g/BLN*" is fine; deliver_bulletin() then files only the
    * groups we actually subscribed to. */
+  int bln_all = 0;
   for (int i = 0; i < g_convo_n; i++) {
     const char *id = g_convo_ids[i];
     unsigned L = s_len(id);
-    if (id[0] == '#' && L >= 3 && id[L - 1] == '*') { s_cat(out, "/BLN*", max); break; }
+    if (id[0] == '#' && L >= 3 && id[L - 1] == '*') { s_cat(out, "/BLN*", max); bln_all = 1; break; }
+  }
+  /* Always pull the Activity stream (FEED bulletins) so posts from others show
+   * up even without subscribing to any global group. The line id varies 0-9
+   * (multi-line) and sits mid-addressee where g/ has no wildcard, so add each
+   * BLN<0-9>FEED explicitly. (Skipped when the BLN* catch-all is already on.) */
+  if (!bln_all) {
+    for (char d = '0'; d <= '9'; d++) {
+      char e[10] = "/BLN0FEED"; e[4] = d; s_cat(out, e, max);
+    }
   }
   /* Followed stations: a b/ budlist pulls EVERY packet FROM them (posts,
    * replies, likes, status) regardless of group, so their Activity stream
@@ -2221,12 +2387,30 @@ static void deliver_bulletin(const char *gname, const char *from,
   /* A like vote is silent (no notification): convo_deliver registers it. */
   int is_like; char ltgt[5]; { int u; is_like = like_parse(cbody, ltgt, &u); }
   char par[5]; const char *disp_body; thread_parse(cbody, par, &disp_body);
-  /* A followed station's like is a non-message event, so surface it here (the
-   * universal Activity feed below only carries real delivered messages). Posts
-   * and replies arrive as normal bulletins and reach Activity via convo_deliver,
-   * so they are NOT re-captured here (that would double them up). */
+  /* A followed station's like is a non-message event, so surface it in the
+   * Activity feed here. Posts/replies to FEED reach Activity below; group/DM
+   * chatter is intentionally NOT shown in Activity (Messages tab only). */
   (void)par;
   if (is_following(from) && is_like) activity_capture(from, "", "liked a post", via);
+  /* The FEED group IS the Activity stream: it is a public broadcast, NOT a
+   * Messages conversation, so route it straight to the Activity feed regardless
+   * of group subscription (you never "subscribe" to FEED), and notify so a
+   * backgrounded device still alerts. Our own posts loop back as `mine` and are
+   * dropped upstream in route_frame, so this only fires for others' posts. */
+  if (s_eq(nm, FEED_GROUP)) {
+    if (is_like) {
+      /* A like vote on an Activity post — tally it (don't show as a post). */
+      char tg[5]; int ul;
+      if (like_parse(cbody, tg, &ul)) activity_react_emit(tg, from, !ul, 0);
+    } else {
+      double flat = 0, flon = 0; pos_get(from, &flat, &flon);
+      activity_feed("", from, disp_body, via, flat, flon, par);
+      char fprev[160]; s_cpy(fprev, from, sizeof(fprev));
+      s_cat(fprev, ": ", sizeof(fprev)); s_cat(fprev, disp_body, sizeof(fprev));
+      notify_msg("Activity", from, disp_body, fprev);
+    }
+    return;
+  }
   char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
   char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
   int has_g = convo_known(gid), has_l = convo_known(lid);
@@ -2375,6 +2559,26 @@ static void da_flush(void) {
   }
 }
 
+/* Acknowledge a received line-numbered direct message so the sender's client
+ * stops retransmitting it (APRS clients resend the same message ~5x until they
+ * receive an ack — that repetition was firing repeated arrivals/notifications).
+ * The ack carries NO message number itself:
+ *   "<me>>APRS,TCPIP*::<SENDER padded to 9>:ack<msgid>" */
+static void send_ack(const char *to, const char *msgid) {
+  if (!to[0] || !msgid[0] || g_sock < 0 || !g_logged) return;
+  char dest[10]; int i = 0;
+  for (; to[i] && i < 9; i++) dest[i] = up(to[i]);
+  dest[i] = 0;
+  while (s_len(dest) < 9) s_cat(dest, " ", sizeof(dest));
+  char line[64];
+  s_cpy(line, g_call, sizeof(line));
+  s_cat(line, ">APRS,TCPIP*::", sizeof(line));
+  s_cat(line, dest, sizeof(line));
+  s_cat(line, ":ack", sizeof(line));
+  s_cat(line, msgid, sizeof(line));
+  aprs_send_raw(g_sock, line);
+}
+
 static void route_frame(const char *line) {
   unsigned fh = sig_hash("f", "", line);
   if (fseen_has(fh)) return;
@@ -2429,13 +2633,17 @@ static void route_frame(const char *line) {
         if (pos_get(p.from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
         if (!sigln && !geo_dup(p.from, p.text))
           chat_append("geochat", "", "in", p.from, p.text, "msg", 0, meta, slat, slon, "NET");
-        /* Buffer DM parts; multi-line (incl. signed) messages reassemble in da_. */
-        if (amine) da_add(p.from, p.text, "NET");
-        else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
+        /* Buffer DM parts; multi-line (incl. signed) messages reassemble in da_.
+         * The notification fires once after reassembly (in convo_deliver), not
+         * here per-line, so a multi-line/encrypted DM alerts once. */
+        if (amine) {
+          da_add(p.from, p.text, "NET");
+          /* Acknowledge the message so the sender's client stops retransmitting
+           * it (APRS messages are resent ~5x until acked — that was the source
+           * of repeated arrivals). Only line-numbered, non-ack messages. */
+          if (p.msgid[0] && !sigln) send_ack(p.from, p.msgid);
+        } else if (sdev_has(p.addressee))   /* store-and-forward for a heard station */
           mailbox_add(p.addressee, p.from, p.text);
-        /* Notify ONLY for a direct message addressed to us — Live-tab / geochat
-         * traffic from other stations stays on the Live tab without a notice. */
-        if (!sigln && amine) notify_msg(p.from, p.from, p.text, p.text);
         /* Bridge to BLE only for messages NOT addressed to us — we are the
          * endpoint of our own mail, so re-broadcasting it would just echo back
          * as a duplicate. Relay (general bridge) or store-and-forward to a heard
@@ -3001,9 +3209,6 @@ static void ble_handle(const char *compact, int rssi) {
     }
     /* Follow notifications are control traffic, not chat (see route_frame). */
     if (amine && follow_intercept(from, text)) return;
-    int sigln = is_sig_line(text);
-    char dcore[256], dsg[80]; const char *dprev = text;
-    if (sig_split(text, dcore, sizeof(dcore), dsg, sizeof(dsg))) dprev = dcore;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
@@ -3015,9 +3220,8 @@ static void ble_handle(const char *compact, int rssi) {
       if (!geo_dup(from, text))
         chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
     }
-    /* Notify only for a direct message addressed to us (not a bare signature
-     * fragment, and not Live-tab traffic for other stations). */
-    if (!sigln && amine) notify_msg(from, from, dprev, dprev);
+    /* Notification fires once after reassembly in convo_deliver (not here per
+     * BLE frame), so a multi-line/encrypted DM alerts once with readable text. */
     /* iGate BLE -> APRS-IS, but never for a message addressed to us (we are the
      * endpoint; re-injecting it would loop back as a duplicate). Gated under the
      * sender's call with a qAR q-construct (clean RF path, not TCPIP*). Any ack
@@ -3065,9 +3269,16 @@ void module_init(void) {
   blockhide_load(); /* restore local block list + hidden-message keys */
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   pk_render();     /* populate the Keys list view from the restored database */
+  /* Bridge restored callsign->pubkey to the host so the Activity feed/profile
+   * show npubs immediately, not only after the next live beacon. */
+  for (int i = 0; i < g_pk_n; i++) host_identity_emit(g_pk_call[i], g_pk_key[i]);
   follows_load();  /* restore followed callsigns so the b/ filter is correct now */
   followers_load();
   follow_render(); /* push the Follows people list (Following | Followers) */
+  /* Bridge restored follow/block state to the host so the profile UI is correct
+   * from the first open. */
+  for (int i = 0; i < g_follow_n; i++) host_state_emit("follow", g_follow[i], 1);
+  for (int i = 0; i < g_blocked_n; i++) host_state_emit("block", g_blocked[i], 1);
   { char b[4]; uint32_t n = hal_kv_get("signmsgs", 8, b, sizeof(b) - 1);
     if (n >= 1) g_sign_msgs = (b[0] != '0'); }
   status("APRS ready - connecting to APRS-IS automatically...");
@@ -3253,6 +3464,7 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "conversations_send")) do_convo_send(buf);
   else if (s_eq(cmd, "conversations_hide")) do_convo_hide(buf);
   else if (s_eq(cmd, "conversations_block")) do_convo_block(buf);
+  else if (s_eq(cmd, "conversations_close")) do_convo_close(buf);
   else if (s_eq(cmd, "new_chat")) do_new_chat();
   else if (s_eq(cmd, "add_group")) do_add_group();
   else if (s_eq(cmd, "recur")) do_recur(buf);
@@ -3261,11 +3473,26 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "ping")) do_ping(buf);
   else if (s_eq(cmd, "geochat_send")) do_geochat_send(buf);
   else if (s_eq(cmd, "activity_send")) do_activity_send(buf);
+  else if (s_eq(cmd, "activity_like")) do_activity_like(buf);
+  else if (s_eq(cmd, "activity_reply")) do_activity_reply(buf);
   else if (s_eq(cmd, "follow")) prompt_follow();
   else if (s_eq(cmd, "unfollow")) prompt_unfollow();
   else if (s_eq(cmd, "profile")) {            /* sender name tapped in a chat */
     char c[16] = ""; jstr(buf, "profile_call", c, sizeof(c));
     profile_show(c);
+  }
+  /* Follow/block actions from the host profile UI panel (operate on a callsign
+   * in "profile_target"). */
+  else if (s_eq(cmd, "profile_follow")) {
+    char c[16] = ""; jstr(buf, "profile_target", c, sizeof(c)); if (c[0]) follow_add(c);
+  } else if (s_eq(cmd, "profile_unfollow")) {
+    char c[16] = ""; jstr(buf, "profile_target", c, sizeof(c)); if (c[0]) follow_remove(c);
+  } else if (s_eq(cmd, "profile_block")) {
+    char c[16] = ""; jstr(buf, "profile_target", c, sizeof(c));
+    if (c[0]) { block_add(c); notify("info", "Blocked — you won't see their messages"); }
+  } else if (s_eq(cmd, "profile_unblock")) {
+    char c[16] = ""; jstr(buf, "profile_target", c, sizeof(c));
+    if (c[0]) { block_remove(c); notify("info", "Unblocked"); }
   } else if (s_eq(cmd, "follows_list_tap")) { /* people-list row tapped */
     char c[16] = ""; jstr(buf, "follows_list_id", c, sizeof(c));
     profile_show(c);

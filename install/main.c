@@ -153,6 +153,13 @@ static int source_str_is_url(const char *s) {
  * to display. */
 static void extract_host(const char *src, char *host, unsigned host_len) {
     const char *p = src;
+    /* A Reticulum folder source (rns:npub… / npub… / 64-hex) isn't a URL or a
+     * local path — label it so the card chip reads "Reticulum", not "local". */
+    if (str_starts(p, "rns:") || str_starts(p, "reticulum:") ||
+        str_starts(p, "npub1")) {
+        str_copy(host, "Reticulum", host_len);
+        return;
+    }
     if (str_starts(p, "https://")) p += 8;
     else if (str_starts(p, "http://")) p += 7;
     else {
@@ -195,9 +202,26 @@ static void parse_sources_raw(void) {
  * "/index.json" and downloads "<base>/<file>" for each wapp. A
  * github.com tree URL, if ever configured, is still converted to the
  * raw form at fetch time (see github_tree_to_raw below). */
-#define DEFAULT_SOURCE "https://geogram.radio/wapps"
+#define DEFAULT_SOURCE "rns:npub1dwfaavw4k2af0snm3q2n4c7vd046xl7ze8scp553x5upw84wm5ns5deehf"
+
+/* Bump when DEFAULT_SOURCE changes so devices upgrading from an older store
+ * (which may hold a stale local/dev/HTTP source in KV) are migrated ONCE to the
+ * current default. After migration we honour user edits again (the marker stays
+ * set, so a later saved source is loaded normally). */
+#define SOURCE_SCHEMA "rns1"
 
 static void load_sources(void) {
+    char ver[16] = "";
+    uint32_t vn = hal_kv_get("src_schema", 10, ver, sizeof(ver) - 1);
+    if (vn > 0) ver[vn] = '\0';
+    if (!str_eq(ver, SOURCE_SCHEMA)) {
+        /* One-time migration to the Reticulum default catalog. */
+        str_copy(sources_raw, DEFAULT_SOURCE, sizeof(sources_raw));
+        hal_kv_set("source", 6, sources_raw, str_len(sources_raw));
+        hal_kv_set("src_schema", 10, SOURCE_SCHEMA, str_len(SOURCE_SCHEMA));
+        parse_sources_raw();
+        return;
+    }
     uint32_t n = hal_kv_get("source", 6, sources_raw, sizeof(sources_raw) - 1);
     if (n > 0) {
         sources_raw[n] = '\0';
@@ -405,7 +429,7 @@ static void push_status_card(const char *id, const char *title,
 
 /* Pending HTTP request for async fetch. */
 static int32_t pending_req = -1;
-static char index_buf[8192];
+static char index_buf[32768];
 
 /* Rewrite a github.com tree URL into the raw.githubusercontent.com
  * form so the fetcher actually gets JSON instead of HTML. Pattern:
@@ -526,7 +550,7 @@ static void begin_fetch_all(void) {
      * flight. show_catalog() replaces this card when the queue
      * finishes. */
     push_status_card("__loading",
-                     "Loading catalog…",
+                     "Loading catalog...",
                      "Fetching available wapps");
     hal_log(1, "[install] begin fetch", 21);
     start_current_fetch();
@@ -575,13 +599,21 @@ static void push_status_card(const char *id,
 static unsigned append_json_string(char *buf, unsigned len, unsigned cap,
                                    const char *s) {
     for (unsigned i = 0; s[i] && len < cap - 8; i++) {
-        char c = s[i];
+        unsigned char c = (unsigned char)s[i];
         if      (c == '"')  { buf[len++] = '\\'; buf[len++] = '"'; }
         else if (c == '\\') { buf[len++] = '\\'; buf[len++] = '\\'; }
         else if (c == '\n') { buf[len++] = '\\'; buf[len++] = 'n'; }
         else if (c == '\r') { buf[len++] = '\\'; buf[len++] = 'r'; }
         else if (c == '\t') { buf[len++] = '\\'; buf[len++] = 't'; }
-        else                { buf[len++] = c; }
+        else if (c < 0x20) {
+            /* Any other control char (a stray 0x14 in a manifest description
+             * was producing invalid JSON the host silently dropped) -> \u00XX. */
+            static const char hex[] = "0123456789abcdef";
+            buf[len++] = '\\'; buf[len++] = 'u'; buf[len++] = '0'; buf[len++] = '0';
+            buf[len++] = hex[(c >> 4) & 0xF];
+            buf[len++] = hex[c & 0xF];
+        }
+        else                { buf[len++] = (char)c; }
     }
     if (len < cap - 1) buf[len++] = '"';
     buf[len] = '\0';
@@ -622,18 +654,19 @@ static void show_catalog(void) {
         len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
                                  e->title[0] ? e->title : e->name);
 
-        /* subtitle: "v<version>" + size + status */
+        /* subtitle: "v<version> (NN KB)" + status. ASCII only — the host reads
+         * wapp strings as Latin-1, so a UTF-8 middot would render as mojibake. */
         char subtitle[128] = "v";
         str_cat(subtitle, e->version, sizeof(subtitle));
         if (e->size >= 1024) {
             char sz[16];
             u64_to_str((uint64_t)(e->size / 1024), sz, sizeof(sz));
-            str_cat(subtitle, " · ", sizeof(subtitle));
+            str_cat(subtitle, " (", sizeof(subtitle));
             str_cat(subtitle, sz, sizeof(subtitle));
-            str_cat(subtitle, " KB", sizeof(subtitle));
+            str_cat(subtitle, " KB)", sizeof(subtitle));
         }
         if (inst_ver[0] && !str_eq(inst_ver, e->version)) {
-            str_cat(subtitle, " · update v", sizeof(subtitle));
+            str_cat(subtitle, " - update v", sizeof(subtitle));
             str_cat(subtitle, inst_ver, sizeof(subtitle));
         }
         str_copy(catalog_buf + len, ",\"subtitle\":\"",
@@ -682,11 +715,24 @@ static void show_catalog(void) {
                 if (chip_count > 0 && len < sizeof(catalog_buf) - 2) {
                     catalog_buf[len++] = ',';
                 }
-                str_copy(catalog_buf + len, "{\"label\":\"",
+                /* A full npub is 63 chars and overflows the chip; show a short
+                 * "npub1abcd...wxyz" form (first 9 + last 4). */
+                char pub_short[40];
+                unsigned pl = str_len(e->publisher_npub);
+                if (pl > 20) {
+                    unsigned k = 0;
+                    for (; k < 9; k++) pub_short[k] = e->publisher_npub[k];
+                    pub_short[k++] = '.'; pub_short[k++] = '.'; pub_short[k++] = '.';
+                    for (unsigned j = pl - 4; j < pl; j++) pub_short[k++] = e->publisher_npub[j];
+                    pub_short[k] = '\0';
+                } else {
+                    str_copy(pub_short, e->publisher_npub, sizeof(pub_short));
+                }
+                str_copy(catalog_buf + len, "{\"icon\":\"person_add\",\"label\":\"",
                          sizeof(catalog_buf) - len);
                 len = str_len(catalog_buf);
                 len = append_json_string(catalog_buf, len, sizeof(catalog_buf),
-                                         e->publisher_npub);
+                                         pub_short);
                 str_copy(catalog_buf + len, "}", sizeof(catalog_buf) - len);
                 len = str_len(catalog_buf);
             }
@@ -1094,7 +1140,11 @@ void module_tick(void) {
 }
 
 void module_handle_event(void) {
-    char buf[2048];
+    /* Static (not stack) and large: the host's `wapp.index` catalog response
+     * carries the whole index.json plus per-entry enrichment — several KB for a
+     * dozen wapps. A small buffer silently dropped/truncated it, leaving the
+     * store stuck on "Loading catalog...". 32 KB handles ~80 wapps. */
+    static char buf[32768];
     if (hal_msg_available() == 0) return;
     uint32_t n = hal_msg_recv(buf, sizeof(buf) - 1);
     if (n == 0) return;
@@ -1125,6 +1175,19 @@ void module_handle_event(void) {
                 }
                 if (str_eq(action, "view-grid")) {
                     set_layout("grid");
+                    return;
+                }
+                if (str_eq(action, "refresh")) {
+                    begin_fetch_all();
+                    return;
+                }
+                if (str_eq(action, "open-sources")) {
+                    /* Settings live behind the top-right menu now (no tab):
+                     * open the hidden sources screen as a panel. */
+                    const char *m =
+                        "{\"type\":\"ui.screen.open\",\"name\":\"@screen.sources\","
+                        "\"title\":\"Repositories\"}";
+                    hal_msg_send(m, str_len(m));
                     return;
                 }
                 /* Generic action prefix: "install:<slug>" → run

@@ -178,6 +178,28 @@ __attribute__((import_module("hal"), import_name("folder_browse")))
 uint32_t hal_folder_browse(const char *folder_id, uint32_t id_len,
                            char *out_buf, uint32_t out_len);
 
+/* Browse ONE directory level: pass "folder_id\tsubpath" as folder_id (subpath
+ * "" = root, else ends with '/'). Returns JSON {name, npub, path, dirs:[{name}],
+ * files:[{x,name,base,size,ts,dl}], links}. Keeps payload + work flat for huge
+ * folders (only the immediate children of that path). */
+
+/* Folder info + serve statistics for the info panel → JSON
+ * {npub, name, owned, fileCount, totalBytes, serves, last24h, last7d, last30d,
+ *  activeDays, top:[{name,serves}]}. */
+__attribute__((import_module("hal"), import_name("folder_stats")))
+uint32_t hal_folder_stats(const char *folder_id, uint32_t id_len,
+                          char *out_buf, uint32_t out_len);
+
+/* Stop sharing an owned disk folder (its on-disk files are left untouched).
+ * Returns 1 when accepted. */
+__attribute__((import_module("hal"), import_name("folder_remove")))
+uint32_t hal_folder_remove(const char *folder_id, uint32_t id_len);
+
+/* Open an owned disk folder's directory in the OS file manager so the user can
+ * edit its files directly. Returns 1 if it's a known disk folder. */
+__attribute__((import_module("hal"), import_name("folder_opendir")))
+uint32_t hal_folder_opendir(const char *folder_id, uint32_t id_len);
+
 /* ── Disk-backed owner folders + consumer downloads ──
  * Register an on-disk directory as an owned folder (files served from disk, not
  * copied to the archive). Asynchronous: returns 1 when started; poll
@@ -218,6 +240,11 @@ uint32_t hal_fs_listdir(const char *path, uint32_t path_len,
  * screen opens on Android); poll hal_fs_listdir afterwards. */
 __attribute__((import_module("hal"), import_name("storage_request")))
 uint32_t hal_storage_request(int32_t unused);
+
+/* A good starting directory for the in-app browser (Android primary storage,
+ * else the desktop home dir) → its path. */
+__attribute__((import_module("hal"), import_name("fs_home")))
+uint32_t hal_fs_home(char *out_buf, uint32_t out_len);
 
 /* Try to obtain the bytes for a token from known sources (Blossom servers,
  * then the torrent swarm). Asynchronous: returns 1 when the lookup started
@@ -372,6 +399,29 @@ int32_t hal_http_status(int32_t request_id);
 __attribute__((import_module("hal"), import_name("http_free")))
 void hal_http_free(int32_t request_id);
 
+/* ── Streaming HTTP (online radio) ──────────────────────────────────────
+ * A long-lived GET whose body arrives over time. The host handles TLS,
+ * redirects and ICY/SHOUTcast metadata (stripped out so reads return pure
+ * audio; the latest StreamTitle is available via hal_http_stream_meta). */
+
+/* Open a streaming GET. Returns a handle (>=0) immediately; data arrives in
+ * the background. Returns -1 on bad arguments. */
+__attribute__((import_module("hal"), import_name("http_stream_open")))
+int32_t hal_http_stream_open(const char *url, uint32_t url_len);
+
+/* Drain available audio bytes into buf. Returns bytes read (0 = none yet,
+ * -1 = stream closed/ended and drained). */
+__attribute__((import_module("hal"), import_name("http_stream_read")))
+int32_t hal_http_stream_read(int32_t handle, char *buf, uint32_t buf_len);
+
+/* Latest ICY StreamTitle into buf. Returns bytes written (0 if none). */
+__attribute__((import_module("hal"), import_name("http_stream_meta")))
+uint32_t hal_http_stream_meta(int32_t handle, char *buf, uint32_t buf_len);
+
+/* Close the stream and release the handle. */
+__attribute__((import_module("hal"), import_name("http_stream_close")))
+void hal_http_stream_close(int32_t handle);
+
 /* ── Raw TCP socket (async, host network) ───────────────────────────── */
 
 /* Open a TCP connection. Returns a handle (>=0) immediately; the
@@ -516,6 +566,12 @@ int32_t hal_ble_advertise(const char *data, uint32_t data_len);
 __attribute__((import_module("hal"), import_name("ble_advertise_stop")))
 void hal_ble_advertise_stop(void);
 
+/* Whether the physical Bluetooth adapter is powered ON right now (the user can
+ * toggle it at the OS level at any time). Returns 1 = on/usable, 0 = off. Use
+ * this before claiming a BLE channel is available. */
+__attribute__((import_module("hal"), import_name("ble_available")))
+int32_t hal_ble_available(void);
+
 /* ── Sensors ────────────────────────────────────────────────────────── */
 
 /* Temperature in centidegrees C (2500 = 25.00°C). INT32_MIN if N/A. */
@@ -568,6 +624,36 @@ void hal_display_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t color)
 /* Flush buffer to physical display. */
 __attribute__((import_module("hal"), import_name("display_flush")))
 void hal_display_flush(void);
+
+/* ── Codec-free A/V sink ────────────────────────────────────────────────
+ * The host contains NO codec. A media wapp decodes (e.g. mp4/H.264) IN
+ * wasm and pushes the decoded frames/PCM here; the host only uploads the
+ * raw pixels to a texture and (later) plays the raw samples. This keeps
+ * the codec/player out of the host binary and makes playback platform
+ * agnostic — the decoder travels inside the .wapp. */
+
+/* Announce the video geometry before the first frame. pixfmt: 0 = RGBA8888. */
+__attribute__((import_module("hal"), import_name("video_config")))
+void hal_video_config(int32_t width, int32_t height, int32_t pixfmt);
+
+/* Submit one decoded frame. `data` points into wasm linear memory; for
+ * pixfmt 0 (RGBA8888) `len` must equal width*height*4. pts_ms is the
+ * presentation timestamp in milliseconds from the start of the stream. */
+__attribute__((import_module("hal"), import_name("video_frame")))
+void hal_video_frame(const uint8_t *data, uint32_t len,
+                     int32_t width, int32_t height,
+                     int32_t pixfmt, int32_t pts_ms);
+
+/* Submit one block of decoded PCM. sampfmt: 0 = s16 interleaved,
+ * 1 = f32 interleaved. (Wired end-to-end; the MVP host drops audio.) */
+__attribute__((import_module("hal"), import_name("audio_pcm")))
+void hal_audio_pcm(const uint8_t *data, uint32_t len,
+                   int32_t sample_rate, int32_t channels,
+                   int32_t sampfmt, int32_t pts_ms);
+
+/* Signal end of stream (playback reached the last frame). */
+__attribute__((import_module("hal"), import_name("video_end")))
+void hal_video_end(void);
 
 /* ── GPIO (ESP32 only, no-op elsewhere) ─────────────────────────────── */
 
@@ -633,6 +719,181 @@ uint32_t hal_event_available(void);
 __attribute__((import_module("hal"), import_name("event_recv")))
 uint32_t hal_event_recv(char *topic_buf, uint32_t topic_buf_len,
                         char *data_buf, uint32_t data_buf_len);
+
+/* ── SQLite (per-wapp relational storage) ───────────────────────────── *
+ *
+ * Generic database access for wapps. `path` is RELATIVE to this wapp's
+ * private data directory — a leading '/' and any ".." segment are
+ * rejected, so a wapp can never reach another wapp's files or escape its
+ * sandbox. The database is created if missing (WAL mode).
+ *
+ * Binary values are NOT marshalled across the boundary: store binary as
+ * base64 TEXT. Bind parameters are an optional JSON array matched to '?'
+ * placeholders in order (JSON string/number/null → TEXT/INTEGER-or-REAL/
+ * NULL); pass len 0 for none. Query rows come back as a JSON array of
+ * objects (column name → value). */
+
+/* Open/create a database. Returns a handle (>=0) or -1 on error. */
+__attribute__((import_module("hal"), import_name("sqlite_open")))
+int32_t hal_sqlite_open(const char *path, uint32_t path_len);
+
+/* Run a non-SELECT statement (CREATE/INSERT/UPDATE/DELETE/PRAGMA).
+ * Returns 0 on success, -1 on error (see hal_sqlite_error). */
+__attribute__((import_module("hal"), import_name("sqlite_exec")))
+int32_t hal_sqlite_exec(int32_t handle, const char *sql, uint32_t sql_len,
+                        const char *params_json, uint32_t params_len);
+
+/* Run a SELECT and write the result rows as a JSON array into out.
+ * Returns bytes written (>=0), -1 on SQL error, or -2 if the buffer is
+ * too small (retry with a larger one; use LIMIT to bound results). */
+__attribute__((import_module("hal"), import_name("sqlite_query")))
+int32_t hal_sqlite_query(int32_t handle, const char *sql, uint32_t sql_len,
+                         const char *params_json, uint32_t params_len,
+                         char *out, uint32_t out_cap);
+
+/* Write the last error message for a handle into out. Returns bytes. */
+__attribute__((import_module("hal"), import_name("sqlite_error")))
+uint32_t hal_sqlite_error(int32_t handle, char *out, uint32_t out_cap);
+
+/* Close a database handle and release its resources. */
+__attribute__((import_module("hal"), import_name("sqlite_close")))
+void hal_sqlite_close(int32_t handle);
+
+/* ── Generic crypto (caller-supplied keys) ──────────────────────────── *
+ *
+ * The hal_identity_* / hal_encrypt / hal_decrypt calls all use THIS device's
+ * profile key. These complementary calls operate on keys the wapp itself
+ * holds — needed for things like a group/room key independent of any one
+ * member. Keys and signatures are lowercase hex strings; messages and AES
+ * payloads are raw bytes. Signing hashes the message with SHA-256 first
+ * (BIP-340 Schnorr over secp256k1), matching hal_identity_sign. */
+
+/* Generate a fresh secp256k1 keypair. Writes JSON {"priv":hex,"pub":hex}
+ * (pub is the 32-byte x-only key). Returns bytes written, 0 on error. */
+__attribute__((import_module("hal"), import_name("crypto_keygen")))
+uint32_t hal_crypto_keygen(char *out, uint32_t out_cap);
+
+/* Sign msg with priv_hex; write the signature hex. Returns bytes, 0 on error. */
+__attribute__((import_module("hal"), import_name("crypto_sign")))
+uint32_t hal_crypto_sign(const char *priv_hex, uint32_t priv_len,
+                         const char *msg, uint32_t msg_len,
+                         char *out, uint32_t out_cap);
+
+/* Verify sig_hex on msg for pub_hex. Returns 1 if valid, 0 otherwise. */
+__attribute__((import_module("hal"), import_name("crypto_verify")))
+int32_t hal_crypto_verify(const char *pub_hex, uint32_t pub_len,
+                          const char *sig_hex, uint32_t sig_len,
+                          const char *msg, uint32_t msg_len);
+
+/* Fill out with out_len cryptographically-random bytes. Returns bytes written. */
+__attribute__((import_module("hal"), import_name("crypto_random")))
+uint32_t hal_crypto_random(char *out, uint32_t out_len);
+
+/* AES-256-CBC encrypt `in` under the 32-byte `key`. A random IV is
+ * generated and prepended to the ciphertext. Returns bytes written, 0 on
+ * error (e.g. key not 32 bytes or out too small). */
+__attribute__((import_module("hal"), import_name("crypto_aes_encrypt")))
+uint32_t hal_crypto_aes_encrypt(const char *key, uint32_t key_len,
+                                const char *in, uint32_t in_len,
+                                char *out, uint32_t out_cap);
+
+/* Decrypt a blob produced by hal_crypto_aes_encrypt (IV || ciphertext)
+ * under the 32-byte `key`. Returns plaintext bytes written, 0 on error. */
+__attribute__((import_module("hal"), import_name("crypto_aes_decrypt")))
+uint32_t hal_crypto_aes_decrypt(const char *key, uint32_t key_len,
+                                const char *in, uint32_t in_len,
+                                char *out, uint32_t out_cap);
+
+/* ── Reticulum (wapp-scoped peer-to-peer datagrams) ─────────────────── *
+ *
+ * Exchange opaque datagrams with other devices running the SAME wapp over
+ * the device's shared Reticulum node. Traffic is demultiplexed by the
+ * calling wapp, so different wapps never see each other's datagrams. A
+ * datagram is delivered to every reachable peer (the RNS mesh: LAN, BLE,
+ * and transport peers); on a LAN/BLE link it travels device-to-device,
+ * and where peers are only reachable through a transport node it transits
+ * that node but the payload is whatever bytes the wapp put in — encrypt
+ * end-to-end before sending. Payloads must fit one packet (a few hundred
+ * bytes); chunk anything larger. */
+
+/* This device's RNS destination hash (hex) — usable as a sender id so a
+ * peer can tell datagrams apart. Returns bytes written, 0 if node down. */
+__attribute__((import_module("hal"), import_name("rns_identity")))
+uint32_t hal_rns_identity(char *out, uint32_t out_cap);
+
+/* Broadcast `payload` to all reachable peers running this wapp. Returns 1
+ * if queued, -1 on error (node down / payload too large). */
+__attribute__((import_module("hal"), import_name("rns_broadcast")))
+int32_t hal_rns_broadcast(const char *payload, uint32_t payload_len);
+
+/* Reliably deliver `payload` ADDRESSED to one peer's RNS delivery dest (hex,
+ * from hal_rns_delivery_dest). Direct if reachable, else held for the peer to
+ * pull (store-and-forward) — tolerant of NAT/asymmetric inbound. The peer
+ * receives it on the same queue as hal_rns_recv. Returns 1 if queued, -1 err. */
+__attribute__((import_module("hal"), import_name("rns_send_to")))
+int32_t hal_rns_send_to(const char *dest_hex, uint32_t dest_len,
+                        const char *payload, uint32_t payload_len);
+
+/* Pull store-and-forwarded datagrams a peer is holding for us, from its
+ * propagation dest (hex, from hal_rns_prop_dest). Fire-and-forget; pulled
+ * datagrams arrive via hal_rns_recv. Returns 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("rns_pull")))
+int32_t hal_rns_pull(const char *prop_dest_hex, uint32_t dest_len);
+
+/* This device's LXMF delivery dest hash (hex) — give to peers so they can
+ * hal_rns_send_to us. Returns bytes written, 0 if node down. */
+__attribute__((import_module("hal"), import_name("rns_delivery_dest")))
+uint32_t hal_rns_delivery_dest(char *out, uint32_t out_cap);
+
+/* This device's LXMF propagation (mailbox) dest hash (hex) — give to peers so
+ * they can hal_rns_pull from us. Returns bytes written, 0 if node down. */
+__attribute__((import_module("hal"), import_name("rns_prop_dest")))
+uint32_t hal_rns_prop_dest(char *out, uint32_t out_cap);
+
+/* Short-code rendezvous (discovery without a directory). Announce a rendezvous
+ * destination derived from the public [seed] (e.g. a circle short code) carrying
+ * [app_data] (our address + the full id), so a peer holding only the seed can
+ * find us. Owners call this periodically. Returns 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("rns_rv_announce")))
+int32_t hal_rns_rv_announce(const char *seed, uint32_t seed_len,
+                            const char *app_data, uint32_t app_len);
+
+/* Resolve the rendezvous for [seed]: path-requests the derived dest and writes
+ * the announced app_data into [out]. Returns bytes written, or 0 while pending
+ * (call again to poll — the first call kicks off the async resolve). */
+__attribute__((import_module("hal"), import_name("rns_rv_resolve")))
+uint32_t hal_rns_rv_resolve(const char *seed, uint32_t seed_len,
+                            char *out, uint32_t out_cap);
+
+/* Send [payload] to the rendezvous dest derived from [seed] as ONE encrypted
+ * connectionless packet (the owner listens there). First-contact channel that
+ * needs no link handshake, so it survives a flaky owner inbound. */
+__attribute__((import_module("hal"), import_name("rns_rv_send")))
+int32_t hal_rns_rv_send(const char *seed, uint32_t seed_len,
+                        const char *payload, uint32_t payload_len);
+
+/* Size of the next inbound datagram JSON envelope, 0 if none pending. */
+__attribute__((import_module("hal"), import_name("rns_available")))
+uint32_t hal_rns_available(void);
+
+/* Read the next inbound datagram as JSON {"from":hex,"payload":base64,
+ * "ts":ms} into out. Returns bytes written, 0 if none. */
+__attribute__((import_module("hal"), import_name("rns_recv")))
+uint32_t hal_rns_recv(char *out, uint32_t out_cap);
+
+/* ── Contacts (people this device already knows) ─────────────────────── *
+ *
+ * A reusable picker source: the people the user can address — those seen on
+ * APRS (where a callsign is bound to a public key) and those they follow —
+ * so a wapp can offer "add from contacts" instead of pasting a raw key. The
+ * result is a JSON array of objects {"npub":..,"callsign":..,"nick":..}.
+ * [query] filters case-insensitively across npub, callsign and nickname (an
+ * empty query returns everyone). A callsign is only present when its npub is
+ * known, so a contact returned here can always be added by any of the three.
+ * Returns bytes written, -1 on error, or -2 if the buffer was too small. */
+__attribute__((import_module("hal"), import_name("contacts_query")))
+int32_t hal_contacts_query(const char *query, uint32_t query_len,
+                           char *out, uint32_t out_cap);
 
 #ifdef __cplusplus
 }

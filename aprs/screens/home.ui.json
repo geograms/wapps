@@ -44,8 +44,8 @@
         "$type": "map",
         "tile-url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "label-url": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        "default-lat": 38.7223,
-        "default-lon": -9.1393,
+        "default-lat": 40.2056,
+        "default-lon": -8.4196,
         "default-zoom": 9,
         "min-zoom": 2,
         "max-zoom": 18
@@ -183,8 +183,8 @@
         "name": "position",
         "tip": "Your position and how far around it to listen.",
         "children": [
-          { "$": "field", "name": "my_lat", "$type": "string", "label": "Latitude", "default": "38.7223" },
-          { "$": "field", "name": "my_lon", "$type": "string", "label": "Longitude", "default": "-9.1393" },
+          { "$": "field", "name": "my_lat", "$type": "string", "label": "Latitude", "default": "40.2056" },
+          { "$": "field", "name": "my_lon", "$type": "string", "label": "Longitude", "default": "-8.4196" },
           { "$": "field", "name": "radius_km", "$type": "string", "label": "Filter radius (km)", "default": "100" }
         ]
       },

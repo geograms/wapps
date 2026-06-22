@@ -59,8 +59,16 @@ static int jstr(const char *buf, const char *key, char *out, unsigned m) {
     if (!ok) continue;
     p += pl; unsigned i = 0;
     while (*p && *p != '"' && i < m - 1) {
-      if (*p == '\\' && *(p + 1)) { p++; out[i++] = *p++; }
-      else out[i++] = *p++;
+      if (*p == '\\' && *(p + 1)) {
+        p++;
+        char c = *p++;
+        /* Decode JSON escapes — notably \t and \n, which we use as field
+         * separators inside people-row ids (sha\tname, parent\tfolder). */
+        if (c == 'n') out[i++] = '\n';
+        else if (c == 't') out[i++] = '\t';
+        else if (c == 'r') out[i++] = '\r';
+        else out[i++] = c;
+      } else out[i++] = *p++;
     }
     out[i] = 0; return 1;
   }
@@ -96,7 +104,7 @@ static int jnum(const char *buf, const char *key) {
 static void notify(const char *level, const char *body) {
   char m[512] = "{\"type\":\"notify\",\"level\":\"";
   s_cat(m, level, sizeof(m));
-  s_cat(m, "\",\"title\":\"Files\",\"body\":\"", sizeof(m));
+  s_cat(m, "\",\"title\":\"Share\",\"body\":\"", sizeof(m));
   jesc(m, sizeof(m), body);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
@@ -126,6 +134,46 @@ static void fmt_size(unsigned b, char *out, unsigned m) {
   u_itoa(b / (1024u * 1024u), nb); s_cat(out, nb, m);
   s_cat(out, " MB", m);
 }
+
+/* Format a unix-seconds timestamp as YYYY-MM-DD (civil_from_days). */
+static void fmt_date(long secs, char *out, unsigned m) {
+  out[0] = 0;
+  if (secs <= 0) return;
+  long z = secs / 86400 + 719468;
+  long era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  long y = (long)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned mo = mp < 10 ? mp + 3 : mp - 9;
+  y += (mo <= 2);
+  char nb[16];
+  u_itoa((unsigned)y, nb); s_cat(out, nb, m); s_cat(out, "-", m);
+  if (mo < 10) s_cat(out, "0", m); u_itoa(mo, nb); s_cat(out, nb, m); s_cat(out, "-", m);
+  if (d < 10) s_cat(out, "0", m); u_itoa(d, nb); s_cat(out, nb, m);
+}
+
+/* djb2 string hash, for change-detection on rendered lists. */
+static uint32_t djb2(const char *s) {
+  uint32_t h = 5381;
+  for (; *s; s++) h = ((h << 5) + h) ^ (unsigned char)*s;
+  return h;
+}
+
+/* Send [m] on the wapp bus only if it differs from the last value sent for
+ * this *last hash. Prevents the periodic tick from replacing an unchanged list
+ * every few seconds — which reset/janked the scroll position. */
+static int changed_send(const char *m, uint32_t *last) {
+  uint32_t h = djb2(m);
+  if (h == *last) return 0;
+  *last = h;
+  hal_msg_send(m, s_len(m));
+  return 1;
+}
+static uint32_t g_folders_hash = 0; /* shared by render_owned + render_open */
+static uint32_t g_lib_hash = 0;     /* render_library */
 
 /* ── sharing settings (persisted in KV) ─────────────────────────────────── */
 static int g_blossom_on = 1;
@@ -168,8 +216,8 @@ static void share_apply(void) {
 }
 
 /* ── Library rendering (people list) ────────────────────────────────────── */
-static char g_list[16384];   /* hal_media_* JSON */
-static char g_out[16384];    /* ui.people.set message */
+static char g_list[65536];   /* hal_media_* / folder-browse JSON */
+static char g_out[65536];    /* ui.people.set message */
 
 /* Current library view, so async refreshes (module_tick) keep what the user is
  * looking at: 0 = all files, 1 = search results, 2 = one folder, 3 = folder list. */
@@ -315,7 +363,7 @@ static void render_folders(void) {
     p = end + 1;
   }
   s_cat(m, "]}]}", sz);
-  hal_msg_send(m, s_len(m));
+  changed_send(m, &g_lib_hash);
 }
 
 static void render_current(void) {
@@ -326,11 +374,18 @@ static void render_current(void) {
 }
 
 /* ── status (Sharing panel log) ─────────────────────────────────────────── */
+static uint32_t g_status_hash = 0;
 static void render_status(void) {
   char st[2048];
   uint32_t n = hal_share_status(st, sizeof(st) - 1);
   if (n == 0) return;
   st[n] = 0;
+  /* Skip the whole log rebuild (and the host rebuild it triggers) when the
+   * sharing status is unchanged — otherwise this fired a UI rebuild every few
+   * seconds, janking any scrolling in progress. */
+  uint32_t h = djb2(st);
+  if (h == g_status_hash) return;
+  g_status_hash = h;
   log_clear("share_log");
   char line[120]; line[0] = 0;
   s_cat(line, "Blossom HTTP: ", sizeof(line));
@@ -376,8 +431,28 @@ static void render_status(void) {
 /* ── Folders (mutable, IPNS-like) ───────────────────────────────────────── */
 static char g_cur_folder[80] = "";       /* hex/npub folderId open ("" = list) */
 static char g_cur_folder_name[96] = "";
-static int  g_mode = 0;                   /* 0 = folders, 1 = disk browser */
-static char g_browse[300] = "/";          /* current browse path (disk add) */
+/* Current sub-path within the open folder: "" (root) or ends with '/', e.g.
+ * "Albums/2024/". File entries carry their full relative path as `name`, so the
+ * tree is navigated by prefix — only one directory level is shown at a time. */
+static char g_cur_path[256] = "";
+static char g_cur_npub[80] = "";        /* shareable npub of the open folder */
+
+/* Folder targeted by the Info/Edit panels (the open folder, or one picked via a
+ * row's "..." menu). Kept separate from g_cur_folder so picking "Stats"/"Edit"
+ * from the list doesn't change the underlying browse view. */
+static char g_sel_folder[80] = "";
+static char g_sel_npub[80] = "";
+static char g_sel_name[120] = "";
+static uint32_t g_info_hash = 0;   /* change-detect for the Info panel rebuild */
+static int g_owned = 0;            /* is the currently-open folder ours to edit? */
+
+/* Parent stack for browsing INTO linked folders: each entry is a folderId we
+ * came from, so back returns to the parent folder (not straight to the list). */
+static char g_nav_stack[8][80];
+static int g_nav_depth = 0;
+
+static void nav_update(void);
+static void render_info(void);
 
 /* find `"key":[` → pointer just after '[', or 0. */
 static const char *find_arr(const char *buf, const char *key) {
@@ -412,128 +487,264 @@ static void render_owned(void) {
     jstr(slice, "folderId", fid, sizeof(fid));
     jstr(slice, "name", nm, sizeof(nm));
     jstr(slice, "npub", npub, sizeof(npub));
+    int on_disk = jbool_def(slice, "onDisk", 0);
     if (fid[0]) {
       if (!first) s_cat(m, ",", sz);
       first = 0;
       s_cat(m, "{\"id\":\"own:", sz); jesc(m, sz, fid);
       s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, nm[0] ? nm : "(folder)");
       s_cat(m, "\",\"subtitle\":\"", sz); jesc(m, sz, npub[0] ? npub : fid);
-      s_cat(m, "\"}", sz);
+      /* per-row "..." overflow menu (these rows are all folders we own) */
+      s_cat(m, "\",\"menu\":["
+               "{\"label\":\"Stats\",\"value\":\"fmenu_stats\"},"
+               "{\"label\":\"Copy link\",\"value\":\"fmenu_copy\"},", sz);
+      if (on_disk)
+        s_cat(m, "{\"label\":\"Open on disk\",\"value\":\"fmenu_open\"},", sz);
+      s_cat(m, "{\"label\":\"Edit\",\"value\":\"fmenu_edit\"},"
+               "{\"label\":\"Add linked folder\",\"value\":\"fmenu_link\"},"
+               "{\"label\":\"Remove\",\"value\":\"fmenu_remove\"}]}", sz);
     }
     p = end + 1;
   }
   s_cat(m, "]}]}", sz);
+  changed_send(m, &g_folders_hash);
+  nav_update();   /* at the folder list, back leaves the wapp */
+  render_info();
+}
+
+
+/* ── In-wapp navigation chrome ───────────────────────────────────────────
+ * Tell the host the AppBar title (the deepest folder/segment name) and whether
+ * system-back should drill up (inside a folder) or leave the wapp (at the
+ * folder list). Sent only on change so the periodic re-render doesn't churn. */
+static char g_nav_last_title[96] = "";
+static int  g_nav_last_back = -1;
+
+static void nav_send(const char *title, int back) {
+  if (back == g_nav_last_back && s_eq(title, g_nav_last_title)) return;
+  s_cpy(g_nav_last_title, title, sizeof(g_nav_last_title));
+  g_nav_last_back = back;
+  char m[200] = "{\"type\":\"ui.nav\",\"title\":\"";
+  jesc(m, sizeof(m), title);
+  s_cat(m, "\",\"back\":", sizeof(m));
+  s_cat(m, back ? "true}" : "false}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 
-/* Append items from a JSON object-array (files/links). idkey = the id field
- * ('x' or 'f'); idprefix = the tap-id prefix; sub = a fixed subtitle ("" = id).
- * When [nameInId], the tap id becomes "<prefix><id>\t<name>" so the handler has
- * both the content hash and the file name. */
-static void append_obj_items(char *m, unsigned sz, const char *arr,
-                             const char *idkey, const char *idprefix,
-                             const char *sub, int nameInId, int *first) {
-  if (!arr) return;
-  const char *p = arr;
-  while (*p && *p != ']') {
+static void nav_update(void) {
+  if (!g_cur_folder[0]) { nav_send("", 0); return; }   /* folder list → exits */
+  const unsigned pl = s_len(g_cur_path);
+  if (!pl) { nav_send(g_cur_folder_name[0] ? g_cur_folder_name : "Folder", 1); return; }
+  /* last segment of g_cur_path (which ends with '/') */
+  int k = (int)pl - 2;                 /* skip the trailing '/' */
+  while (k >= 0 && g_cur_path[k] != '/') k--;
+  char seg[96]; s_cpy(seg, g_cur_path + k + 1, sizeof(seg));
+  unsigned sl = s_len(seg);
+  if (sl && seg[sl - 1] == '/') seg[sl - 1] = 0;
+  nav_send(seg[0] ? seg : g_cur_folder_name, 1);
+}
+
+/* Render the open folder at the current sub-path using the host's path-scoped
+ * browse ("folderId\tpath"): the host returns ONLY the immediate subfolders and
+ * files at this level (de-duped + sorted), so the payload and the work stay flat
+ * however large the folder is. Subfolders are navigable; each file id keeps the
+ * FULL relative path so a download recreates the same on-disk structure. */
+static void render_open(void) {
+  char arg[360];
+  s_cpy(arg, g_cur_folder, sizeof(arg));
+  s_cat(arg, "\t", sizeof(arg));
+  s_cat(arg, g_cur_path, sizeof(arg));
+  uint32_t n = hal_folder_browse(arg, s_len(arg), g_list, sizeof(g_list) - 1);
+  g_list[n] = 0;
+  jstr(g_list, "name", g_cur_folder_name, sizeof(g_cur_folder_name));
+  jstr(g_list, "npub", g_cur_npub, sizeof(g_cur_npub));
+  g_owned = jbool_def(g_list, "owned", 0);
+
+  char *m = g_out; const unsigned sz = sizeof(g_out);
+  m[0] = 0;
+  const unsigned pl = s_len(g_cur_path);
+
+  /* One single list — no tabs. Linked folders (root only), then subfolders,
+   * then files; all in the same browsing structure. */
+  s_cat(m, "{\"type\":\"ui.people.set\",\"field\":\"folders\",\"sections\":[", sz);
+  s_cat(m, "{\"title\":\"\",\"items\":[", sz);
+  int first = 1;
+
+  /* Linked folders (other mutable folders linked into this one) — root only.
+   * Tap to browse (read-only); "..." copies the link / removes it (owner). */
+  if (!pl) {
+    for (const char *p = find_arr(g_list, "links"); p && *p && *p != ']';) {
+      if (*p != '{') { p++; continue; }
+      const char *end = p + 1; while (*end && *end != '}') end++;
+      char slice[320]; unsigned si = 0;
+      for (const char *q = p; q <= end && si < sizeof(slice) - 1; q++) slice[si++] = *q;
+      slice[si] = 0;
+      char fidv[80], nm[200];
+      jstr(slice, "f", fidv, sizeof(fidv));
+      jstr(slice, "name", nm, sizeof(nm));
+      if (fidv[0]) {
+        if (!first) s_cat(m, ",", sz);
+        first = 0;
+        s_cat(m, "{\"id\":\"dir:", sz); jesc(m, sz, fidv);
+        s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, nm[0] ? nm : "linked folder");
+        s_cat(m, "\",\"subtitle\":\"linked folder\",\"menu\":["
+                 "{\"label\":\"Copy link\",\"value\":\"linkmenu_copy\"}", sz);
+        if (g_owned)
+          s_cat(m, ",{\"label\":\"Remove link\",\"value\":\"linkmenu_remove\"}", sz);
+        s_cat(m, "]}", sz);
+      }
+      p = (*end) ? end + 1 : end;
+    }
+  }
+
+  /* Subfolders (path prefixes) — navigation only. */
+  for (const char *p = find_arr(g_list, "dirs"); p && *p && *p != ']';) {
     if (*p != '{') { p++; continue; }
-    const char *end = p + 1;
-    while (*end && *end != '}') end++;
-    char slice[400]; unsigned si = 0;
+    const char *end = p + 1; while (*end && *end != '}') end++;
+    char slice[320]; unsigned si = 0;
     for (const char *q = p; q <= end && si < sizeof(slice) - 1; q++) slice[si++] = *q;
     slice[si] = 0;
-    char idv[80], nm[120];
-    jstr(slice, idkey, idv, sizeof(idv));
-    jstr(slice, "name", nm, sizeof(nm));
-    if (idv[0]) {
-      if (!*first) s_cat(m, ",", sz);
-      *first = 0;
-      s_cat(m, "{\"id\":\"", sz); s_cat(m, idprefix, sz); jesc(m, sz, idv);
-      if (nameInId) { s_cat(m, "\\t", sz); jesc(m, sz, nm); }
-      s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, nm[0] ? nm : idv);
-      s_cat(m, "\",\"subtitle\":\"", sz);
-      if (sub[0]) s_cat(m, sub, sz);
-      else { char sh[18]; s_cpy(sh, idv, sizeof(sh)); jesc(m, sz, sh); }
-      s_cat(m, "\"}", sz);
+    char nm[220]; jstr(slice, "name", nm, sizeof(nm));
+    if (nm[0]) {
+      if (!first) s_cat(m, ",", sz);
+      first = 0;
+      s_cat(m, "{\"id\":\"cd:", sz); jesc(m, sz, nm);
+      s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, nm);
+      s_cat(m, "\",\"subtitle\":\"folder\"}", sz);
     }
     p = (*end) ? end + 1 : end;
   }
-}
 
-static void render_open(void) {
-  uint32_t n = hal_folder_browse(g_cur_folder, s_len(g_cur_folder),
-                                 g_list, sizeof(g_list) - 1);
-  g_list[n] = 0;
-  jstr(g_list, "name", g_cur_folder_name, sizeof(g_cur_folder_name));
-  char *m = g_out; const unsigned sz = sizeof(g_out);
-  m[0] = 0;
-  s_cat(m, "{\"type\":\"ui.people.set\",\"field\":\"folders\",\"sections\":[", sz);
-  s_cat(m, "{\"title\":\"", sz);
-  jesc(m, sz, g_cur_folder_name[0] ? g_cur_folder_name : "Folder");
-  s_cat(m, " - files\",\"items\":[", sz);
-  int first = 1;
-  append_obj_items(m, sz, find_arr(g_list, "files"), "x", "ffile:", "", 1, &first);
-  s_cat(m, "]},{\"title\":\"Linked folders\",\"items\":[", sz);
-  first = 1;
-  append_obj_items(m, sz, find_arr(g_list, "links"), "f", "dir:", "folder", 0, &first);
-  s_cat(m, "]}]}", sz);
-  hal_msg_send(m, s_len(m));
-}
-
-/* Parent directory of [p] into [out]. */
-static void parent_path(const char *p, char *out, unsigned m) {
-  s_cpy(out, p, m);
-  unsigned l = s_len(out);
-  if (l <= 1) { s_cpy(out, "/", m); return; }
-  if (out[l - 1] == '/') out[--l] = 0;
-  while (l > 0 && out[l - 1] != '/') out[--l] = 0;
-  if (l > 1 && out[l - 1] == '/') out[l - 1] = 0;
-  if (out[0] == 0) s_cpy(out, "/", m);
-}
-
-/* In-app directory browser for "add folder from disk": directories as tappable
- * rows (id "cd:<path>"), with ".. (up)". The screen's "Use this folder" action
- * registers g_browse. */
-static void render_browse(void) {
-  uint32_t n = hal_fs_listdir(g_browse, s_len(g_browse), g_list, sizeof(g_list) - 1);
-  g_list[n] = 0;
-  char *m = g_out; const unsigned sz = sizeof(g_out);
-  m[0] = 0;
-  s_cat(m, "{\"type\":\"ui.people.set\",\"field\":\"folders\",\"sections\":["
-           "{\"title\":\"Add folder: ", sz);
-  jesc(m, sz, g_browse);
-  s_cat(m, "\",\"items\":[", sz);
-  int first = 1;
-  if (!(g_browse[0] == '/' && g_browse[1] == 0)) {
-    char par[300]; parent_path(g_browse, par, sizeof(par));
-    s_cat(m, "{\"id\":\"cd:", sz); jesc(m, sz, par);
-    s_cat(m, "\",\"title\":\".. (up)\",\"subtitle\":\"\"}", sz);
-    first = 0;
-  }
-  const char *p = g_list;
-  while (p && *p) {
+  /* Files at this level: basename title, "<size>   <date>   N shared". The
+   * "..." menu copies the file's share token or downloads it. */
+  for (const char *p = find_arr(g_list, "files"); p && *p && *p != ']';) {
     if (*p != '{') { p++; continue; }
-    const char *end = p + 1;
-    while (*end && *end != '}') end++;
-    char slice[600]; unsigned si = 0;
+    const char *end = p + 1; while (*end && *end != '}') end++;
+    char slice[480]; unsigned si = 0;
     for (const char *q = p; q <= end && si < sizeof(slice) - 1; q++) slice[si++] = *q;
     slice[si] = 0;
-    if (jbool_def(slice, "dir", 0)) {
-      char name[200], pth[300];
-      jstr(slice, "name", name, sizeof(name));
-      jstr(slice, "path", pth, sizeof(pth));
-      if (pth[0]) {
-        if (!first) s_cat(m, ",", sz);
-        first = 0;
-        s_cat(m, "{\"id\":\"cd:", sz); jesc(m, sz, pth);
-        s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, name);
-        s_cat(m, "\",\"subtitle\":\"folder\"}", sz);
-      }
+    char idv[80], nm[256], base[220];
+    jstr(slice, "x", idv, sizeof(idv));
+    jstr(slice, "name", nm, sizeof(nm));
+    jstr(slice, "base", base, sizeof(base));
+    if (idv[0]) {
+      if (!first) s_cat(m, ",", sz);
+      first = 0;
+      s_cat(m, "{\"id\":\"ffile:", sz); jesc(m, sz, idv);
+      s_cat(m, "\\t", sz); jesc(m, sz, nm[0] ? nm : base);
+      s_cat(m, "\",\"title\":\"", sz); jesc(m, sz, base[0] ? base : (nm[0] ? nm : idv));
+      s_cat(m, "\",\"subtitle\":\"", sz);
+      char ms[96]; ms[0] = 0;
+      unsigned size = (unsigned)jnum(slice, "size");
+      if (size) { char fs[24]; fmt_size(size, fs, sizeof(fs)); s_cat(ms, fs, sizeof(ms)); }
+      long ts = (long)jnum(slice, "ts");
+      if (ts > 0) { char db[16]; fmt_date(ts, db, sizeof(db));
+        if (ms[0]) s_cat(ms, "   ", sizeof(ms)); s_cat(ms, db, sizeof(ms)); }
+      long dl = (long)jnum(slice, "dl");
+      if (dl > 0) { char nb[12]; u_itoa((unsigned)dl, nb);
+        if (ms[0]) s_cat(ms, "   ", sizeof(ms));
+        s_cat(ms, nb, sizeof(ms)); s_cat(ms, " shared", sizeof(ms)); }
+      if (ms[0]) jesc(m, sz, ms);
+      s_cat(m, "\",\"menu\":["
+               "{\"label\":\"Copy link\",\"value\":\"filemenu_copy\"},"
+               "{\"label\":\"Download\",\"value\":\"filemenu_dl\"}]}", sz);
     }
-    p = end + 1;
+    p = (*end) ? end + 1 : end;
   }
   s_cat(m, "]}]}", sz);
-  hal_msg_send(m, s_len(m));
+  changed_send(m, &g_folders_hash);
+
+  nav_update();   /* title = current folder/segment; back drills up */
+  if (!s_eq(g_sel_folder, g_cur_folder)) {
+    s_cpy(g_sel_folder, g_cur_folder, sizeof(g_sel_folder));
+    g_info_hash = 0;            /* selection changed → rebuild the Info panel */
+  }
+  render_info();  /* keep the Info panel current for the open folder */
+}
+
+/* Info panel (full-size menu screen): the folder's share link plus serve
+ * statistics (how many times its files were shared, and how often over time).
+ * Rebuilt only when the underlying stats change, so it never janks scrolling. */
+static void render_info(void) {
+  if (!g_sel_folder[0]) {
+    if (g_info_hash == 1) return;
+    g_info_hash = 1;
+    log_clear("info_log");
+    log_line("info_log", "Open a folder, or use the ... menu on a folder, to see "
+                         "its share link and statistics.");
+    return;
+  }
+  char st[2048];
+  uint32_t n = hal_folder_stats(g_sel_folder, s_len(g_sel_folder), st, sizeof(st) - 1);
+  st[n] = 0;
+  /* Refresh the selected folder's link/name every call (cheap) so the Copy/Edit
+   * actions always act on the right folder, even when the log rebuild is skipped. */
+  jstr(st, "npub", g_sel_npub, sizeof(g_sel_npub));
+  jstr(st, "name", g_sel_name, sizeof(g_sel_name));
+  uint32_t h = djb2(st);
+  if (h == 0 || h == 1) h = 2;
+  if (h == g_info_hash) return;
+  g_info_hash = h;
+
+  log_clear("info_log");
+  char line[220];
+  line[0] = 0; s_cat(line, "Folder: ", sizeof(line));
+  s_cat(line, g_sel_name[0] ? g_sel_name : "(folder)", sizeof(line));
+  log_line("info_log", line);
+
+  log_line("info_log", "Share link (others Open by id with this):");
+  log_line("info_log", g_sel_npub[0] ? g_sel_npub : g_sel_folder);
+  log_line("info_log", "Use \"Copy link\" above to share it.");
+
+  /* Owner's personal npub (for messaging the admin directly, in the future). */
+  { char owner[80]; jstr(st, "owner", owner, sizeof(owner));
+    if (owner[0]) {
+      log_line("info_log", "");
+      log_line("info_log", "Owner (admin) npub:");
+      log_line("info_log", owner);
+    } }
+  log_line("info_log", "");
+
+  line[0] = 0; s_cat(line, "Files: ", sizeof(line));
+  { char nb[12]; u_itoa((unsigned)jnum(st, "fileCount"), nb); s_cat(line, nb, sizeof(line)); }
+  s_cat(line, "    Total size: ", sizeof(line));
+  { char fs[24]; fmt_size((unsigned)jnum(st, "totalBytes"), fs, sizeof(fs)); s_cat(line, fs, sizeof(line)); }
+  log_line("info_log", line);
+
+  long serves = (long)jnum(st, "serves");
+  line[0] = 0; s_cat(line, "Shared ", sizeof(line));
+  { char nb[12]; u_itoa((unsigned)serves, nb); s_cat(line, nb, sizeof(line)); }
+  s_cat(line, serves == 1 ? " time in total" : " times in total", sizeof(line));
+  log_line("info_log", line);
+
+  line[0] = 0; s_cat(line, "   last 24 hours: ", sizeof(line));
+  { char nb[12]; u_itoa((unsigned)jnum(st, "last24h"), nb); s_cat(line, nb, sizeof(line)); }
+  log_line("info_log", line);
+  line[0] = 0; s_cat(line, "   last 7 days:   ", sizeof(line));
+  { char nb[12]; u_itoa((unsigned)jnum(st, "last7d"), nb); s_cat(line, nb, sizeof(line)); }
+  log_line("info_log", line);
+  line[0] = 0; s_cat(line, "   last 30 days:  ", sizeof(line));
+  { char nb[12]; u_itoa((unsigned)jnum(st, "last30d"), nb); s_cat(line, nb, sizeof(line)); }
+  log_line("info_log", line);
+
+  const char *top = find_arr(st, "top");
+  if (top && *top && *top != ']') {
+    log_line("info_log", "");
+    log_line("info_log", "Most shared files:");
+    for (const char *p = top; p && *p && *p != ']';) {
+      if (*p != '{') { p++; continue; }
+      const char *end = p + 1; while (*end && *end != '}') end++;
+      char slice[300]; unsigned si = 0;
+      for (const char *q = p; q <= end && si < sizeof(slice) - 1; q++) slice[si++] = *q;
+      slice[si] = 0;
+      char tn[200]; jstr(slice, "name", tn, sizeof(tn));
+      line[0] = 0; s_cat(line, "   ", sizeof(line)); s_cat(line, tn[0] ? tn : "?", sizeof(line));
+      s_cat(line, "  -  ", sizeof(line));
+      { char nb[12]; u_itoa((unsigned)jnum(slice, "serves"), nb); s_cat(line, nb, sizeof(line)); }
+      log_line("info_log", line);
+      p = (*end) ? end + 1 : end;
+    }
+  }
 }
 
 /* Is auto-sync currently on for [fid]? (reads hal_folder_subs) */
@@ -560,8 +771,7 @@ static int folder_autosync_on(const char *fid) {
 }
 
 static void render_mfolders(void) {
-  if (g_mode == 1) render_browse();
-  else if (g_cur_folder[0]) render_open();
+  if (g_cur_folder[0]) render_open();
   else render_owned();
 }
 
@@ -576,6 +786,55 @@ static void prompt_input1(const char *id, const char *folderId,
   s_cat(m, "\",\"max\":", sizeof(m));
   { char nb[12]; u_itoa(mx, nb); s_cat(m, nb, sizeof(m)); }
   s_cat(m, "},\"confirm\":\"OK\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* A read-only popup that shows [body] (selectable) and a Copy button bound to
+ * [copyval] — the shareable folder link. id "noop" so the result is ignored. */
+static void prompt_copy(const char *title, const char *body, const char *copyval) {
+  char m[700] = "{\"type\":\"ui.prompt\",\"id\":\"noop\",\"title\":\"";
+  jesc(m, sizeof(m), title);
+  s_cat(m, "\",\"body\":\"", sizeof(m)); jesc(m, sizeof(m), body);
+  s_cat(m, "\",\"copy\":\"", sizeof(m)); jesc(m, sizeof(m), copyval);
+  s_cat(m, "\",\"confirm\":\"Close\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Prefill a host scalar field (e.g. the Edit panel inputs). */
+static void field_set(const char *field, const char *value) {
+  char m[420] = "{\"type\":\"ui.field.set\",\"field\":\"";
+  s_cat(m, field, sizeof(m));
+  s_cat(m, "\",\"value\":\"", sizeof(m)); jesc(m, sizeof(m), value);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* One setMeta op carrying name+desc+tags together. */
+static void folder_setmeta3(const char *fid, const char *name,
+                            const char *desc, const char *tags) {
+  char j[800] = "{\"op\":\"setMeta\",\"name\":\"";
+  jesc(j, sizeof(j), name);
+  s_cat(j, "\",\"desc\":\"", sizeof(j)); jesc(j, sizeof(j), desc);
+  s_cat(j, "\",\"tags\":\"", sizeof(j)); jesc(j, sizeof(j), tags);
+  s_cat(j, "\"}", sizeof(j));
+  hal_folder_edit(fid, s_len(fid), j, s_len(j));
+}
+
+/* Load a folder's current metadata into the Edit panel and open it. */
+static void open_folder_edit(const char *fid) {
+  char st[2048];
+  uint32_t n = hal_folder_stats(fid, s_len(fid), st, sizeof(st) - 1);
+  st[n] = 0;
+  char name[160], desc[300], tags[120];
+  jstr(st, "name", name, sizeof(name));
+  jstr(st, "desc", desc, sizeof(desc));
+  jstr(st, "tags", tags, sizeof(tags));
+  jstr(st, "npub", g_sel_npub, sizeof(g_sel_npub));
+  jstr(st, "name", g_sel_name, sizeof(g_sel_name));
+  field_set("edit_name", name);
+  field_set("edit_desc", desc);
+  field_set("edit_tags", tags);
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Edit\"}";
   hal_msg_send(m, s_len(m));
 }
 
@@ -693,6 +952,8 @@ static void prompt_details(const char *token) {
   jesc(m, sizeof(m), name[0] ? name : "File");
   s_cat(m, "\",\"body\":\"", sizeof(m));
   jesc(m, sizeof(m), body);
+  s_cat(m, "\",\"copy\":\"", sizeof(m));
+  jesc(m, sizeof(m), token);
   s_cat(m, "\",\"chips\":["
           "{\"label\":\"Rename\",\"value\":\"nm\"},"
           "{\"label\":\"Description\",\"value\":\"ds\"},"
@@ -758,6 +1019,13 @@ static void do_prompt_result(const char *buf) {
     } else {
       notify("warning", "Paste a file: token or a magnet: link");
     }
+    return;
+  }
+  if (s_eq(pid, "flq")) {
+    /* Local archive text search (name, tag, sha256). */
+    s_cpy(g_query, inp, sizeof(g_query));
+    if (g_query[0]) { g_view = 1; render_search(); }
+    else { g_view = 0; render_library(); }
     return;
   }
   if (s_pre(pid, "fdet:")) {
@@ -826,6 +1094,18 @@ static void do_prompt_result(const char *buf) {
   if (s_pre(pid, "flnk:")) { folder_edit_kv(pid + 5, "link", "f", inp); render_mfolders(); notify("info", "Linked"); return; }
   if (s_pre(pid, "fgr:")) { folder_edit_kv(pid + 4, "grant", "p", inp); notify("info", "Admin granted"); return; }
   if (s_pre(pid, "frv:")) { folder_edit_kv(pid + 4, "revoke", "p", inp); notify("info", "Admin revoked"); return; }
+  if (s_pre(pid, "frm:")) {
+    /* Remove-folder confirmation; the "Remove" chip carries value "yes". */
+    if (s_eq(val, "yes")) {
+      const char *fid = pid + 4;
+      hal_folder_remove(fid, s_len(fid));
+      if (s_eq(g_cur_folder, fid)) { g_cur_folder[0] = 0; g_cur_path[0] = 0; }
+      if (s_eq(g_sel_folder, fid)) { g_sel_folder[0] = 0; g_info_hash = 0; }
+      render_mfolders();
+      notify("info", "Folder removed (files on disk kept)");
+    }
+    return;
+  }
   /* file inside a folder: id "ffl:<sha>\t<name>" */
   if (s_pre(pid, "ffl:")) {
     char sha[80] = "", name[160] = "";
@@ -856,7 +1136,6 @@ __attribute__((export_name("module_init")))
 void module_init(void) {
   share_load();
   share_apply();      /* resume the providers with the saved settings */
-  render_current();
   render_mfolders();
   render_status();
   hal_log(1, "files: ready", 12);
@@ -875,9 +1154,6 @@ void module_tick(void) {
   g_tick++;
   if (g_tick == 3 || g_tick % 60 == 0) lan_scan();
   if (g_tick % 5 == 0) render_status();
-  /* Pick up async fetches, but only when showing the full library — don't
-   * clobber a search or folder view the user is reading. */
-  if (g_tick % 15 == 0 && g_view == 0) render_library();
   /* Refresh the Folders view (folder browse is async/cached on the host). */
   if (g_tick % 6 == 0) render_mfolders();
 }
@@ -908,16 +1184,43 @@ void module_handle_event(void) {
     return;
   }
 
+  if (s_eq(typ, "fs.picked")) {
+    /* file/folder navigator result: a folder is shared from disk; a file is
+     * archived + its shareable token shown. */
+    char path[400] = "";
+    jstr(buf, "path", path, sizeof(path));
+    if (!path[0]) return;
+    if (jbool_def(buf, "dir", 0)) {
+      if (hal_folder_add_disk(path, s_len(path))) {
+        g_cur_folder[0] = 0;
+        render_owned();
+        notify("info", "Sharing folder from disk...");
+      } else {
+        notify("warning", "Reticulum node still starting - try again in a moment");
+      }
+    } else {
+      char token[80];
+      uint32_t n = hal_media_put_file(path, s_len(path), token, sizeof(token) - 1);
+      if (n == 0) { notify("warning", "Could not read that file"); return; }
+      token[n] = 0;
+      render_current();
+      prompt_details(token);
+    }
+    return;
+  }
+
   if (s_eq(cmd, "add_file")) {
-    const char *m = "{\"type\":\"file.pick\",\"title\":\"Add a file to the archive\","
-                    "\"mode\":\"view\"}";
+    const char *m = "{\"type\":\"fs.pick\",\"mode\":\"both\","
+                    "\"title\":\"Add a file, or share a folder\"}";
     hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "find_hash")) {
     prompt_search();
   } else if (s_eq(cmd, "search")) {
-    jstr(buf, "q", g_query, sizeof(g_query));
-    if (g_query[0]) { g_view = 1; render_search(); }
-    else { g_view = 0; render_library(); }
+    const char *m = "{\"type\":\"ui.prompt\",\"id\":\"flq\","
+      "\"title\":\"Search your files\","
+      "\"input\":{\"hint\":\"name, tag, or sha256\",\"max\":150},"
+      "\"confirm\":\"Search\"}";
+    hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "show_all")) {
     g_view = 0; g_query[0] = 0; render_library();
   } else if (s_eq(cmd, "folders")) {
@@ -927,21 +1230,139 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "folder_open_id")) {
     prompt_input1("fopen", "", "Open folder", "folder id or npub", 120);
   } else if (s_eq(cmd, "folder_add_disk")) {
-    hal_storage_request(0);               /* Android: all-files access */
-    g_mode = 1; g_cur_folder[0] = 0;
-    s_cpy(g_browse, "/", sizeof(g_browse));
-    render_browse();
-  } else if (s_eq(cmd, "folder_use")) {
-    if (g_mode == 1) {
-      hal_folder_add_disk(g_browse, s_len(g_browse));
-      notify("info", "Adding folder from disk...");
-      g_mode = 0; g_cur_folder[0] = 0;
-      render_owned();
-    } else {
-      notify("info", "Open 'Add from disk' first");
-    }
+    const char *m = "{\"type\":\"fs.pick\",\"mode\":\"both\","
+                    "\"title\":\"Pick a file to add, or a folder to share\"}";
+    hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "folder_back")) {
-    g_mode = 0; g_cur_folder[0] = 0; render_mfolders();
+    g_cur_folder[0] = 0; g_cur_path[0] = 0; g_nav_depth = 0; render_mfolders();
+  } else if (s_eq(cmd, "nav_back")) {
+    /* System-back / AppBar up: up one subpath, then to the parent linked folder
+     * (if we browsed into one), then out to the folder list. */
+    if (g_cur_path[0]) {
+      unsigned L = s_len(g_cur_path);
+      g_cur_path[L - 1] = 0;
+      int k = (int)s_len(g_cur_path) - 1;
+      while (k >= 0 && g_cur_path[k] != '/') k--;
+      g_cur_path[k + 1] = 0;
+      render_open();
+    } else if (g_nav_depth > 0) {
+      s_cpy(g_cur_folder, g_nav_stack[--g_nav_depth], sizeof(g_cur_folder));
+      g_cur_folder_name[0] = 0;
+      render_open();
+    } else if (g_cur_folder[0]) {
+      g_cur_folder[0] = 0; render_mfolders();
+    }
+  } else if (s_eq(cmd, "copy_key")) {
+    if (!g_sel_folder[0]) { notify("info", "Open a folder first"); }
+    else {
+      char body[420] = "Share this so others can open the folder (Open by id):\n";
+      s_cat(body, g_sel_npub[0] ? g_sel_npub : g_sel_folder, sizeof(body));
+      prompt_copy("Folder share link", body,
+                  g_sel_npub[0] ? g_sel_npub : g_sel_folder);
+    }
+  } else if (s_eq(cmd, "copy_id")) {
+    if (!g_sel_folder[0]) { notify("info", "Open a folder first"); }
+    else {
+      char body[200] = "Folder id (hex):\n";
+      s_cat(body, g_sel_folder, sizeof(body));
+      prompt_copy("Folder id", body, g_sel_folder);
+    }
+  } else if (s_pre(cmd, "fmenu_")) {
+    /* Row "..." menu on a shared folder: id "own:<fid>". */
+    char id[140] = ""; jstr(buf, "folders_id", id, sizeof(id));
+    const char *fid = (s_pre(id, "own:") || s_pre(id, "dir:")) ? id + 4 : id;
+    if (!fid[0]) return;
+    s_cpy(g_sel_folder, fid, sizeof(g_sel_folder));
+    g_info_hash = 0;                 /* selection changed → refresh Info */
+    if (s_eq(cmd, "fmenu_stats")) {
+      render_info();
+      const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Info\"}";
+      hal_msg_send(m, s_len(m));
+    } else if (s_eq(cmd, "fmenu_copy")) {
+      render_info();                 /* populates g_sel_npub */
+      char body[420] = "Share this so others can open the folder (Open by id):\n";
+      s_cat(body, g_sel_npub[0] ? g_sel_npub : g_sel_folder, sizeof(body));
+      prompt_copy("Folder share link", body,
+                  g_sel_npub[0] ? g_sel_npub : g_sel_folder);
+    } else if (s_eq(cmd, "fmenu_open")) {
+      if (hal_folder_opendir(g_sel_folder, s_len(g_sel_folder)))
+        notify("info", "Opening folder on disk - edits sync automatically");
+      else
+        notify("warning", "No file manager, or not a disk folder");
+    } else if (s_eq(cmd, "fmenu_edit")) {
+      open_folder_edit(g_sel_folder);
+    } else if (s_eq(cmd, "fmenu_link")) {
+      /* Add a linked folder INTO this folder — just its npub/id. */
+      prompt_input1("flnk:", g_sel_folder, "Add linked folder",
+                    "folder npub or id", 120);
+    } else if (s_eq(cmd, "fmenu_remove")) {
+      char m[420] = "{\"type\":\"ui.prompt\",\"id\":\"frm:";
+      jesc(m, sizeof(m), g_sel_folder);
+      s_cat(m, "\",\"title\":\"Remove shared folder?\",\"body\":\"This stops "
+               "sharing the folder. The files on disk are NOT deleted.\","
+               "\"chips\":[{\"label\":\"Remove\",\"value\":\"yes\"}],"
+               "\"confirm\":\"Cancel\"}", sizeof(m));
+      hal_msg_send(m, s_len(m));
+    }
+  } else if (s_pre(cmd, "filemenu_")) {
+    /* File "..." menu: folders_id = "ffile:<sha>\t<name>". */
+    char id[300] = ""; jstr(buf, "folders_id", id, sizeof(id));
+    if (!s_pre(id, "ffile:")) return;
+    char sha[80] = "", name[200] = "";
+    const char *r = id + 6; unsigned i = 0;
+    while (*r && *r != '\t' && i < sizeof(sha) - 1) sha[i++] = *r++;
+    sha[i] = 0;
+    if (*r == '\t') r++;
+    i = 0; while (*r && i < sizeof(name) - 1) name[i++] = *r++;
+    name[i] = 0;
+    if (!sha[0]) return;
+    if (s_eq(cmd, "filemenu_copy")) {
+      char body[320] = "Share this file (fetch by its token):\nfile:";
+      s_cat(body, sha, sizeof(body));
+      char tok[90] = "file:"; s_cat(tok, sha, sizeof(tok));
+      prompt_copy(name[0] ? name : "File", body, tok);
+    } else if (s_eq(cmd, "filemenu_dl")) {
+      char j[320] = "{\"sha\":\"";
+      jesc(j, sizeof(j), sha); s_cat(j, "\",\"name\":\"", sizeof(j));
+      jesc(j, sizeof(j), name[0] ? name : sha); s_cat(j, "\"}", sizeof(j));
+      hal_folder_download(g_cur_folder, s_len(g_cur_folder), j, s_len(j));
+      notify("info", "Downloading...");
+    }
+  } else if (s_pre(cmd, "linkmenu_")) {
+    /* Linked-folder "..." menu: folders_id = "dir:<childId>". */
+    char id[140] = ""; jstr(buf, "folders_id", id, sizeof(id));
+    const char *child = s_pre(id, "dir:") ? id + 4 : id;
+    if (!child[0]) return;
+    if (s_eq(cmd, "linkmenu_copy")) {
+      char st[1024]; uint32_t n = hal_folder_stats(child, s_len(child), st, sizeof(st) - 1);
+      st[n] = 0;
+      char npub[80]; jstr(st, "npub", npub, sizeof(npub));
+      char body[320] = "Linked folder share link (Open by id):\n";
+      s_cat(body, npub[0] ? npub : child, sizeof(body));
+      prompt_copy("Linked folder link", body, npub[0] ? npub : child);
+    } else if (s_eq(cmd, "linkmenu_remove")) {
+      /* Unlink it from the folder we're viewing (g_cur_folder). */
+      folder_edit_kv(g_cur_folder, "unlink", "f", child);
+      notify("info", "Linked folder removed");
+      render_mfolders();
+    }
+  } else if (s_eq(cmd, "folder_save")) {
+    if (!g_sel_folder[0]) { notify("info", "No folder selected"); }
+    else {
+      char name[200], desc[320], tags[160];
+      jstr(buf, "edit_name", name, sizeof(name));
+      jstr(buf, "edit_desc", desc, sizeof(desc));
+      jstr(buf, "edit_tags", tags, sizeof(tags));
+      if (s_len(name) > 100) name[100] = 0;     /* enforce caps defensively */
+      if (s_len(desc) > 250) desc[250] = 0;
+      if (s_len(tags) > 50) tags[50] = 0;
+      folder_setmeta3(g_sel_folder, name, desc, tags);
+      const char *m = "{\"type\":\"ui.screen.close\"}";
+      hal_msg_send(m, s_len(m));
+      g_info_hash = 0;
+      notify("info", "Saved");
+      render_mfolders();
+    }
   } else if (s_eq(cmd, "folder_manage")) {
     if (g_cur_folder[0]) prompt_folder_manage();
     else notify("info", "Open a folder first");
@@ -949,13 +1370,35 @@ void module_handle_event(void) {
     char id[280] = "";
     jstr(buf, "folders_id", id, sizeof(id));
     if (!id[0]) return;
-    if (g_mode == 1) {                     /* disk browser: navigate */
-      if (s_pre(id, "cd:")) { s_cpy(g_browse, id + 3, sizeof(g_browse)); render_browse(); }
-      return;
-    }
-    if (s_pre(id, "own:") || s_pre(id, "dir:")) {
+    if (s_pre(id, "own:")) {
+      /* open a top-level folder from the list — fresh navigation. */
+      g_nav_depth = 0;
       s_cpy(g_cur_folder, id + 4, sizeof(g_cur_folder));
       g_cur_folder_name[0] = 0;
+      g_cur_path[0] = 0;          /* enter at the folder root */
+      render_open();
+    } else if (s_pre(id, "dir:")) {
+      /* browse INTO a linked folder — remember the parent so back returns here. */
+      if (g_cur_folder[0] && g_nav_depth < 8)
+        s_cpy(g_nav_stack[g_nav_depth++], g_cur_folder, 80);
+      s_cpy(g_cur_folder, id + 4, sizeof(g_cur_folder));
+      g_cur_folder_name[0] = 0;
+      g_cur_path[0] = 0;
+      render_open();
+    } else if (s_pre(id, "cd:")) {
+      /* descend into a subfolder: append "<segment>/" to the current path */
+      s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
+      s_cat(g_cur_path, "/", sizeof(g_cur_path));
+      render_open();
+    } else if (s_eq(id, "up:")) {
+      /* go up one level: drop the trailing '/', then the last segment */
+      unsigned L = s_len(g_cur_path);
+      if (L) {
+        g_cur_path[L - 1] = 0;
+        int k = (int)s_len(g_cur_path) - 1;
+        while (k >= 0 && g_cur_path[k] != '/') k--;
+        g_cur_path[k + 1] = 0;
+      }
       render_open();
     } else if (s_pre(id, "ffile:")) {
       /* id = "ffile:<sha>\t<name>" */
@@ -970,6 +1413,7 @@ void module_handle_event(void) {
       jesc(m, sizeof(m), sha); s_cat(m, "\\t", sizeof(m)); jesc(m, sizeof(m), name);
       s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), name[0] ? name : "File");
       s_cat(m, "\",\"body\":\"sha256:\\n", sizeof(m)); jesc(m, sizeof(m), sha);
+      s_cat(m, "\",\"copy\":\"", sizeof(m)); jesc(m, sizeof(m), sha);
       s_cat(m, "\",\"chips\":[{\"label\":\"Download\",\"value\":\"dl\"},"
               "{\"label\":\"Fetch\",\"value\":\"fetch\"}]}", sizeof(m));
       hal_msg_send(m, s_len(m));
