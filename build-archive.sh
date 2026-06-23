@@ -102,6 +102,7 @@ build_wapp() {
             $([ -f Makefile ] && echo Makefile) \
             $([ -d screens ] && echo screens) \
             $([ -d media ] && echo media) \
+            $([ -d web ] && echo web) \
             $([ -d lang ] && echo lang) \
             $([ -f tests.wasm ] && echo tests.wasm) \
             $([ -d tests ] && echo tests)

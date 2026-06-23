@@ -881,6 +881,32 @@ uint32_t hal_rns_available(void);
 __attribute__((import_module("hal"), import_name("rns_recv")))
 uint32_t hal_rns_recv(char *out, uint32_t out_cap);
 
+/* ── Reticulum visualization/management (read-only) ──────────────────── *
+ *
+ * The node's view of the Reticulum network, for the "reticulum" wapp to
+ * render an interactive graph. This is an OBSERVED, sampled view (the nodes
+ * whose announces this node has heard) — never a hub's full client roster.
+ * Each returns the number of bytes written; when the JSON does not fit, the
+ * NEGATED required length is returned (nothing written) so the caller can
+ * retry with a larger buffer. Config (add/remove/connect hubs, passive
+ * toggle) is performed by emitting host-action messages, not via the HAL. */
+
+/* Node status JSON ({up,mode,identity,paths,passive,observed,...}). */
+__attribute__((import_module("hal"), import_name("rns_status")))
+int32_t hal_rns_status(char *out, uint32_t out_cap);
+
+/* Configured bootstrap hubs as a JSON array
+ * [{"endpoint":"host:port","connected":bool},...]. */
+__attribute__((import_module("hal"), import_name("rns_hubs")))
+int32_t hal_rns_hubs(char *out, uint32_t out_cap);
+
+/* The observed network as a {"nodes":[...],"edges":[...],"sample":true}
+ * graph. [filter] is an optional JSON object
+ * {"service":str,"geogramOnly":bool,"search":str} (pass len 0 for none). */
+__attribute__((import_module("hal"), import_name("rns_nodes")))
+int32_t hal_rns_nodes(const char *filter, uint32_t filter_len,
+                      char *out, uint32_t out_cap);
+
 /* ── Contacts (people this device already knows) ─────────────────────── *
  *
  * A reusable picker source: the people the user can address — those seen on

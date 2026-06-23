@@ -1,0 +1,14 @@
+[
+  {
+    "$": "screen",
+    "name": "Reticulum",
+    "tip": "The Reticulum network as this node has observed it",
+    "children": [
+      {
+        "$": "group",
+        "name": "network-graph",
+        "$type": "graph"
+      }
+    ]
+  }
+]
