@@ -180,9 +180,11 @@ static int rns_tx_msg(const char *to, const char *wire);
  */
 #define PKBEACON_GROUP    "NOSTR"
 #define PKBEACON_INTERVAL 3600            /* seconds (hourly) */
+#define RNS_PULL_INTERVAL 20              /* seconds: pull store-and-forwarded 1:1 mail */
 static char  g_pubkey[80] = "";           /* our pubkey (base64url), cached at init */
 static int   g_pubkey_beacon = 1;         /* broadcast it? (default on) */
 static uint64_t g_last_pkbeacon = 0;
+static uint64_t g_last_rnspull = 0;
 
 /* ── Message signing (APRX verifiable authorship) ────────────────────────
  * When enabled, outgoing messages carry a short-Schnorr signature so peers can
@@ -1176,30 +1178,37 @@ static void pk_load(void) {
 #define RNS_MAX 96
 #define RNS_TTL 172800   /* 48h: skip a dest not re-beaconed within this window */
 static char g_rns_npub[RNS_MAX][48];
-static char g_rns_dest[RNS_MAX][40];
+static char g_rns_dest[RNS_MAX][40];   /* delivery dest (peers send_to here) */
+static char g_rns_prop[RNS_MAX][40];   /* propagation dest (we pull store-and-forward from here) */
 static uint64_t g_rns_dts[RNS_MAX];
 static int g_rns_n = 0;
-static char g_rns_scratch[RNS_MAX * 96];
+static char g_rns_scratch[RNS_MAX * 144];
 static void rns_dest_save(void) {
   g_rns_scratch[0] = 0;
   for (int i = 0; i < g_rns_n; i++) {
     char tb[12]; u_itoa((unsigned)g_rns_dts[i], tb);
     s_cat(g_rns_scratch, g_rns_npub[i], sizeof(g_rns_scratch)); s_cat(g_rns_scratch, "=", sizeof(g_rns_scratch));
     s_cat(g_rns_scratch, g_rns_dest[i], sizeof(g_rns_scratch)); s_cat(g_rns_scratch, "=", sizeof(g_rns_scratch));
+    s_cat(g_rns_scratch, g_rns_prop[i], sizeof(g_rns_scratch)); s_cat(g_rns_scratch, "=", sizeof(g_rns_scratch));
     s_cat(g_rns_scratch, tb, sizeof(g_rns_scratch)); s_cat(g_rns_scratch, ";", sizeof(g_rns_scratch));
   }
   hal_kv_set("rnsdest", 7, g_rns_scratch, s_len(g_rns_scratch));
 }
-static void rns_dest_store(const char *npub, const char *dest) {
+static void rns_dest_store(const char *npub, const char *dest, const char *prop) {
   if (!npub[0] || !dest[0]) return;
   uint64_t now = hal_time_epoch();
   for (int i = 0; i < g_rns_n; i++)
-    if (s_eq(g_rns_npub[i], npub) && s_eq(g_rns_dest[i], dest)) { g_rns_dts[i] = now; rns_dest_save(); return; }
+    if (s_eq(g_rns_npub[i], npub) && s_eq(g_rns_dest[i], dest)) {
+      g_rns_dts[i] = now;
+      if (prop && prop[0]) s_cpy(g_rns_prop[i], prop, sizeof(g_rns_prop[0]));
+      rns_dest_save(); return;
+    }
   int slot;
   if (g_rns_n < RNS_MAX) slot = g_rns_n++;
   else { slot = 0; for (int i = 1; i < g_rns_n; i++) if (g_rns_dts[i] < g_rns_dts[slot]) slot = i; }
   s_cpy(g_rns_npub[slot], npub, sizeof(g_rns_npub[0]));
   s_cpy(g_rns_dest[slot], dest, sizeof(g_rns_dest[0]));
+  s_cpy(g_rns_prop[slot], (prop && prop[0]) ? prop : "", sizeof(g_rns_prop[0]));
   g_rns_dts[slot] = now;
   rns_dest_save();
 }
@@ -1207,19 +1216,21 @@ static void rns_dest_load(void) {
   uint32_t n = hal_kv_get("rnsdest", 7, g_rns_scratch, sizeof(g_rns_scratch) - 1);
   if (n == 0) return;
   g_rns_scratch[n] = 0;
-  char np[48], de[40], ts[12]; int pi = 0, di = 0, ti = 0, stage = 0;
+  char np[48], de[40], pr[40], ts[12]; int pi = 0, di = 0, ri = 0, ti = 0, stage = 0;
   for (unsigned i = 0; i <= n; i++) {
     char c = (i < n) ? g_rns_scratch[i] : ';';
     if (c == ';') {
       if (pi > 0 && di > 0 && g_rns_n < RNS_MAX) {
-        np[pi] = 0; de[di] = 0; ts[ti] = 0;
+        np[pi] = 0; de[di] = 0; pr[ri] = 0; ts[ti] = 0;
         s_cpy(g_rns_npub[g_rns_n], np, 48); s_cpy(g_rns_dest[g_rns_n], de, 40);
+        s_cpy(g_rns_prop[g_rns_n], pr, 40);
         g_rns_dts[g_rns_n] = ti > 0 ? (uint64_t)to_int(ts) : 0; g_rns_n++;
       }
-      pi = 0; di = 0; ti = 0; stage = 0;
-    } else if (c == '=' && stage < 2) stage++;
+      pi = 0; di = 0; ri = 0; ti = 0; stage = 0;
+    } else if (c == '=' && stage < 3) stage++;
     else if (stage == 0) { if (pi < 47) np[pi++] = c; }
     else if (stage == 1) { if (di < 39) de[di++] = c; }
+    else if (stage == 2) { if (ri < 39) pr[ri++] = c; }
     else { if (ti < 11) ts[ti++] = c; }
   }
 }
@@ -1317,21 +1328,27 @@ static void peer_note(const char *call) {
  * never shown as a chat message. */
 static int pk_intercept(const char *group, const char *from, const char *text) {
   if (!s_eq(group, "NOSTR")) return 0;
-  /* Extended beacon "<npub>|<rns-deliv-hex>"; legacy form is just "<npub>". The
-   * deliv (if present) is this device's Reticulum address — learn it keyed by
-   * npub so we can also reach this user over Reticulum (and all their devices). */
-  char npub[48] = "", deliv[40] = "";
-  int bar = -1;
-  for (int i = 0; text[i]; i++) if (text[i] == '|') { bar = i; break; }
-  if (bar >= 0) {
-    int n = bar < 47 ? bar : 47;
-    for (int i = 0; i < n; i++) npub[i] = text[i];
-    npub[n] = 0;
-    s_cpy(deliv, text + bar + 1, sizeof(deliv));
-  } else {
-    s_cpy(npub, text, sizeof(npub));
+  /* Extended beacon "<npub>|<rns-deliv-hex>|<rns-prop-hex>"; legacy forms are
+   * "<npub>|<deliv>" and just "<npub>". deliv = where we send_to this user; prop =
+   * its propagation mailbox we pull store-and-forwarded messages from (the NAT-
+   * tolerant path: WE initiate the pull). Learn both keyed by npub (all devices). */
+  char npub[48] = "", deliv[40] = "", prop[40] = "";
+  { int fld = 0, j = 0;
+    for (int i = 0; ; i++) {
+      char c = text[i];
+      if (c == '|' || c == 0) {
+        if (fld == 0) npub[j < 47 ? j : 47] = 0;
+        else if (fld == 1) deliv[j < 39 ? j : 39] = 0;
+        else if (fld == 2) { prop[j < 39 ? j : 39] = 0; }
+        if (c == 0 || fld >= 2) break;
+        fld++; j = 0; continue;
+      }
+      if (fld == 0) { if (j < 47) npub[j++] = c; }
+      else if (fld == 1) { if (j < 39) deliv[j++] = c; }
+      else { if (j < 39) prop[j++] = c; }
+    }
   }
-  if (deliv[0]) rns_dest_store(npub, deliv);
+  if (deliv[0]) rns_dest_store(npub, deliv, prop);
   if (peer_known(from) || pk_get(from)) pk_store(from, npub);   /* interacting -> keep */
   else pend_set(from, npub);                                    /* overheard -> park */
   return 1;
@@ -2274,11 +2291,21 @@ static int rns_tx_msg(const char *to, const char *wire) {
   ble_pack(frame, sizeof(frame), g_call, to, wire);
   uint64_t now = hal_time_epoch();
   int sent = 0;
+  /* Directed delivery to each of the recipient's known devices — best for
+   * privacy and works when a direct LXMF path/link can be established. */
   for (int i = 0; i < g_rns_n; i++) {
     if (!s_eq(g_rns_npub[i], npub)) continue;
     if (g_rns_dts[i] && now - g_rns_dts[i] > RNS_TTL) continue;   /* stale device */
     if (hal_rns_send_to(g_rns_dest[i], s_len(g_rns_dest[i]), frame, s_len(frame)) == 1) sent++;
   }
+  /* Reliable cross-network backstop: also flood the frame as a Reticulum
+   * broadcast. Broadcasts are announce-relayed by the public hubs, so they reach
+   * a peer behind NAT on a different network where a direct LXMF link to its
+   * delivery dest can't be opened. Safe to flood: the body is ENC1-encrypted to
+   * the recipient's npub (only they can read it) and only the addressed callsign
+   * handles it as a 1:1 — every other node drops it. The receiver dedups this
+   * against the directed copy by content hash, so it still shows once. */
+  if (hal_rns_broadcast(frame, s_len(frame)) == 1) sent++;
   return sent;
 }
 
@@ -2473,12 +2500,19 @@ static void pkbeacon_send(void) {
   /* Advertise "<npub>|<rns-deliv-hex>" so peers can also reach us over Reticulum;
    * each device adds its own dest under the shared npub. Falls back to npub-only
    * when the RNS node is down (legacy parsers also read just the npub). */
-  char body[160]; s_cpy(body, g_pubkey, sizeof(body));
-  char deliv[80];
+  char body[200]; s_cpy(body, g_pubkey, sizeof(body));
+  char deliv[80], prop[80];
   uint32_t dn = hal_rns_delivery_dest(deliv, sizeof(deliv) - 1);
   if (dn > 0 && dn < sizeof(deliv)) {
     deliv[dn] = 0;
     s_cat(body, "|", sizeof(body)); s_cat(body, deliv, sizeof(body));
+    /* Also advertise our propagation mailbox so peers can pull store-and-forwarded
+     * 1:1 messages from us (the path that survives both ends being behind NAT). */
+    uint32_t pn = hal_rns_prop_dest(prop, sizeof(prop) - 1);
+    if (pn > 0 && pn < sizeof(prop)) {
+      prop[pn] = 0;
+      s_cat(body, "|", sizeof(body)); s_cat(body, prop, sizeof(body));
+    }
   }
   if (g_sock >= 0 && g_logged)
     aprs_send_bulletin_multi(g_sock, g_call, PKBEACON_GROUP, body, APRS_MAX_MSG_LEN);
@@ -3693,6 +3727,24 @@ void module_tick(void) {
   if (g_pubkey_beacon && g_pubkey[0] && (g_logged || g_ble_on)) {
     uint64_t now = hal_time_epoch();
     if (now - g_last_pkbeacon >= (uint64_t)PKBEACON_INTERVAL) pkbeacon_send();
+  }
+
+  /* Pull store-and-forwarded 1:1 messages from every contact's propagation
+   * mailbox. This is the NAT-tolerant receive path: WE initiate the outbound
+   * link to pull, so a message reaches us even when both ends are behind NAT and
+   * a sender's direct push to our delivery dest can't open an inbound link.
+   * Pulled datagrams land on the same RNS inbox the drain below feeds to
+   * ble_handle, so they flow through convo_deliver and dedup like any other. */
+  {
+    uint64_t now = hal_time_epoch();
+    if (now - g_last_rnspull >= (uint64_t)RNS_PULL_INTERVAL) {
+      g_last_rnspull = now;
+      for (int i = 0; i < g_rns_n; i++) {
+        if (!g_rns_prop[i][0]) continue;
+        if (g_rns_dts[i] && now - g_rns_dts[i] > RNS_TTL) continue;   /* stale contact */
+        hal_rns_pull(g_rns_prop[i], s_len(g_rns_prop[i]));
+      }
+    }
   }
 
   /* recurring group bulletins: re-broadcast every 5 min until the period ends */
