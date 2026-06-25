@@ -1633,6 +1633,18 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
     disp = plain;
   }
 
+  /* Relay-dedup id: an encrypted 1:1 (and its NOSTR-relay copy) carries a
+   * "\x01<rmid>\x02" prefix in the plaintext. Pull it out + strip it from the
+   * display text; the dedup below keys on it so the directly-delivered copy and
+   * the relay copy of one message collapse to a single bubble. */
+  char rmid[12] = "";
+  if (id[0] != '#' && disp[0] == '\x01') {
+    int i = 1, j = 0;
+    while (disp[i] && disp[i] != '\x02' && j < 11) rmid[j++] = disp[i++];
+    rmid[j] = 0;
+    if (disp[i] == '\x02') disp = disp + i + 1; else rmid[0] = 0;
+  }
+
   /* Verify the signature over the canonical (space-normalised) content. */
   if (have_sig) {
     if (s_eq(dir, "out")) {
@@ -1663,7 +1675,11 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   /* Dedup on the signature-stripped (and for encrypted, space-normalised) core,
    * so the SAME message arriving via two transports (APRS-IS + a BLE iGate), or
    * signed vs unsigned forms, collapses to one. */
-  unsigned h = sig_hash(id, from, enc ? canon_content : body);
+  /* When the message carries a relay-dedup id, key the dedup on it (the direct
+   * and relay copies have DIFFERENT ciphertexts but the same rmid); otherwise
+   * fall back to the content hash (collapses dual-transport copies of one wire). */
+  unsigned h = rmid[0] ? sig_hash("r", from, rmid)
+                       : sig_hash(id, from, enc ? canon_content : body);
   char key[16]; u_itoa(h, key);
   /* Locally hidden message: stays gone even if it arrives again on another
    * transport (the key is the same content signature the host hid it under). */
@@ -1742,6 +1758,175 @@ static void add_infohash(char *text, unsigned sz) {
    * LAN scan on the same network. No IP addresses go on the air. */
 }
 
+/* ── NOSTR-relay store-and-forward DM backup ──────────────────────────────
+ * Each 1:1 message is ALSO published to up to 3 NOSTR relays reachable over
+ * Reticulum as a kind-4 (NIP-04) encrypted DM, so it still arrives if the sender
+ * reached the relays before becoming unreachable. The host (hal_relay_*) owns the
+ * NOSTR work; here we pick relays, tell the peer where we back up (?RLY), poll
+ * the relays peers told us about, deliver+dedup, and delete what we received.
+ * A per-message id (rmid) is embedded INSIDE the encrypted plaintext so the relay
+ * copy dedups against the directly-delivered copy (see convo_deliver). */
+#define RELAY_MAX 3
+#define RELAY_POLL_INTERVAL 60          /* seconds between relay polls */
+#define POLLRELAY_MAX 8
+static char g_myrelay[RELAY_MAX][72]; static int g_myrelay_n = 0;       /* our backup relays */
+static char g_pollrelay[POLLRELAY_MAX][72]; static int g_pollrelay_n = 0; /* relays peers told us to poll */
+static char g_rly_told[CPRIV_MAX][16]; static int g_rly_told_n = 0;     /* callsigns told our ?RLY (session) */
+static uint64_t g_last_relaypoll = 0;
+
+/* Build a JSON array ["h1","h2",…] from [arr][n]. */
+static void relays_json(char arr[][72], int n, char *out, unsigned cap) {
+  out[0] = '['; out[1] = 0;
+  for (int i = 0; i < n; i++) {
+    if (i) s_cat(out, ",", cap);
+    s_cat(out, "\"", cap); s_cat(out, arr[i], cap); s_cat(out, "\"", cap);
+  }
+  s_cat(out, "]", cap);
+}
+
+/* Reverse pubkey lookup: the callsign whose stored npub == [npub], or NULL. */
+static const char *pk_rev(const char *npub) {
+  if (!npub[0]) return 0;
+  for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_key[i], npub)) return g_pk_call[i];
+  return 0;
+}
+
+/* Refresh our backup relays from the currently-reachable set (≤RELAY_MAX). */
+static void relay_pick(void) {
+  static char j[RELAY_MAX * 80 + 16];
+  uint32_t n = hal_relay_reachable(j, sizeof(j) - 1);
+  if (n == 0 || n >= sizeof(j)) return;
+  j[n] = 0;
+  int cnt = 0; const char *p = j;
+  while (*p && cnt < RELAY_MAX) {            /* extract each "quoted" hash */
+    while (*p && *p != '"') p++;
+    if (!*p) break;
+    p++;
+    int k = 0; while (*p && *p != '"' && k < 71) g_myrelay[cnt][k++] = *p++;
+    g_myrelay[cnt][k] = 0;
+    if (*p == '"') p++;
+    if (k > 0) cnt++;
+  }
+  g_myrelay_n = cnt;
+}
+
+/* Tell [call] which relays we back up to (once per session) — a control frame
+ * "?RLY h1 h2 h3" so the peer knows where to poll for messages from us. */
+static void relay_announce_to(const char *call) {
+  if (g_myrelay_n == 0 || !call[0] || call[0] == '#') return;
+  for (int i = 0; i < g_rly_told_n; i++) if (s_eq(g_rly_told[i], call)) return;
+  if (g_rly_told_n < CPRIV_MAX) s_cpy(g_rly_told[g_rly_told_n++], call, 16);
+  char m[300]; s_cpy(m, "?RLY", sizeof(m));
+  for (int i = 0; i < g_myrelay_n; i++) { s_cat(m, " ", sizeof(m)); s_cat(m, g_myrelay[i], sizeof(m)); }
+  rns_tx_msg(call, m);
+}
+
+static void pollrelay_save(void) {
+  char b[POLLRELAY_MAX * 73]; b[0] = 0;
+  for (int i = 0; i < g_pollrelay_n; i++) { s_cat(b, g_pollrelay[i], sizeof(b)); s_cat(b, " ", sizeof(b)); }
+  hal_kv_set("pollrelays", 10, b, s_len(b));
+}
+static void pollrelay_load(void) {
+  char b[POLLRELAY_MAX * 73];
+  uint32_t n = hal_kv_get("pollrelays", 10, b, sizeof(b) - 1);
+  if (n == 0) return;
+  b[n] = 0; char h[72]; int k = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char c = (i < n) ? b[i] : ' ';
+    if (c == ' ') { if (k > 0 && g_pollrelay_n < POLLRELAY_MAX) { h[k] = 0; s_cpy(g_pollrelay[g_pollrelay_n++], h, 72); } k = 0; }
+    else if (k < 71) h[k++] = c;
+  }
+}
+static void pollrelay_add(const char *h) {
+  if (!h[0]) return;
+  for (int i = 0; i < g_pollrelay_n; i++) if (s_eq(g_pollrelay[i], h)) return;
+  int slot = (g_pollrelay_n < POLLRELAY_MAX) ? g_pollrelay_n++ : 0;  /* cap: overwrite oldest */
+  s_cpy(g_pollrelay[slot], h, 72);
+  pollrelay_save();
+}
+
+/* Intercept "?RLY <h1> <h2> …" — a peer telling us where it backs up; remember
+ * those relays so we poll them for that peer's messages. Consume (not chat). */
+static int rly_intercept(const char *from, const char *text) {
+  (void)from;
+  if (!(text[0] == '?' && text[1] == 'R' && text[2] == 'L' && text[3] == 'Y' &&
+        (text[4] == ' ' || text[4] == 0)))
+    return 0;
+  const char *p = text + 4;
+  while (*p) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+    char h[72]; int k = 0; while (*p && *p != ' ' && k < 71) h[k++] = *p++;
+    h[k] = 0; pollrelay_add(h);
+  }
+  return 1;
+}
+
+/* Drain relay-fetched DMs (queued by hal_relay_dm_fetch): deliver each through
+ * convo_deliver (which extracts the embedded rmid + dedups against the direct
+ * copy), then DROP the received ids from the relays to reclaim space. */
+/* JSON array of the relays we poll: those peers told us about (?RLY) UNION the
+ * ones we ourselves can reach. A sender that reached us as a relay published to
+ * OUR relay, so our own reachable set (+ the local store, always queried by the
+ * host) catches a message even before any ?RLY arrives. */
+static void relay_pollset_json(char *out, unsigned cap) {
+  out[0] = '['; out[1] = 0;
+  int first = 1;
+  for (int i = 0; i < g_pollrelay_n; i++) {
+    if (!first) s_cat(out, ",", cap);
+    s_cat(out, "\"", cap); s_cat(out, g_pollrelay[i], cap); s_cat(out, "\"", cap);
+    first = 0;
+  }
+  for (int i = 0; i < g_myrelay_n; i++) {
+    int dup = 0;
+    for (int j = 0; j < g_pollrelay_n; j++) if (s_eq(g_myrelay[i], g_pollrelay[j])) { dup = 1; break; }
+    if (dup) continue;
+    if (!first) s_cat(out, ",", cap);
+    s_cat(out, "\"", cap); s_cat(out, g_myrelay[i], cap); s_cat(out, "\"", cap);
+    first = 0;
+  }
+  s_cat(out, "]", cap);
+}
+
+static void relay_drain(void) {
+  static char buf[1200];
+  static char ids[3000];   /* JSON array of up to ~40 event ids per drain pass */
+  int idn = 0; ids[0] = '['; ids[1] = 0;
+  for (int guard = 0; guard < 40; guard++) {
+    uint32_t n = hal_relay_dm_recv(buf, sizeof(buf) - 1);
+    if (n == 0) break;
+    buf[n] = 0;
+    char id[80] = "", from[48] = "", text[700] = "";
+    if (!jstr(buf, "id", id, sizeof(id))) continue;
+    jstr(buf, "from", from, sizeof(from));
+    jstr(buf, "text", text, sizeof(text));
+    const char *call = pk_rev(from);
+    if (call && call[0]) convo_deliver(call, "in", call, text, text, "RLY");
+    if (idn) s_cat(ids, ",", sizeof(ids));
+    s_cat(ids, "\"", sizeof(ids)); s_cat(ids, id, sizeof(ids)); s_cat(ids, "\"", sizeof(ids));
+    idn++;
+  }
+  s_cat(ids, "]", sizeof(ids));
+  if (idn > 0) {
+    char rj[(POLLRELAY_MAX + RELAY_MAX) * 80 + 16];
+    relay_pollset_json(rj, sizeof(rj));
+    hal_relay_dm_drop(ids, s_len(ids), rj, s_len(rj)); /* + local store drop, host-side */
+  }
+}
+
+/* Per-tick relay work: drain fetched results every tick (they arrive async after
+ * a fetch), and trigger a fresh fetch every RELAY_POLL_INTERVAL. */
+static void relay_tick(void) {
+  relay_drain();
+  uint64_t now = hal_time_epoch();
+  if (now - g_last_relaypoll < RELAY_POLL_INTERVAL) return;
+  g_last_relaypoll = now;
+  if (g_myrelay_n == 0) relay_pick();
+  char rj[(POLLRELAY_MAX + RELAY_MAX) * 80 + 16];
+  relay_pollset_json(rj, sizeof(rj));
+  hal_relay_dm_fetch(0, rj, s_len(rj)); /* since=0: DROP + rmid-dedup bound the set */
+}
+
 static void do_convo_send(const char *buf) {
   read_config(buf);
   char id[40] = "", text[400] = "";
@@ -1770,11 +1955,25 @@ static void do_convo_send(const char *buf) {
    * anyone can still verify who sent it. */
   char core[700]; s_cpy(core, text, sizeof(core));
   int encrypted = 0;
+  /* relaypt = the plaintext we actually encrypt — for an encrypted 1:1 it carries
+   * a per-message id "\x01<rmid>\x02" prefix so the directly-delivered copy and
+   * the NOSTR-relay copy (both encrypt the SAME plaintext) dedup on receipt. */
+  char relaypt[680] = ""; char rmid[12] = "";
   if (id[0] != '#') {
     const char *rpk = pk_get(id);
     if (rpk) {
+      unsigned char rb[4];
+      hal_crypto_random((char *)rb, 4);
+      static const char hx[] = "0123456789abcdef";
+      for (int i = 0; i < 4; i++) { rmid[i * 2] = hx[rb[i] >> 4]; rmid[i * 2 + 1] = hx[rb[i] & 15]; }
+      rmid[8] = 0;
+      int k = 0; relaypt[k++] = '\x01';
+      for (int i = 0; rmid[i]; i++) relaypt[k++] = rmid[i];
+      relaypt[k++] = '\x02';
+      for (int i = 0; text[i] && k < (int)sizeof(relaypt) - 1; i++) relaypt[k++] = text[i];
+      relaypt[k] = 0;
       char ct[640];
-      uint32_t cn = hal_encrypt(rpk, s_len(rpk), text, s_len(text), ct, sizeof(ct) - 1);
+      uint32_t cn = hal_encrypt(rpk, s_len(rpk), relaypt, s_len(relaypt), ct, sizeof(ct) - 1);
       if (cn > 0 && cn < sizeof(ct)) {
         ct[cn] = 0;
         s_cpy(core, "ENC1:", sizeof(core)); s_cat(core, ct, sizeof(core));
@@ -1833,6 +2032,23 @@ static void do_convo_send(const char *buf) {
     /* Always-redundant Reticulum backstop: store-and-forward holds it for a peer
      * who wasn't on APRS at the time; the copy dedups on receipt (best effort). */
     rns_tx_msg(id, wire);
+  }
+  /* NOSTR-relay store-and-forward backup: also publish this DM (kind-4 NIP-04)
+   * to up to 3 reachable relays and tell the peer where to poll. Only when
+   * encrypted (we have the recipient's npub); the relay copy carries the same
+   * rmid so it dedups against the direct copy above. */
+  if (encrypted && id[0] != '#') {
+    if (g_myrelay_n == 0) relay_pick();
+    if (g_myrelay_n > 0) {
+      relay_announce_to(id);
+      const char *np = pk_get(id);
+      if (np && np[0]) {
+        char rj[RELAY_MAX * 80 + 16];
+        relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+        hal_relay_dm_send(np, s_len(np), relaypt, s_len(relaypt),
+                          rj, s_len(rj), rmid, s_len(rmid));
+      }
+    }
   }
   convo_deliver(id, "out", g_call, wire, text, "");
   status(priv ? "TX (private/Reticulum)" : (loc ? "TX message + position" : "TX message"));
@@ -2912,6 +3128,7 @@ static void route_frame(const char *line) {
          * follower and keep them off the Live tab / chat / notifications. */
         if (amine && follow_intercept(p.from, p.text)) return;
         if (amine && priv_intercept(p.from, p.text)) return;
+        if (amine && rly_intercept(p.from, p.text)) return;
         /* A bare signature line is a continuation fragment, not a message:
          * keep it off the Live tab + notifications; da_ reassembles it. */
         int sigln = is_sig_line(p.text);
@@ -3496,6 +3713,7 @@ static void ble_handle(const char *compact, int rssi) {
     /* Follow notifications are control traffic, not chat (see route_frame). */
     if (amine && follow_intercept(from, text)) return;
     if (amine && priv_intercept(from, text)) return;
+    if (amine && rly_intercept(from, text)) return;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
@@ -3557,6 +3775,7 @@ void module_init(void) {
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   rns_dest_load(); /* restore npub -> {RNS delivery dests} (Reticulum addressing) */
   cpriv_load();    /* restore which 1:1 conversations are private (Reticulum-only) */
+  pollrelay_load(); /* restore NOSTR relays peers told us to poll for DM backups */
   pk_render();     /* populate the Keys list view from the restored database */
   /* Bridge restored callsign->pubkey to the host so the Activity feed/profile
    * show npubs immediately, not only after the next live beacon. */
@@ -3751,6 +3970,10 @@ void module_tick(void) {
       }
     }
   }
+
+  /* NOSTR-relay DM backup: poll the pre-agreed relays for messages addressed to
+   * us (store-and-forward) and deliver/dedup/delete them. Drains every tick. */
+  relay_tick();
 
   /* recurring group bulletins: re-broadcast every 5 min until the period ends */
   if (g_logged || g_ble_on) {

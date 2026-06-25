@@ -881,6 +881,48 @@ uint32_t hal_rns_available(void);
 __attribute__((import_module("hal"), import_name("rns_recv")))
 uint32_t hal_rns_recv(char *out, uint32_t out_cap);
 
+/* ── NOSTR-relay store-and-forward DM backup (kind-4 over Reticulum) ──────── *
+ *
+ * Back up 1:1 messages to up to 3 NOSTR relays reachable over Reticulum. The
+ * host owns the active profile key and does the NOSTR work (BIP-340 signing,
+ * NIP-04 encryption/decryption, publish/query/delete); the wapp supplies the
+ * recipient npub (base64url, as hal_identity_pubkey returns) + plaintext and
+ * orchestrates which relays to use + when to poll/clean up. */
+
+/* Up to 3 reachable relays (their RNS identity hashes, hex) as a JSON array of
+ * strings. Returns bytes written, 0 if none/too small. */
+__attribute__((import_module("hal"), import_name("relay_reachable")))
+uint32_t hal_relay_reachable(char *out, uint32_t out_cap);
+
+/* Publish [text] (plaintext) as a kind-4 (NIP-04) encrypted DM to recipient
+ * [npub] (base64url x-only pubkey), signed by this device's profile key, to each
+ * relay in [relays_json] (a JSON array of relay hashes). [mid] is carried in a
+ * `d` tag so the recipient can dedup the relay copy against the direct copy.
+ * Fire-and-forget; returns 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("relay_dm_send")))
+int32_t hal_relay_dm_send(const char *npub, uint32_t npub_len,
+                          const char *text, uint32_t text_len,
+                          const char *relays_json, uint32_t relays_len,
+                          const char *mid, uint32_t mid_len);
+
+/* Trigger an async fetch of kind-4 DMs addressed to us with created_at >=
+ * [since_sec] from [relays_json] (JSON array of relay hashes). Decrypted results
+ * arrive on the same queue hal_relay_dm_recv drains. Returns 1 if queued. */
+__attribute__((import_module("hal"), import_name("relay_dm_fetch")))
+int32_t hal_relay_dm_fetch(uint32_t since_sec,
+                           const char *relays_json, uint32_t relays_len);
+
+/* Pop the next fetched DM as JSON {"id":hex,"from":base64url,"ts":sec,
+ * "text":plaintext,"mid":id} into out. Returns bytes written, 0 if none. */
+__attribute__((import_module("hal"), import_name("relay_dm_recv")))
+uint32_t hal_relay_dm_recv(char *out, uint32_t out_cap);
+
+/* Recipient-authorized delete of received DMs [ids_json] (JSON array of event
+ * ids) from [relays_json]. Fire-and-forget; returns 1 if queued. */
+__attribute__((import_module("hal"), import_name("relay_dm_drop")))
+int32_t hal_relay_dm_drop(const char *ids_json, uint32_t ids_len,
+                          const char *relays_json, uint32_t relays_len);
+
 /* ── Reticulum visualization/management (read-only) ──────────────────── *
  *
  * The node's view of the Reticulum network, for the "reticulum" wapp to
