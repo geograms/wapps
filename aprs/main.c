@@ -163,6 +163,9 @@ static uint64_t g_ble_last_beacon = 0;
 /* compact BLE senders, defined with the module entry points */
 static void ble_tx_msg(const char *to, const char *text);
 static void ble_tx_pos(double lat, double lon, const char *comment);
+/* Reticulum 1:1 sender (defined after the BLE frame packer); fans the same frame
+ * out to every RNS delivery dest advertised under the recipient's npub. */
+static int rns_tx_msg(const char *to, const char *wire);
 
 /* ── Public-key beacon ───────────────────────────────────────────────────
  * Periodically broadcast this station's public key so peers can map our
@@ -489,6 +492,29 @@ static void u_itoa(unsigned v, char *out) {
   int k = 0; while (j > 0) out[k++] = t[--j]; out[k] = 0;
 }
 
+/* base64url -> bytes (tolerates standard alphabet + padding). Used to decode the
+ * payload of an inbound Reticulum datagram (hal_rns_recv returns it base64url). */
+static int b64v(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '-' || c == '+') return 62;
+  if (c == '_' || c == '/') return 63;
+  return -1;
+}
+static int b64url_decode(const char *in, unsigned char *out, unsigned maxout) {
+  unsigned acc = 0, bits = 0, o = 0;
+  for (const char *p = in; *p; p++) {
+    if (*p == '=' || *p == '\n' || *p == '\r') continue;
+    int v = b64v(*p);
+    if (v < 0) return -1;
+    acc = (acc << 6) | (unsigned)v;
+    bits += 6;
+    if (bits >= 8) { bits -= 8; if (o >= maxout) return -1; out[o++] = (unsigned char)((acc >> bits) & 0xff); }
+  }
+  return (int)o;
+}
+
 /* FNV-1a over convo|from|text — a stable content signature (and the pin key
  * shared between a message and its later repeat so the host can promote it). */
 static unsigned sig_hash(const char *a, const char *b, const char *c) {
@@ -812,7 +838,8 @@ static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
                       double lat, double lon, const char *via,
-                      const char *mid, const char *parent, const char *auth, int enc) {
+                      const char *mid, const char *parent, const char *auth, int enc,
+                      int priv) {
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -829,6 +856,9 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
   s_cat(m, "\"", sizeof(m)); cat_pos(m, sizeof(m), lat, lon);
   cat_thread(m, sizeof(m), mid, parent, auth, enc);
+  /* Private = this message went Reticulum-only (never APRS) — the host tags the
+   * bubble so it's clearly distinct from public APRS traffic. */
+  if (priv) s_cat(m, ",\"private\":true", sizeof(m));
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -1138,6 +1168,109 @@ static void pk_load(void) {
     else { if (ti < 11) ts[ti++] = c; }
   }
 }
+/* ── npub -> {RNS delivery dests} (multi-device), from extended NOSTR beacons
+ * "<npub>|<deliv-hex>". One user may run several devices on one npub (different
+ * RNS dests) — keep them all and send to every one. Dests are routing-only;
+ * confidentiality comes from encrypting to the npub, so a stale/spoofed dest just
+ * yields an undecryptable copy. KV "rnsdest" = "npub=dest=ts;…". ───────────── */
+#define RNS_MAX 96
+#define RNS_TTL 172800   /* 48h: skip a dest not re-beaconed within this window */
+static char g_rns_npub[RNS_MAX][48];
+static char g_rns_dest[RNS_MAX][40];
+static uint64_t g_rns_dts[RNS_MAX];
+static int g_rns_n = 0;
+static char g_rns_scratch[RNS_MAX * 96];
+static void rns_dest_save(void) {
+  g_rns_scratch[0] = 0;
+  for (int i = 0; i < g_rns_n; i++) {
+    char tb[12]; u_itoa((unsigned)g_rns_dts[i], tb);
+    s_cat(g_rns_scratch, g_rns_npub[i], sizeof(g_rns_scratch)); s_cat(g_rns_scratch, "=", sizeof(g_rns_scratch));
+    s_cat(g_rns_scratch, g_rns_dest[i], sizeof(g_rns_scratch)); s_cat(g_rns_scratch, "=", sizeof(g_rns_scratch));
+    s_cat(g_rns_scratch, tb, sizeof(g_rns_scratch)); s_cat(g_rns_scratch, ";", sizeof(g_rns_scratch));
+  }
+  hal_kv_set("rnsdest", 7, g_rns_scratch, s_len(g_rns_scratch));
+}
+static void rns_dest_store(const char *npub, const char *dest) {
+  if (!npub[0] || !dest[0]) return;
+  uint64_t now = hal_time_epoch();
+  for (int i = 0; i < g_rns_n; i++)
+    if (s_eq(g_rns_npub[i], npub) && s_eq(g_rns_dest[i], dest)) { g_rns_dts[i] = now; rns_dest_save(); return; }
+  int slot;
+  if (g_rns_n < RNS_MAX) slot = g_rns_n++;
+  else { slot = 0; for (int i = 1; i < g_rns_n; i++) if (g_rns_dts[i] < g_rns_dts[slot]) slot = i; }
+  s_cpy(g_rns_npub[slot], npub, sizeof(g_rns_npub[0]));
+  s_cpy(g_rns_dest[slot], dest, sizeof(g_rns_dest[0]));
+  g_rns_dts[slot] = now;
+  rns_dest_save();
+}
+static void rns_dest_load(void) {
+  uint32_t n = hal_kv_get("rnsdest", 7, g_rns_scratch, sizeof(g_rns_scratch) - 1);
+  if (n == 0) return;
+  g_rns_scratch[n] = 0;
+  char np[48], de[40], ts[12]; int pi = 0, di = 0, ti = 0, stage = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char c = (i < n) ? g_rns_scratch[i] : ';';
+    if (c == ';') {
+      if (pi > 0 && di > 0 && g_rns_n < RNS_MAX) {
+        np[pi] = 0; de[di] = 0; ts[ti] = 0;
+        s_cpy(g_rns_npub[g_rns_n], np, 48); s_cpy(g_rns_dest[g_rns_n], de, 40);
+        g_rns_dts[g_rns_n] = ti > 0 ? (uint64_t)to_int(ts) : 0; g_rns_n++;
+      }
+      pi = 0; di = 0; ti = 0; stage = 0;
+    } else if (c == '=' && stage < 2) stage++;
+    else if (stage == 0) { if (pi < 47) np[pi++] = c; }
+    else if (stage == 1) { if (di < 39) de[di++] = c; }
+    else { if (ti < 11) ts[ti++] = c; }
+  }
+}
+
+/* ── per-conversation "private (Reticulum-only)" mode. When on, a 1:1 with this
+ * callsign goes ONLY over Reticulum (never APRS-IS/BLE) and the peer's side is
+ * auto-flipped via a ?PRIV control. KV "cpriv" = "CALL;CALL;…". ─────────────── */
+#define CPRIV_MAX 64
+static char g_cpriv[CPRIV_MAX][40];
+static int g_cpriv_n = 0;
+static int convo_is_private(const char *call) {
+  for (int i = 0; i < g_cpriv_n; i++) if (s_eq(g_cpriv[i], call)) return 1;
+  return 0;
+}
+static void cpriv_save(void) {
+  char buf[CPRIV_MAX * 40]; buf[0] = 0;
+  for (int i = 0; i < g_cpriv_n; i++) { s_cat(buf, g_cpriv[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+  hal_kv_set("cpriv", 5, buf, s_len(buf));
+}
+static void cpriv_load(void) {
+  char buf[CPRIV_MAX * 40];
+  uint32_t n = hal_kv_get("cpriv", 5, buf, sizeof(buf) - 1);
+  if (n == 0) return;
+  buf[n] = 0; char c[40]; int ci = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? buf[i] : ';';
+    if (ch == ';') { if (ci > 0 && g_cpriv_n < CPRIV_MAX) { c[ci] = 0; s_cpy(g_cpriv[g_cpriv_n++], c, 40); } ci = 0; }
+    else if (ci < 39) c[ci++] = ch;
+  }
+}
+/* Show/hide the private (off-grid) badge on a conversation row in the host UI. */
+static void convo_priv_emit(const char *call, int on) {
+  char m[120] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+  jesc(m, sizeof(m), call);
+  s_cat(m, "\",\"private\":", sizeof(m));
+  s_cat(m, on ? "true" : "false", sizeof(m));
+  s_cat(m, "}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+static void cpriv_set(const char *call, int on) {
+  if (!call[0] || call[0] == '#') return;
+  int idx = -1;
+  for (int i = 0; i < g_cpriv_n; i++) if (s_eq(g_cpriv[i], call)) { idx = i; break; }
+  if (on && idx < 0) { if (g_cpriv_n >= CPRIV_MAX) return; s_cpy(g_cpriv[g_cpriv_n++], call, 40); cpriv_save(); }
+  else if (!on && idx >= 0) {
+    for (int j = idx; j < g_cpriv_n - 1; j++) s_cpy(g_cpriv[j], g_cpriv[j + 1], 40);
+    g_cpriv_n--; cpriv_save();
+  } else return; /* no change */
+  convo_priv_emit(call, on);
+}
+
 /* ── interaction-scoped pubkey capture ────────────────────────────────────
  * We only persist the public keys of callsigns we actually interact with (chat
  * with, or follow) — not every station whose hourly NOSTR beacon we overhear.
@@ -1184,8 +1317,23 @@ static void peer_note(const char *call) {
  * never shown as a chat message. */
 static int pk_intercept(const char *group, const char *from, const char *text) {
   if (!s_eq(group, "NOSTR")) return 0;
-  if (peer_known(from) || pk_get(from)) pk_store(from, text);   /* interacting -> keep */
-  else pend_set(from, text);                                    /* overheard -> park */
+  /* Extended beacon "<npub>|<rns-deliv-hex>"; legacy form is just "<npub>". The
+   * deliv (if present) is this device's Reticulum address — learn it keyed by
+   * npub so we can also reach this user over Reticulum (and all their devices). */
+  char npub[48] = "", deliv[40] = "";
+  int bar = -1;
+  for (int i = 0; text[i]; i++) if (text[i] == '|') { bar = i; break; }
+  if (bar >= 0) {
+    int n = bar < 47 ? bar : 47;
+    for (int i = 0; i < n; i++) npub[i] = text[i];
+    npub[n] = 0;
+    s_cpy(deliv, text + bar + 1, sizeof(deliv));
+  } else {
+    s_cpy(npub, text, sizeof(npub));
+  }
+  if (deliv[0]) rns_dest_store(npub, deliv);
+  if (peer_known(from) || pk_get(from)) pk_store(from, npub);   /* interacting -> keep */
+  else pend_set(from, npub);                                    /* overheard -> park */
   return 1;
 }
 
@@ -1314,6 +1462,15 @@ static void follower_remove(const char *call) {
 static int follow_intercept(const char *from, const char *text) {
   if (s_eq(text, "?FOLLOW"))   { follower_add(from);    return 1; }
   if (s_eq(text, "?UNFOLLOW")) { follower_remove(from); return 1; }
+  return 0;
+}
+/* Intercept a directed ?PRIV1 / ?PRIV0 control: the peer toggled private
+ * (Reticulum-only) mode for our shared 1:1 — mirror it locally so both sides go
+ * off-APRS together (auto-negotiate). Consumed (never shown as a message). These
+ * arrive only over Reticulum. */
+static int priv_intercept(const char *from, const char *text) {
+  if (s_eq(text, "?PRIV1")) { cpriv_set(from, 1); return 1; }
+  if (s_eq(text, "?PRIV0")) { cpriv_set(from, 0); return 1; }
   return 0;
 }
 
@@ -1509,7 +1666,8 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
    * each distinct message once and recurring bulletins don't pile up or get
    * auto-pinned (that banner was just noise). Our own sends are never dropped. */
   if (rep && s_eq(dir, "in")) return 0;
-  convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc);
+  convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc,
+            (id[0] != '#') && convo_is_private(id));
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
   /* One notification per freshly-delivered INCOMING 1:1 message — fired HERE,
    * after multi-line reassembly + decryption, so a long/signed/encrypted DM
@@ -1569,19 +1727,21 @@ static void add_infohash(char *text, unsigned sz) {
 
 static void do_convo_send(const char *buf) {
   read_config(buf);
-  int net = (g_sock >= 0 && g_logged);
-  if (!net && !g_ble_on) {
-    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
-    return;
-  }
   char id[40] = "", text[400] = "";
   jstr(buf, "conversations_convo", id, sizeof(id));
   jstr(buf, "conversations_input", text, sizeof(text));
   if (!id[0] || !text[0]) return;
-  /* Optionally share our location: with no GPS we use the map pinpoint
-   * (g_lat/g_lon from my_lat/my_lon) and transmit a position beacon so the
-   * recipient can place us on their map. */
-  int loc = jbool(buf, "include_location") && (g_lat != 0 || g_lon != 0);
+  int net = (g_sock >= 0 && g_logged);
+  /* Private (Reticulum-only) 1:1 rides Reticulum alone; a normal message still
+   * needs APRS-IS or BLE up. */
+  int priv = (id[0] != '#') && convo_is_private(id);
+  if (!priv && !net && !g_ble_on) {
+    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+    return;
+  }
+  /* Optionally share our location — never in private mode (a position beacon is an
+   * APRS/BLE broadcast that would leak the off-APRS thread). */
+  int loc = !priv && jbool(buf, "include_location") && (g_lat != 0 || g_lon != 0);
   if (loc) {
     if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", "");
     if (g_ble_on) ble_tx_pos(g_lat, g_lon, "");
@@ -1643,12 +1803,40 @@ static void do_convo_send(const char *buf) {
     /* Public group post → also store as our own NOSTR note (peers can request
      * it later). Not for 1:1 DMs, which are private. */
     host_note_emit(text, gname, "");
+  } else if (priv) {
+    /* Private: Reticulum ONLY — never touch APRS-IS or BLE. */
+    int sent = rns_tx_msg(id, wire);
+    if (sent <= 0) {
+      notify("warning", "No Reticulum address for this contact yet");
+      return;   /* don't echo a private message that reached nobody */
+    }
   } else {
     if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
     if (g_ble_on) ble_tx_msg(id, wire);
+    /* Always-redundant Reticulum backstop: store-and-forward holds it for a peer
+     * who wasn't on APRS at the time; the copy dedups on receipt (best effort). */
+    rns_tx_msg(id, wire);
   }
   convo_deliver(id, "out", g_call, wire, text, "");
-  status(loc ? "TX message + position" : "TX message");
+  status(priv ? "TX (private/Reticulum)" : (loc ? "TX message + position" : "TX message"));
+}
+
+/* Toggle private (Reticulum-only) mode for the open 1:1 conversation. Requires the
+ * contact's npub (so the off-APRS traffic is encrypted to them). Auto-negotiates
+ * by signalling the peer's devices over Reticulum (?PRIV1/?PRIV0) so their side
+ * flips too. */
+static void do_convo_private(const char *buf) {
+  char id[40] = "";
+  jstr(buf, "conversations_convo", id, sizeof(id));
+  if (!id[0] || id[0] == '#') return;       /* 1:1 only */
+  int on = !convo_is_private(id);            /* the button toggles current state */
+  if (on && !pk_get(id)) {
+    notify("warning", "No Reticulum key for this contact yet");
+    return;
+  }
+  cpriv_set(id, on);                          /* persists + emits the lock badge */
+  rns_tx_msg(id, on ? "?PRIV1" : "?PRIV0");  /* auto-negotiate the peer (best effort) */
+  status(on ? "Private mode ON (Reticulum only)" : "Private mode OFF");
 }
 
 /* Change the coverage radius: re-filter by reconnecting APRS-IS, and
@@ -2057,6 +2245,27 @@ static void ble_tx_pos(double lat, double lon, const char *comment) {
   ble_tx_msg("!", t);
 }
 
+/* Send a 1:1 over Reticulum to EVERY device advertising the recipient's npub
+ * (multi-device). Reuses the BLE frame format so the receiver's ble_handle +
+ * content dedup treat it identically to an APRS/BLE copy — a message that also
+ * arrived over APRS-IS/BLE is shown once. [wire] is already ENC1-encrypted to the
+ * npub when known, so a wrong/forged/stale dest gets an undecryptable blob.
+ * Returns the number of devices it queued to (0 = no key/dest → no RNS path). */
+static int rns_tx_msg(const char *to, const char *wire) {
+  const char *npub = pk_get(to);
+  if (!npub || !npub[0]) return 0;
+  char frame[900];
+  ble_pack(frame, sizeof(frame), g_call, to, wire);
+  uint64_t now = hal_time_epoch();
+  int sent = 0;
+  for (int i = 0; i < g_rns_n; i++) {
+    if (!s_eq(g_rns_npub[i], npub)) continue;
+    if (g_rns_dts[i] && now - g_rns_dts[i] > RNS_TTL) continue;   /* stale device */
+    if (hal_rns_send_to(g_rns_dest[i], s_len(g_rns_dest[i]), frame, s_len(frame)) == 1) sent++;
+  }
+  return sent;
+}
+
 /* ── Store-and-forward: BLE iGate mailbox for heard stations ──────────────
  * When this station is online (APRS-IS up) it acts as an iGate for nearby
  * BLE-only stations: it remembers the callsigns it hears over BLE in a
@@ -2245,10 +2454,20 @@ static void igate_load(void) {
  * Receivers map the sender callsign (frame from-field) to the npub text. */
 static void pkbeacon_send(void) {
   if (!g_pubkey_beacon || !g_pubkey[0]) return;
+  /* Advertise "<npub>|<rns-deliv-hex>" so peers can also reach us over Reticulum;
+   * each device adds its own dest under the shared npub. Falls back to npub-only
+   * when the RNS node is down (legacy parsers also read just the npub). */
+  char body[160]; s_cpy(body, g_pubkey, sizeof(body));
+  char deliv[80];
+  uint32_t dn = hal_rns_delivery_dest(deliv, sizeof(deliv) - 1);
+  if (dn > 0 && dn < sizeof(deliv)) {
+    deliv[dn] = 0;
+    s_cat(body, "|", sizeof(body)); s_cat(body, deliv, sizeof(body));
+  }
   if (g_sock >= 0 && g_logged)
-    aprs_send_bulletin_multi(g_sock, g_call, PKBEACON_GROUP, g_pubkey, APRS_MAX_MSG_LEN);
+    aprs_send_bulletin_multi(g_sock, g_call, PKBEACON_GROUP, body, APRS_MAX_MSG_LEN);
   if (g_ble_on)
-    ble_tx_msg("#" PKBEACON_GROUP, g_pubkey);
+    ble_tx_msg("#" PKBEACON_GROUP, body);
   g_last_pkbeacon = hal_time_epoch();
 }
 
@@ -2626,6 +2845,7 @@ static void route_frame(const char *line) {
         /* ?FOLLOW / ?UNFOLLOW notifications are control traffic — record the
          * follower and keep them off the Live tab / chat / notifications. */
         if (amine && follow_intercept(p.from, p.text)) return;
+        if (amine && priv_intercept(p.from, p.text)) return;
         /* A bare signature line is a continuation fragment, not a message:
          * keep it off the Live tab + notifications; da_ reassembles it. */
         int sigln = is_sig_line(p.text);
@@ -3209,6 +3429,7 @@ static void ble_handle(const char *compact, int rssi) {
     }
     /* Follow notifications are control traffic, not chat (see route_frame). */
     if (amine && follow_intercept(from, text)) return;
+    if (amine && priv_intercept(from, text)) return;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
@@ -3268,6 +3489,8 @@ void module_init(void) {
   igate_load();    /* restore iGate (BLE ↔ APRS-IS bridge) on/off (default on) */
   blockhide_load(); /* restore local block list + hidden-message keys */
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
+  rns_dest_load(); /* restore npub -> {RNS delivery dests} (Reticulum addressing) */
+  cpriv_load();    /* restore which 1:1 conversations are private (Reticulum-only) */
   pk_render();     /* populate the Keys list view from the restored database */
   /* Bridge restored callsign->pubkey to the host so the Activity feed/profile
    * show npubs immediately, not only after the next live beacon. */
@@ -3351,6 +3574,26 @@ void module_tick(void) {
         ble_tx_pos(g_lat, g_lon, "");   /* keep it short to fit legacy adverts */
         g_ble_last_beacon = now;
       }
+    }
+  }
+
+  /* Drain inbound Reticulum datagrams (1:1 backstop + private-mode messages +
+   * ?PRIV controls). Independent of APRS-IS/BLE. The payload IS a BLE frame, so
+   * ble_handle parses + dedups it exactly like a BLE/APRS copy — shown once. */
+  {
+    static char env[1200];
+    static char payb64[800];
+    unsigned char frame[700];
+    for (int guard = 0; guard < 20; guard++) {
+      if (hal_rns_available() == 0) break;
+      uint32_t n = hal_rns_recv(env, sizeof(env) - 1);
+      if (n == 0) break;
+      env[n] = 0;
+      if (!jstr(env, "payload", payb64, sizeof(payb64))) continue;
+      int fn = b64url_decode(payb64, frame, sizeof(frame) - 1);
+      if (fn <= 0) continue;
+      frame[fn] = 0;
+      ble_handle((const char *)frame, 0);   /* rssi 0 — no RF signal over RNS */
     }
   }
 
@@ -3462,6 +3705,7 @@ void module_handle_event(void) {
     status(g_auto ? "Auto-beacon ON" : "Auto-beacon OFF");
     notify("info", g_auto ? "Auto-beacon enabled" : "Auto-beacon disabled");
   } else if (s_eq(cmd, "conversations_send")) do_convo_send(buf);
+  else if (s_eq(cmd, "conversations_private")) do_convo_private(buf);
   else if (s_eq(cmd, "conversations_hide")) do_convo_hide(buf);
   else if (s_eq(cmd, "conversations_block")) do_convo_block(buf);
   else if (s_eq(cmd, "conversations_close")) do_convo_close(buf);

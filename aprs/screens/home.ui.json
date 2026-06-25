@@ -28,6 +28,7 @@
           { "$": "action", "name": "add_group", "icon": "add", "slot": "list", "tip": "Add a group" },
           { "$": "action", "name": "new_chat", "icon": "edit", "slot": "list", "tip": "New message" },
           { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
+          { "$": "action", "name": "conversations_private", "icon": "lock", "slot": "room", "tip": "Private (Reticulum only) — keep this conversation off APRS" },
           { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false, "localOnly": true }
         ]
       }
