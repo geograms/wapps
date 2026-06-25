@@ -1698,6 +1698,11 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
       }
     }
   }
+  /* A relay-delivered DM (via "RLY") arrives already-decrypted: the host did the
+   * NIP-04 decryption AND verified the kind-4 BIP-340 signature before handing it
+   * to us (forgeries are dropped host-side). Reflect that so it shows the same
+   * encrypted + verified badges as a directly-delivered signed ENC1 message. */
+  if (s_eq(via, "RLY")) { enc = 1; s_cpy(auth, "verified", sizeof(auth)); }
 
   if (id[0] == '#') {
     /* A like vote ("<4hex>:like") is not a chat message: register the reaction

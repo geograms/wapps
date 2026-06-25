@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.aprs",
-  "version":         "0.2.73",
+  "version":         "0.2.74",
   "kind":            "app",
   "title":           "APRS",
   "description":     "APRS station - map, messenger, beacons over APRS-IS.",
