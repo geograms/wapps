@@ -3658,7 +3658,11 @@ static void do_ping(const char *buf) {
   status("TX ping");
 }
 
-static void ble_handle(const char *compact, int rssi) {
+/* via = the transport this frame actually arrived on ("BLE" for Bluetooth, "RET"
+ * for a Reticulum datagram over the internet). The RNS path reuses the BLE frame
+ * FORMAT but must NOT be mislabelled as Bluetooth, so the caller passes the real
+ * transport and we tag every delivered copy with it. */
+static void ble_handle(const char *compact, int rssi, const char *via) {
   char from[16] = "", to[24] = "", text[256] = "";
   int seg = 0, fi = 0, ti = 0, xi = 0;
   for (const char *q = compact; *q; q++) {
@@ -3723,15 +3727,15 @@ static void ble_handle(const char *compact, int rssi) {
     if (comment[0]) {
       char meta[24] = ""; distance_to(lat, lon, meta, sizeof(meta));
       if (!geo_dup(from, comment))
-        chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon, "BLE");
+        chat_append("geochat", "", "in", from, comment, "pos", 0, meta, lat, lon, via);
       if (is_following(from)) {
         const char *c = comment;
-        if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; if (c[0]) activity_capture(from, "", c, "BLE"); }
-        else { char t[300]; s_cpy(t, "status: ", sizeof(t)); s_cat(t, c, sizeof(t)); activity_capture(from, "", t, "BLE"); }
+        if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; if (c[0]) activity_capture(from, "", c, via); }
+        else { char t[300]; s_cpy(t, "status: ", sizeof(t)); s_cat(t, c, sizeof(t)); activity_capture(from, "", t, via); }
       }
     }
-  } else if (to[0] == '#') {              /* group bulletin over BLE (in range = local) */
-    deliver_bulletin(to + 1, from, text, 1, "BLE");
+  } else if (to[0] == '#') {              /* group bulletin (in range/local for BLE) */
+    deliver_bulletin(to + 1, from, text, 1, via);
     /* iGate BLE → APRS-IS: re-originate the bulletin under the sender's
      * callsign with a qAR q-construct (we are the gateway). A clean RF-gated
      * path is essential — a TCPIP* path makes APRS-IS treat it as a loop and
@@ -3745,11 +3749,11 @@ static void ble_handle(const char *compact, int rssi) {
     char meta[24] = ""; double slat = 0, slon = 0;
     if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
     if (!geo_dup(from, text))
-      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
+      chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, via);
     if (is_following(from)) {
       const char *c = text;
       if (c[0] == '>' && c[1] == '>') { c += 2; while (*c == ' ') c++; }
-      if (c[0]) activity_capture(from, "", c, "BLE");
+      if (c[0]) activity_capture(from, "", c, via);
     }
     /* Geochat/Live-tab broadcast: shown on the Live tab, no notification. */
   } else {                               /* 1:1 to a callsign */
@@ -3765,12 +3769,12 @@ static void ble_handle(const char *compact, int rssi) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
        * also received directly over APRS-IS dedups (shown once). */
-      da_add(from, text, "BLE");
+      da_add(from, text, via);
     } else {
       char meta[24] = ""; double slat = 0, slon = 0;
       if (pos_get(from, &slat, &slon)) distance_to(slat, slon, meta, sizeof(meta));
       if (!geo_dup(from, text))
-        chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, "BLE");
+        chat_append("geochat", "", "in", from, text, "msg", 0, meta, slat, slon, via);
     }
     /* Notification fires once after reassembly in convo_deliver (not here per
      * BLE frame), so a multi-line/encrypted DM alerts once with readable text. */
@@ -3898,7 +3902,7 @@ void module_tick(void) {
       if (ble_poll(rec, sizeof(rec)) <= 0) break;
       char frame[300]; jstr(rec, "data", frame, sizeof(frame));
       int rssi = 0; { char rv[12]; if (jstr(rec, "rssi", rv, sizeof(rv))) rssi = to_int(rv); }
-      if (frame[0]) ble_handle(frame, rssi);
+      if (frame[0]) ble_handle(frame, rssi, "BLE");   /* real Bluetooth radio */
     }
     if (g_lat != 0 || g_lon != 0) {
       uint64_t now = hal_time_epoch();
@@ -3911,8 +3915,12 @@ void module_tick(void) {
   }
 
   /* Drain inbound Reticulum datagrams (1:1 backstop + private-mode messages +
-   * ?PRIV controls). Independent of APRS-IS/BLE. The payload IS a BLE frame, so
-   * ble_handle parses + dedups it exactly like a BLE/APRS copy — shown once. */
+   * ?PRIV controls). Independent of APRS-IS/BLE. The payload reuses the BLE frame
+   * FORMAT, so ble_handle parses + dedups it exactly like a BLE/APRS copy — shown
+   * once — but it arrived over the internet via Reticulum, so it is tagged "RET"
+   * (NOT "BLE": no Bluetooth radio was involved). If the same frame also arrives
+   * over real Bluetooth, whichever copy lands first wins the dedup and sets the
+   * tag, so a "[BLE]" tag now means it genuinely came over Bluetooth. */
   {
     static char env[1200];
     static char payb64[800];
@@ -3926,7 +3934,7 @@ void module_tick(void) {
       int fn = b64url_decode(payb64, frame, sizeof(frame) - 1);
       if (fn <= 0) continue;
       frame[fn] = 0;
-      ble_handle((const char *)frame, 0);   /* rssi 0 — no RF signal over RNS */
+      ble_handle((const char *)frame, 0, "RET");   /* rssi 0 — Reticulum over internet, no RF */
     }
   }
 
