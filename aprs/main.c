@@ -648,6 +648,44 @@ static void seen_add(unsigned h) {
   g_seen[oldest].h = h; g_seen[oldest].t = now;   /* all fresh: drop oldest */
 }
 
+/* Persistent dedup ring for relay-backed messages. The per-message id (rmid,
+ * embedded in the encrypted plaintext) is remembered ACROSS restarts so a relay
+ * copy fetched after the directly-delivered copy — possibly in a later session,
+ * after the in-memory g_seen ring was lost — doesn't show twice. Stored as a
+ * space-joined ring in KV "midseen". */
+#define MIDSEEN_MAX 128
+static char g_midseen[MIDSEEN_MAX][12];
+static int g_midseen_n = 0;     /* entries in use (<= MIDSEEN_MAX) */
+static int g_midseen_head = 0;  /* ring write cursor once full */
+static int midseen_has(const char *m) {
+  if (!m[0]) return 0;
+  for (int i = 0; i < g_midseen_n; i++) if (s_eq(g_midseen[i], m)) return 1;
+  return 0;
+}
+static void midseen_save(void) {
+  char b[MIDSEEN_MAX * 12]; b[0] = 0;
+  for (int i = 0; i < g_midseen_n; i++) { s_cat(b, g_midseen[i], sizeof(b)); s_cat(b, " ", sizeof(b)); }
+  hal_kv_set("midseen", 7, b, s_len(b));
+}
+static void midseen_add(const char *m) {
+  if (!m[0] || midseen_has(m)) return;
+  if (g_midseen_n < MIDSEEN_MAX) s_cpy(g_midseen[g_midseen_n++], m, 12);
+  else { s_cpy(g_midseen[g_midseen_head], m, 12); g_midseen_head = (g_midseen_head + 1) % MIDSEEN_MAX; }
+  midseen_save();
+}
+static void midseen_load(void) {
+  char b[MIDSEEN_MAX * 12];
+  uint32_t n = hal_kv_get("midseen", 7, b, sizeof(b) - 1);
+  if (n == 0) return;
+  b[n] = 0; char m[12]; int k = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char c = (i < n) ? b[i] : ' ';
+    if (c == ' ') { if (k > 0 && g_midseen_n < MIDSEEN_MAX) { m[k] = 0; s_cpy(g_midseen[g_midseen_n++], m, 12); } k = 0; }
+    else if (k < 11) m[k++] = c;
+  }
+  g_midseen_head = g_midseen_n % MIDSEEN_MAX;
+}
+
 /* Separate raw-frame dedup (cross-transport + relay loop guard), kept apart
  * from the conversation seen-ring above so it can't evict pin-detection keys.
  * Time-windowed: a frame is suppressed for FSEEN_WINDOW after it is first seen,
@@ -1691,8 +1729,12 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   if (s_eq(dir, "in") && pos_get(from, &lat, &lon)) {
     distance_to(lat, lon, meta, sizeof(meta));
   }
-  int rep = seen_has(h);
-  if (!rep) seen_add(h);
+  /* Relay-backed messages dedup on the persistent rmid ring (survives restarts,
+   * so a late relay copy of an already-shown direct message is dropped); all
+   * others use the in-memory content ring. */
+  int rep;
+  if (rmid[0]) { rep = midseen_has(rmid); if (!rep) midseen_add(rmid); }
+  else { rep = seen_has(h); if (!rep) seen_add(h); }
   /* A repeated INCOMING message (direct OR a recurring bulletin) is a duplicate
    * — dual-path delivery (APRS-IS + a BLE iGate), a resend, or a station
    * re-broadcasting the same bulletin on a schedule. Drop it so the chat shows
@@ -3776,6 +3818,7 @@ void module_init(void) {
   rns_dest_load(); /* restore npub -> {RNS delivery dests} (Reticulum addressing) */
   cpriv_load();    /* restore which 1:1 conversations are private (Reticulum-only) */
   pollrelay_load(); /* restore NOSTR relays peers told us to poll for DM backups */
+  midseen_load();   /* restore the persistent relay-message dedup ring */
   pk_render();     /* populate the Keys list view from the restored database */
   /* Bridge restored callsign->pubkey to the host so the Activity feed/profile
    * show npubs immediately, not only after the next live beacon. */
