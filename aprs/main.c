@@ -1829,6 +1829,8 @@ static void do_convo_private(const char *buf) {
   char id[40] = "";
   jstr(buf, "conversations_convo", id, sizeof(id));
   if (!id[0] || id[0] == '#') return;       /* 1:1 only */
+  peer_note(id);                             /* opting in is an interaction: promote a key
+                                                we only overheard (parked) over RNS/APRS */
   int on = !convo_is_private(id);            /* the button toggles current state */
   if (on && !pk_get(id)) {
     notify("warning", "No Reticulum key for this contact yet");
@@ -2097,9 +2099,15 @@ static void prompt_group(void) {
   hal_msg_send(m, s_len(m));
 }
 static void prompt_newchat(void) {
+  /* Full-screen panel; offer Private (Reticulum-only) from the start so a 1:1 can
+   * begin off-APRS. The toggle comes back as prompt_toggle (ignored for #groups,
+   * and only honoured when we already know the contact's npub). */
   const char *m = "{\"type\":\"ui.prompt\",\"id\":\"newchat\",\"title\":\"New message\","
+    "\"fullscreen\":true,"
     "\"body\":\"Enter a callsign for a 1:1 chat, or #group.\","
-    "\"input\":{\"hint\":\"Callsign or #group\",\"max\":20},\"confirm\":\"Open\"}";
+    "\"input\":{\"hint\":\"Callsign or #group\",\"max\":20},"
+    "\"toggle\":{\"label\":\"Private (Reticulum only)\",\"default\":false},"
+    "\"confirm\":\"Open\"}";
   hal_msg_send(m, s_len(m));
 }
 static void prompt_recur(const char *convo) {
@@ -2178,6 +2186,14 @@ static void do_prompt_result(const char *buf) {
     } else if (src[0]) {
       char id[24]; int j = 0; for (int i = 0; src[i] && j < 23; i++) id[j++] = up(src[i]); id[j] = 0;
       convo_touch(id, "", 1);
+      /* Start private straight away if the user asked and we already hold the
+       * contact's npub (promote a parked key first). Otherwise open normally and
+       * note that private needs the key — they can toggle it once it arrives. */
+      if (jbool(buf, "prompt_toggle")) {
+        peer_note(id);
+        if (pk_get(id)) { cpriv_set(id, 1); rns_tx_msg(id, "?PRIV1"); }
+        else notify("warning", "Opened — Private needs this contact's Reticulum key first");
+      }
     }
   } else if (s_eq(pid, "group")) {
     char g[8]; norm_group(val[0] ? val : inp, g);
@@ -2468,6 +2484,17 @@ static void pkbeacon_send(void) {
     aprs_send_bulletin_multi(g_sock, g_call, PKBEACON_GROUP, body, APRS_MAX_MSG_LEN);
   if (g_ble_on)
     ble_tx_msg("#" PKBEACON_GROUP, body);
+  /* Also broadcast over Reticulum. APRS-IS only carries the beacon to stations
+   * whose area/budlist filter overlaps ours — two users on different networks
+   * with no shared filter would never learn each other's npub/deliv and could
+   * never start an encrypted/private chat. The RNS broadcast crosses NATs via
+   * the public hubs; the receiver's RNS drain feeds this exact frame back into
+   * ble_handle -> deliver_bulletin -> pk_intercept, same as the BLE path. */
+  {
+    char frame[220];
+    ble_pack(frame, sizeof(frame), g_call, "#" PKBEACON_GROUP, body);
+    hal_rns_broadcast(frame, s_len(frame));
+  }
   g_last_pkbeacon = hal_time_epoch();
 }
 
