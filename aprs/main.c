@@ -2781,7 +2781,12 @@ static void ra_flush(void) {
  * delivered as separate plain messages (no spurious merging of normal chat). */
 #define DA_MAX 6
 #define DA_PARTS 16        /* an encrypted message can span ~10 APRS lines */
-typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][72]; int n; uint64_t t; } da_t;
+/* part[] holds each received line. APRS-IS/BLE split a long message into ≤67-char
+ * lines (each fits easily), but a Reticulum datagram carries the WHOLE wire
+ * ("ENC1:<blob> ~<60-char sig>", ~110+ chars) in ONE frame — so a part must be
+ * big enough to hold a full single-frame wire, else it is truncated and the
+ * signature/ciphertext is corrupted (decrypt fails). 256 covers it. */
+typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][256]; int n; uint64_t t; } da_t;
 static da_t g_da[DA_MAX];
 static void da_emit_one(const char *from, const char *full, const char *via) {
   char prev[256], sg[80]; const char *pv = full;
@@ -3390,13 +3395,13 @@ static void do_ping(const char *buf) {
 }
 
 static void ble_handle(const char *compact, int rssi) {
-  char from[16] = "", to[24] = "", text[200] = "";
+  char from[16] = "", to[24] = "", text[256] = "";
   int seg = 0, fi = 0, ti = 0, xi = 0;
   for (const char *q = compact; *q; q++) {
     if (*q == BLE_SEP) { seg++; continue; }
     if (seg == 0) { if (fi < 15) from[fi++] = *q; }
     else if (seg == 1) { if (ti < 23) to[ti++] = *q; }
-    else { if (xi < 199) text[xi++] = *q; }
+    else { if (xi < 255) text[xi++] = *q; }
   }
   from[fi] = 0; to[ti] = 0; text[xi] = 0;
   if (!from[0]) return;
