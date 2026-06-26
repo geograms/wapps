@@ -923,6 +923,27 @@ __attribute__((import_module("hal"), import_name("relay_dm_drop")))
 int32_t hal_relay_dm_drop(const char *ids_json, uint32_t ids_len,
                           const char *relays_json, uint32_t relays_len);
 
+/* Publish OUR identity (callsign -> npub + Reticulum delivery/propagation dests)
+ * to [relays_json] as a signed, replaceable kind-30078 event, so peers can
+ * resolve us by callsign. Fire-and-forget; returns 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("relay_identity_publish")))
+int32_t hal_relay_identity_publish(const char *callsign, uint32_t callsign_len,
+                                   const char *deliv, uint32_t deliv_len,
+                                   const char *prop, uint32_t prop_len,
+                                   const char *relays_json, uint32_t relays_len);
+
+/* Trigger an async resolve of [callsign] -> npub by querying [relays_json] for
+ * the identity event. The result (if any) lands on the queue
+ * hal_relay_resolve_recv drains. Returns 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("relay_resolve")))
+int32_t hal_relay_resolve(const char *callsign, uint32_t callsign_len,
+                          const char *relays_json, uint32_t relays_len);
+
+/* Pop the next resolution as JSON {callsign, npub(base64url), deliv, prop}.
+ * Returns bytes written, 0 if none queued or the buffer is too small. */
+__attribute__((import_module("hal"), import_name("relay_resolve_recv")))
+uint32_t hal_relay_resolve_recv(char *out, uint32_t out_cap);
+
 /* ── Reticulum visualization/management (read-only) ──────────────────── *
  *
  * The node's view of the Reticulum network, for the "reticulum" wapp to

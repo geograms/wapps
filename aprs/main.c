@@ -1821,6 +1821,23 @@ static char g_pollrelay[POLLRELAY_MAX][72]; static int g_pollrelay_n = 0; /* rel
 static char g_rly_told[CPRIV_MAX][16]; static int g_rly_told_n = 0;     /* callsigns told our ?RLY (session) */
 static uint64_t g_last_relaypoll = 0;
 
+/* Cold-start 1:1: when sending to a callsign whose key we don't know yet, the
+ * message goes out as PUBLIC APRS and we ask the relays to resolve callsign→npub
+ * (hal_relay_resolve). The text waits here until a resolution arrives (or expires)
+ * so we can then place an encrypted backup at the relays. */
+#define PSEND_MAX 8
+#define RESOLVE_TTL 90                 /* seconds to await a callsign→npub resolve */
+static char g_psend_call[PSEND_MAX][16];
+static char g_psend_text[PSEND_MAX][400];
+static uint64_t g_psend_ts[PSEND_MAX]; static int g_psend_n = 0;
+static char g_pubnote[CPRIV_MAX][16]; static int g_pubnote_n = 0; /* convos shown the "public only" note */
+
+/* Case-insensitive callsign compare. */
+static int s_eq_ci(const char *a, const char *b) {
+  int i = 0; for (; a[i] && b[i]; i++) if (up(a[i]) != up(b[i])) return 0;
+  return a[i] == b[i];
+}
+
 /* Build a JSON array ["h1","h2",…] from [arr][n]. */
 static void relays_json(char arr[][72], int n, char *out, unsigned cap) {
   out[0] = '['; out[1] = 0;
@@ -1974,6 +1991,119 @@ static void relay_tick(void) {
   hal_relay_dm_fetch(0, rj, s_len(rj)); /* since=0: DROP + rmid-dedup bound the set */
 }
 
+/* A muted, centered status line shown inside conversation [id] (not a real
+ * message). Used to tell the user e.g. that a send went out public-only. */
+static void convo_sysnote(const char *id, const char *text) {
+  char t[8]; fmt_time(t);
+  char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
+  jesc(m, sizeof(m), id);
+  s_cat(m, "\",\"dir\":\"in\",\"from\":\"\",\"sys\":true,\"text\":\"", sizeof(m));
+  jesc(m, sizeof(m), text);
+  s_cat(m, "\",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Show the "public only" note at most once per conversation. */
+static int pubnote_once(const char *call) {
+  for (int i = 0; i < g_pubnote_n; i++) if (s_eq(g_pubnote[i], call)) return 0;
+  if (g_pubnote_n < CPRIV_MAX) s_cpy(g_pubnote[g_pubnote_n++], call, 16);
+  return 1;
+}
+
+/* Queue a public send awaiting a callsign→npub resolution (ring, evict oldest). */
+static void pendsend_add(const char *call, const char *text) {
+  if (!call[0]) return;
+  int slot = (g_psend_n < PSEND_MAX) ? g_psend_n++ : 0;
+  s_cpy(g_psend_call[slot], call, sizeof(g_psend_call[0]));
+  s_cpy(g_psend_text[slot], text, sizeof(g_psend_text[0]));
+  g_psend_ts[slot] = hal_time_epoch();
+}
+
+/* Place an encrypted (NIP-04 kind-4) store-and-forward backup of [text] for
+ * [call] at our relays (so the recipient can pick it up later), announce our
+ * relays to them, and push a direct encrypted Reticulum copy now that the key is
+ * known. Requires pk_get(call). Mirrors do_convo_send's encrypted 1:1 path; the
+ * shared rmid lets the receiver dedup the relay + direct copies. */
+static void deliver_1to1_backup(const char *call, const char *text) {
+  const char *np = pk_get(call);
+  if (!np || !np[0]) return;
+  char rmid[12]; unsigned char rb[4]; hal_crypto_random((char *)rb, 4);
+  static const char hx[] = "0123456789abcdef";
+  for (int i = 0; i < 4; i++) { rmid[i*2] = hx[rb[i] >> 4]; rmid[i*2+1] = hx[rb[i] & 15]; }
+  rmid[8] = 0;
+  char relaypt[680]; int k = 0; relaypt[k++] = '\x01';
+  for (int i = 0; rmid[i]; i++) relaypt[k++] = rmid[i];
+  relaypt[k++] = '\x02';
+  for (int i = 0; text[i] && k < (int)sizeof(relaypt) - 1; i++) relaypt[k++] = text[i];
+  relaypt[k] = 0;
+  if (g_myrelay_n == 0) relay_pick();
+  if (g_myrelay_n > 0) {
+    relay_announce_to(call);
+    char rj[RELAY_MAX * 80 + 16]; relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+    hal_relay_dm_send(np, s_len(np), relaypt, s_len(relaypt), rj, s_len(rj), rmid, s_len(rmid));
+  }
+  /* Direct, encrypted Reticulum copy (the dest came with the resolution). */
+  char ct[640];
+  uint32_t cn = hal_encrypt(np, s_len(np), relaypt, s_len(relaypt), ct, sizeof(ct) - 1);
+  if (cn > 0 && cn < sizeof(ct)) {
+    ct[cn] = 0;
+    char core[700]; s_cpy(core, "ENC1:", sizeof(core)); s_cat(core, ct, sizeof(core));
+    char wire[800]; s_cpy(wire, core, sizeof(wire));
+    char canon[720]; sig_canon(canon, sizeof(canon), g_call, core);
+    char sg[80]; uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
+    if (sn > 0 && sn < sizeof(sg)) { sg[sn] = 0; s_cat(wire, " ~", sizeof(wire)); s_cat(wire, sg, sizeof(wire)); }
+    rns_tx_msg(call, wire);
+  }
+}
+
+/* Remove pending-send entry [i] (compacting the ring). */
+static void pendsend_remove(int i) {
+  for (int j = i + 1; j < g_psend_n; j++) {
+    s_cpy(g_psend_call[j-1], g_psend_call[j], 16);
+    s_cpy(g_psend_text[j-1], g_psend_text[j], 400);
+    g_psend_ts[j-1] = g_psend_ts[j];
+  }
+  g_psend_n--;
+}
+
+/* Drain async callsign→npub resolutions (from hal_relay_resolve). For each: store
+ * the key + Reticulum dest, then flush any queued public sends to that callsign as
+ * encrypted relay backups. Also expires pending sends that were never resolved. */
+static void resolve_drain(void) {
+  char buf[400];
+  for (int guard = 0; guard < 8; guard++) {
+    uint32_t n = hal_relay_resolve_recv(buf, sizeof(buf) - 1);
+    if (n == 0) break;
+    buf[n] = 0;
+    char call[16] = "", npub[48] = "", deliv[40] = "", prop[40] = "";
+    jstr(buf, "callsign", call, sizeof(call));
+    jstr(buf, "npub", npub, sizeof(npub));
+    jstr(buf, "deliv", deliv, sizeof(deliv));
+    jstr(buf, "prop", prop, sizeof(prop));
+    if (!call[0] || !npub[0]) continue;
+    /* Prefer the conversation's own spelling of the callsign when we queued a send. */
+    const char *store_call = call;
+    for (int i = 0; i < g_psend_n; i++) if (s_eq_ci(g_psend_call[i], call)) { store_call = g_psend_call[i]; break; }
+    pk_store(store_call, npub);
+    if (deliv[0]) rns_dest_store(npub, deliv, prop);
+    int found = 0;
+    for (int i = 0; i < g_psend_n; ) {
+      if (s_eq_ci(g_psend_call[i], call)) { deliver_1to1_backup(g_psend_call[i], g_psend_text[i]); found++; pendsend_remove(i); }
+      else i++;
+    }
+    if (found) {
+      char note[96]; s_cpy(note, "Found ", sizeof(note)); s_cat(note, store_call, sizeof(note));
+      s_cat(note, "'s key - message also queued at relays for delivery.", sizeof(note));
+      convo_sysnote(store_call, note);
+    }
+  }
+  uint64_t now = hal_time_epoch();
+  for (int i = 0; i < g_psend_n; ) {
+    if (now - g_psend_ts[i] > RESOLVE_TTL) pendsend_remove(i); else i++;
+  }
+}
+
 static void do_convo_send(const char *buf) {
   read_config(buf);
   char id[40] = "", text[400] = "";
@@ -1985,8 +2115,14 @@ static void do_convo_send(const char *buf) {
    * needs APRS-IS or BLE up. */
   int priv = (id[0] != '#') && convo_is_private(id);
   if (!priv && !net && !g_ble_on) {
-    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
-    return;
+    /* No live radio path. We can still try the NOSTR-relay backstop (resolve the
+     * recipient's key, then queue an encrypted copy at relays for later pickup);
+     * only give up entirely if no relays are reachable either. */
+    if (g_myrelay_n == 0) relay_pick();
+    if (g_myrelay_n == 0 || id[0] == '#') {
+      notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+      return;
+    }
   }
   /* Optionally share our location — never in private mode (a position beacon is an
    * APRS/BLE broadcast that would leak the off-APRS thread). */
@@ -2079,6 +2215,23 @@ static void do_convo_send(const char *buf) {
     /* Always-redundant Reticulum backstop: store-and-forward holds it for a peer
      * who wasn't on APRS at the time; the copy dedups on receipt (best effort). */
     rns_tx_msg(id, wire);
+    /* Unknown recipient key: the message went out only as PUBLIC (unencrypted)
+     * APRS/BLE. Tell the user in-chat, and ask the NOSTR relays to resolve the
+     * callsign→npub so we can ALSO queue an encrypted backup for later pickup. */
+    if (!encrypted && id[0] != '#') {
+      if (g_myrelay_n == 0) relay_pick();
+      if (g_myrelay_n > 0) {
+        if (pubnote_once(id))
+          convo_sysnote(id, "Key unknown - sent as a public APRS message. "
+                            "Checking NOSTR relays to deliver privately too.");
+        char rj[RELAY_MAX * 80 + 16]; relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+        hal_relay_resolve(id, s_len(id), rj, s_len(rj));
+        pendsend_add(id, text);
+      } else if (pubnote_once(id)) {
+        convo_sysnote(id, "Key unknown - sent as a public APRS message "
+                          "(no relays reachable for a private backup).");
+      }
+    }
   }
   /* NOSTR-relay store-and-forward backup: also publish this DM (kind-4 NIP-04)
    * to up to 3 reachable relays and tell the peer where to poll. Only when
@@ -2764,7 +2917,7 @@ static void pkbeacon_send(void) {
    * each device adds its own dest under the shared npub. Falls back to npub-only
    * when the RNS node is down (legacy parsers also read just the npub). */
   char body[200]; s_cpy(body, g_pubkey, sizeof(body));
-  char deliv[80], prop[80];
+  char deliv[80] = "", prop[80] = "";
   uint32_t dn = hal_rns_delivery_dest(deliv, sizeof(deliv) - 1);
   if (dn > 0 && dn < sizeof(deliv)) {
     deliv[dn] = 0;
@@ -2791,6 +2944,17 @@ static void pkbeacon_send(void) {
     char frame[220];
     ble_pack(frame, sizeof(frame), g_call, "#" PKBEACON_GROUP, body);
     hal_rns_broadcast(frame, s_len(frame));
+  }
+  /* Also publish a queryable callsign→npub(+RNS dests) identity to the reachable
+   * NOSTR relays, so a peer can resolve us by callsign even if it never heard this
+   * beacon — the basis for cold-start 1:1 (see do_convo_send / resolve_drain). */
+  if (deliv[0]) {
+    if (g_myrelay_n == 0) relay_pick();
+    if (g_myrelay_n > 0) {
+      char rj[RELAY_MAX * 80 + 16]; relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+      hal_relay_identity_publish(g_call, s_len(g_call), deliv, s_len(deliv),
+                                 prop, s_len(prop), rj, s_len(rj));
+    }
   }
   g_last_pkbeacon = hal_time_epoch();
 }
@@ -4030,6 +4194,9 @@ void module_tick(void) {
   /* NOSTR-relay DM backup: poll the pre-agreed relays for messages addressed to
    * us (store-and-forward) and deliver/dedup/delete them. Drains every tick. */
   relay_tick();
+  /* Cold-start 1:1: drain callsign→npub resolutions and flush queued public
+   * sends as encrypted relay backups. */
+  resolve_drain();
 
   /* recurring group bulletins: re-broadcast every 5 min until the period ends */
   if (g_logged || g_ble_on) {
