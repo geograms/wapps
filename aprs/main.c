@@ -1960,11 +1960,17 @@ static void relay_drain(void) {
     uint32_t n = hal_relay_dm_recv(buf, sizeof(buf) - 1);
     if (n == 0) break;
     buf[n] = 0;
-    char id[80] = "", from[48] = "", text[700] = "";
+    char id[80] = "", from[48] = "", text[700] = "", cs[24] = "";
     if (!jstr(buf, "id", id, sizeof(id))) continue;
     jstr(buf, "from", from, sizeof(from));
     jstr(buf, "text", text, sizeof(text));
+    jstr(buf, "callsign", cs, sizeof(cs));
+    /* Prefer a known callsign for this npub; otherwise fall back to the derived
+     * one the host supplied, and remember the key — so a relay-delivered message
+     * still arrives (and decrypts) from a sender we've never heard, e.g. when
+     * APRS-IS was down and no public copy taught us their callsign. */
     const char *call = pk_rev(from);
+    if ((!call || !call[0]) && cs[0]) { pk_store(cs, from); call = pk_rev(from); }
     if (call && call[0]) convo_deliver(call, "in", call, text, text, "RLY");
     if (idn) s_cat(ids, ",", sizeof(ids));
     s_cat(ids, "\"", sizeof(ids)); s_cat(ids, id, sizeof(ids)); s_cat(ids, "\"", sizeof(ids));
