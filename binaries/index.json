@@ -112,6 +112,7 @@
   {"file":"install/install-1.3.3.wapp","id":"tools.geogram.install","version":"1.3.3","size":30344,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
   {"file":"install/install-1.3.4.wapp","id":"tools.geogram.install","version":"1.3.4","size":30588,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
   {"file":"install/install-1.3.5.wapp","id":"tools.geogram.install","version":"1.3.5","size":31385,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
+  {"file":"install/install-1.3.6.wapp","id":"tools.geogram.install","version":"1.3.6","size":31386,"title":"Wapp Store","description":"Browse, install and update wapps from any catalog."},
   {"file":"maps/maps-1.0.1.wapp","id":"tools.geogram.maps","version":"1.0.1","size":13128,"title":"Maps","description":"Satellite maps with offline tile cache."},
   {"file":"movies/movies-0.1.2.wapp","id":"tools.geogram.movies","version":"0.1.2","size":8792,"title":"Movies","description":"Local video player with optional subtitle support."},
   {"file":"mp4player/mp4player-1.0.0.wapp","id":"tools.geogram.mp4player","version":"1.0.0","size":139016,"title":"MP4 Player","description":"Plays MP4 / H.264 video. The decoder runs in WebAssembly inside the wapp — no codec ships in the host."},
