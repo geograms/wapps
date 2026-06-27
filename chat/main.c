@@ -2518,6 +2518,7 @@ static void norm_group(const char *src, char *out) {
 static const char *PRESET_GROUPS[] = {
   "ALL", "DEV", "MISC", "TECH", "FUN", "WARN", "INFO", "NEWS", "TRADE",
   "WX", "EMCOM", "ARES", "NET", "DX", "EVENT", "HELP", "SOS",
+  "CHILL", "MEMES", "HELLO", "BIZ", "SPAM",
   /* 4chan-style boards */
   "B", "POL", "FIN", "G"
 };
@@ -2960,17 +2961,56 @@ static void groups_save(void) {
     if (g_convo_ids[i][0] == '#') { s_cat(buf, g_convo_ids[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
   hal_kv_set("groups", 6, buf, s_len(buf));
 }
+/* Ensure a conversation ROW exists in the host's Messages list (without bumping
+ * it to the top or selecting it), so subscribed groups show every time the page
+ * opens — the page runs its own engine, so module_init/groups_load re-runs with
+ * the page listening, and the host persists what it receives. Only title+icon
+ * are sent so an existing row's subtitle/badge merge through unchanged. */
+static void convo_ensure(const char *id) {
+  convo_remember(id);
+  int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
+  const char *icon = (id[0] == '#') ? (global ? "public" : "campaign") : "person";
+  char title[24]; convo_title(id, title, sizeof(title));
+  char m[300] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+  jesc(m, sizeof(m), id);
+  s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), title);
+  s_cat(m, "\",\"icon\":\"", sizeof(m)); s_cat(m, icon, sizeof(m));
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Groups every NEW install is subscribed to (global, so worldwide messages show
+ * up out of the box). Seeded exactly once — guarded by KV "grpseed" so a user
+ * who later removes them isn't re-subscribed on the next launch. */
+static const char *DEFAULT_GROUPS[] = {
+  "#DEV*", "#NEWS*", "#MISC*", "#HELP*", "#HELLO*", "#CHILL*"
+};
+static void groups_seed_defaults(void) {
+  char f[2];
+  if (hal_kv_get("grpseed", 7, f, sizeof(f) - 1) > 0) return; /* already seeded */
+  for (unsigned i = 0; i < sizeof(DEFAULT_GROUPS) / sizeof(DEFAULT_GROUPS[0]); i++)
+    convo_ensure(DEFAULT_GROUPS[i]);
+  groups_save();
+  hal_kv_set("grpseed", 7, "1", 1);
+}
 static void groups_load(void) {
   char buf[600];
   uint32_t n = hal_kv_get("groups", 6, buf, sizeof(buf) - 1);
-  if (n == 0) return;
+  if (n == 0) { groups_seed_defaults(); return; } /* fresh install -> defaults */
   buf[n] = 0;
   char id[40]; int j = 0;
   for (unsigned i = 0; i <= n; i++) {
     char ch = (i < n) ? buf[i] : ';';
-    if (ch == ';') { id[j] = 0; if (id[0] == '#') convo_remember(id); j = 0; }
+    /* convo_ensure (not convo_remember): re-push each subscribed group so it
+     * shows in the Messages list on every page open, not only the g/ filter. */
+    if (ch == ';') { id[j] = 0; if (id[0] == '#') convo_ensure(id); j = 0; }
     else if (j < 39) id[j++] = ch;
   }
+  /* Existing install already has groups: mark seeded so a later "remove all"
+   * doesn't trigger the new-install defaults. */
+  char f[2];
+  if (hal_kv_get("grpseed", 7, f, sizeof(f) - 1) == 0)
+    hal_kv_set("grpseed", 7, "1", 1);
 }
 
 /* The public-key beacon on/off state persists in KV "pkbeacon" ("1"/"0"), so
