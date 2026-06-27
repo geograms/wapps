@@ -13,7 +13,7 @@
  */
 #include <stdint.h>
 #include "geogram_wasm_hal.h"
-#include "aprs.h"
+#include "chat.h"
 #include "ble.h"
 
 /* ── tiny libc ──────────────────────────────────────────────────────── */

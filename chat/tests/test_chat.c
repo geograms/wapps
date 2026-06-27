@@ -10,7 +10,7 @@
  * Run via the App Creator "Run tests" action, or: make tests
  */
 #include "wapp_test.h"
-#include "../aprs.c"
+#include "../chat.c"
 
 /* decimal degrees -> integer (deg*10000) for exact comparison */
 static int dd4(double v) { return (int)(v * 10000.0 + (v >= 0 ? 0.5 : -0.5)); }

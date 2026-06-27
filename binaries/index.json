@@ -47,6 +47,7 @@
   {"file":"aprs/aprs-0.2.79.wapp","id":"tools.geogram.aprs","version":"0.2.79","size":168046,"title":"APRS","description":"APRS station - map, messenger, beacons over APRS-IS."},
   {"file":"aprs/aprs-0.2.80.wapp","id":"tools.geogram.aprs","version":"0.2.80","size":168045,"title":"APRS","description":"APRS station - map, messenger, beacons over APRS-IS."},
   {"file":"chat/chat-0.2.81.wapp","id":"tools.geogram.chat","version":"0.2.81","size":168007,"title":"Chat","description":"Chat - messaging, live map and beacons over the APRS network."},
+  {"file":"chat/chat-0.2.82.wapp","id":"tools.geogram.chat","version":"0.2.82","size":168016,"title":"Chat","description":"Chat - messaging, live map and beacons over the APRS network."},
   {"file":"circles/circles-0.1.0.wapp","id":"tools.geogram.circles","version":"0.1.0","size":46172,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},
   {"file":"circles/circles-0.10.0.wapp","id":"tools.geogram.circles","version":"0.10.0","size":82551,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},
   {"file":"circles/circles-0.11.0.wapp","id":"tools.geogram.circles","version":"0.11.0","size":86688,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},

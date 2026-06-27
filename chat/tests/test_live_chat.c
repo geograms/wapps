@@ -12,7 +12,7 @@
  * Declarations only — aprs.c's impl is pulled in by test_aprs.c.
  */
 #include "wapp_test.h"
-#include "../aprs.h"
+#include "../chat.h"
 
 /* Emit a line into the Tests-tab log window. */
 static void tlog(const char *s) {

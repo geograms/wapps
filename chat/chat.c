@@ -2,7 +2,7 @@
  * aprs.c — APRS-IS client library implementation (see aprs.h).
  * Ported from the Geogram reference; built on the Aurora HAL sockets.
  */
-#include "aprs.h"
+#include "chat.h"
 #include "geogram_wasm_hal.h"
 
 /* ── file-local libc (static so they don't clash with the host wapp) ── */

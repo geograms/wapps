@@ -72,7 +72,7 @@ uint64_t hal_time_ms(void) {
 uint64_t hal_time_epoch(void) { return (uint64_t)time(0); }
 
 /* The code under test. */
-#include "../../aprs.c"
+#include "../../chat.c"
 
 /* ── the test ─────────────────────────────────────────────────────── */
 int main(void) {
