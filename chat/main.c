@@ -935,11 +935,20 @@ static void convo_remove_from(const char *from) {
 #define HIDE_MAX  128
 static char g_blocked[BLOCK_MAX][16];
 static int  g_blocked_n = 0;
+/* Muted callsigns: a lighter filter than block — we simply stop SHOWING their
+ * new messages (Activity + groups + DMs); we don't discard their conversation or
+ * existing bubbles. Persisted in KV "muted". */
+static char g_muted[BLOCK_MAX][16];
+static int  g_muted_n = 0;
 static char g_hidden[HIDE_MAX][16];   /* sig_hash keys (decimal) */
 static int  g_hidden_n = 0;
 
 static int is_blocked(const char *call) {
   for (int i = 0; i < g_blocked_n; i++) if (s_eq(g_blocked[i], call)) return 1;
+  return 0;
+}
+static int is_muted(const char *call) {
+  for (int i = 0; i < g_muted_n; i++) if (s_eq(g_muted[i], call)) return 1;
   return 0;
 }
 static int is_hidden_key(const char *key) {
@@ -950,6 +959,29 @@ static void blocked_save(void) {
   char buf[BLOCK_MAX * 17]; buf[0] = 0;
   for (int i = 0; i < g_blocked_n; i++) { s_cat(buf, g_blocked[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
   hal_kv_set("blocked", 7, buf, s_len(buf));
+}
+static void muted_save(void) {
+  char buf[BLOCK_MAX * 17]; buf[0] = 0;
+  for (int i = 0; i < g_muted_n; i++) { s_cat(buf, g_muted[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+  hal_kv_set("muted", 5, buf, s_len(buf));
+}
+/* Tell the host which callsigns to hide from the Activity feed (blocked + muted),
+ * so existing posts disappear too — not just future ones. The host filters its
+ * activity list by this set. Re-sent whenever the lists change (and on init). */
+static void emit_activity_filter(void) {
+  char m[BLOCK_MAX * 2 * 19 + 64];
+  s_cpy(m, "{\"type\":\"ui.activity.filter\",\"calls\":[", sizeof(m));
+  int first = 1;
+  for (int i = 0; i < g_blocked_n; i++) {
+    if (!first) s_cat(m, ",", sizeof(m)); first = 0;
+    s_cat(m, "\"", sizeof(m)); jesc(m, sizeof(m), g_blocked[i]); s_cat(m, "\"", sizeof(m));
+  }
+  for (int i = 0; i < g_muted_n; i++) {
+    if (!first) s_cat(m, ",", sizeof(m)); first = 0;
+    s_cat(m, "\"", sizeof(m)); jesc(m, sizeof(m), g_muted[i]); s_cat(m, "\"", sizeof(m));
+  }
+  s_cat(m, "]}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 static void hidden_save(void) {
   char buf[HIDE_MAX * 17]; buf[0] = 0;
@@ -970,6 +1002,7 @@ static void csv_load(const char *kv, int klen, char dst[][16], int *cnt, int cap
 }
 static void blockhide_load(void) {
   csv_load("blocked", 7, g_blocked, &g_blocked_n, BLOCK_MAX);
+  csv_load("muted", 5, g_muted, &g_muted_n, BLOCK_MAX);
   csv_load("hidden", 6, g_hidden, &g_hidden_n, HIDE_MAX);
 }
 static void block_add(const char *call) {
@@ -982,6 +1015,21 @@ static void block_add(const char *call) {
   blocked_save();
   convo_remove_from(up_call);   /* drop their already-shown bubbles + DM convo */
   host_state_emit("block", up_call, 1);
+  emit_activity_filter();       /* hide their existing Activity posts too */
+}
+/* Mute: hide a callsign's NEW messages (Activity + groups + DMs) without
+ * discarding their conversation or existing bubbles. Local + persisted. */
+static void mute_add(const char *call) {
+  char up_call[16]; int j = 0;
+  for (int i = 0; call[i] && j < 15; i++) up_call[j++] = up(call[i]);
+  up_call[j] = 0;
+  if (!up_call[0] || s_eq(up_call, g_call) || is_muted(up_call)) return;
+  if (g_muted_n >= BLOCK_MAX) { notify("warning", "Mute list is full"); return; }
+  s_cpy(g_muted[g_muted_n++], up_call, 16);
+  muted_save();
+  host_state_emit("mute", up_call, 1);
+  emit_activity_filter();
+  notify("info", "Muted — their new messages are hidden");
 }
 static void block_remove(const char *call) {
   char up_call[16]; int j = 0;
@@ -991,6 +1039,7 @@ static void block_remove(const char *call) {
     for (int k = i; k < g_blocked_n - 1; k++) s_cpy(g_blocked[k], g_blocked[k + 1], 16);
     g_blocked_n--; blocked_save();
     host_state_emit("block", up_call, 0);
+    emit_activity_filter();
     return;
   }
 }
@@ -1557,6 +1606,9 @@ static void act_seen_add(unsigned h) { g_act_seen[g_act_seen_n % ACT_SEEN] = h; 
 static void activity_feed(const char *convo, const char *from,
                           const char *text, const char *via,
                           double lat, double lon, const char *parent) {
+  /* Blocked: discard (never shown, never archived). Muted: don't show new ones.
+   * Either way, drop the post before it reaches the host/Activity archive. */
+  if (is_blocked(from) || is_muted(from)) return;
   char line[300]; line[0] = 0;
   if (convo && convo[0] == '#') {            /* group context, scope star dropped */
     char g[10]; int j = 0;
@@ -1636,7 +1688,7 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
                           const char *via) {
   /* Local block: never show anything from a blocked station (their own echoes of
    * our messages — dir "out" from g_call — are unaffected). */
-  if (s_eq(dir, "in") && is_blocked(from)) return 0;
+  if (s_eq(dir, "in") && (is_blocked(from) || is_muted(from))) return 0;
   /* Interacting with this callsign: capture its public key if we'd parked one. */
   if (s_eq(dir, "in")) peer_note(from);
   else if (id[0] != '#') peer_note(id);
@@ -2615,6 +2667,18 @@ static void do_convo_block(const char *buf) {
   if (!c[0]) return;
   block_add(c);
   notify("info", "Blocked — you won't see their messages");
+}
+/* Block / mute a callsign from the Activity feed's per-post menu. */
+static void do_activity_block(const char *buf) {
+  char c[16] = ""; jstr(buf, "activity_call", c, sizeof(c));
+  if (!c[0]) return;
+  block_add(c);
+  notify("info", "Blocked — their messages are discarded");
+}
+static void do_activity_mute(const char *buf) {
+  char c[16] = ""; jstr(buf, "activity_call", c, sizeof(c));
+  if (!c[0]) return;
+  mute_add(c);
 }
 /* Close a conversation: unsubscribe so we stop receiving its messages. For a
  * group we forget both the local (#NAME) and global (#NAME*) variants and
@@ -4120,6 +4184,7 @@ void module_init(void) {
   pkbeacon_load();
   igate_load();    /* restore iGate (BLE ↔ APRS-IS bridge) on/off (default on) */
   blockhide_load(); /* restore local block list + hidden-message keys */
+  emit_activity_filter(); /* re-apply Activity hide set (blocked + muted) */
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   rns_dest_load(); /* restore npub -> {RNS delivery dests} (Reticulum addressing) */
   cpriv_load();    /* restore which 1:1 conversations are private (Reticulum-only) */
@@ -4389,6 +4454,8 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "geochat_send")) do_geochat_send(buf);
   else if (s_eq(cmd, "activity_send")) do_activity_send(buf);
   else if (s_eq(cmd, "activity_like")) do_activity_like(buf);
+  else if (s_eq(cmd, "activity_block")) do_activity_block(buf);
+  else if (s_eq(cmd, "activity_mute")) do_activity_mute(buf);
   else if (s_eq(cmd, "activity_reply")) do_activity_reply(buf);
   else if (s_eq(cmd, "follow")) prompt_follow();
   else if (s_eq(cmd, "unfollow")) prompt_unfollow();
