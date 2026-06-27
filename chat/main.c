@@ -1029,11 +1029,12 @@ static void convo_react(const char *id, const char *mid, const char *from,
  * so no emoji). 1:1 chats keep the callsign. */
 static void convo_title(const char *id, char *out, unsigned osz) {
   if (id[0] != '#') { s_cpy(out, id, osz); return; }
-  out[0] = 0;
   char name[8]; int j = 0;
   for (int i = 1; id[i] && id[i] != '*' && j < 6; i++) name[j++] = id[i];
   name[j] = 0;
   int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
+  /* Keep the leading '#' so groups are instantly distinguishable from people. */
+  s_cpy(out, "#", osz);
   s_cat(out, name, osz);
   s_cat(out, global ? " (global)" : " (local)", osz);   /* ASCII-only tag */
 }
@@ -2282,7 +2283,7 @@ static void do_convo_private(const char *buf) {
   }
   cpriv_set(id, on);                          /* persists + emits the lock badge */
   rns_tx_msg(id, on ? "?PRIV1" : "?PRIV0");  /* auto-negotiate the peer (best effort) */
-  status(on ? "Private mode ON (Reticulum only)" : "Private mode OFF");
+  status(on ? "Private mode ON (only internet)" : "Private mode OFF");
 }
 
 /* Change the coverage radius: re-filter by reconnecting APRS-IS, and
@@ -2568,7 +2569,7 @@ static void prompt_newchat(void) {
     s_cat(m, "],\"chipMode\":\"instant\",", sizeof(m));
   }
   s_cat(m, "\"input\":{\"hint\":\"Callsign or #group\",\"max\":20},"
-           "\"toggle\":{\"label\":\"Private (Reticulum only)\",\"default\":false},"
+           "\"toggle\":{\"label\":\"Private (only internet)\",\"default\":false},"
            "\"confirm\":\"Open\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }

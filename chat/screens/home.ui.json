@@ -28,7 +28,7 @@
           { "$": "action", "name": "add_group", "icon": "add", "slot": "list", "tip": "Add a group" },
           { "$": "action", "name": "new_chat", "icon": "edit", "slot": "list", "tip": "New message" },
           { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
-          { "$": "action", "name": "conversations_private", "label": "Private (Reticulum only)", "icon": "lock", "slot": "room", "tip": "Toggle a Reticulum-only conversation — messages stay off APRS/APRS-IS, encrypted to this contact" },
+          { "$": "action", "name": "conversations_private", "label": "Private (only internet)", "icon": "lock", "slot": "room", "tip": "Toggle a private conversation — messages go over the internet only (off the APRS network), encrypted to this contact" },
           { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false, "localOnly": true, "slot": "menu" }
         ]
       }
