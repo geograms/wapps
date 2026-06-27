@@ -180,6 +180,28 @@ static void hub_action(const char *verb, const char *ep) {
     send_msg(m);
 }
 
+/* Emit a 1:1 LXMF send host action from a graph "node_message" command. The
+ * page hands us the target's public key (meta.pubkey) plus the composed title +
+ * body; the host derives the LXMF delivery dest from the key and sends. Built
+ * into the large g_msg buffer since the body can be a few KB. */
+static void lxmf_send_action(const char *full) {
+    static char pubkey[160];
+    static char title[256];
+    static char content[3600];
+    json_str(full, "pubkey", pubkey, sizeof(pubkey));
+    json_str(full, "title", title, sizeof(title));
+    json_str(full, "content", content, sizeof(content));
+    if (pubkey[0] == '\0' || content[0] == '\0') return;
+    str_copy(g_msg, "{\"type\":\"rns.lxmf.send\",\"pubkey\":\"", sizeof(g_msg));
+    json_cat_escaped(g_msg, pubkey, sizeof(g_msg));
+    str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
+    json_cat_escaped(g_msg, title, sizeof(g_msg));
+    str_cat(g_msg, "\",\"content\":\"", sizeof(g_msg));
+    json_cat_escaped(g_msg, content, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
 /* ── Command dispatch ────────────────────────────────────────────────── */
 static void handle_command(const char *cmd, const char *full) {
     /* Page interactions (posted via window.Host.postMessage). */
@@ -209,6 +231,11 @@ static void handle_command(const char *cmd, const char *full) {
         hub_action(verb, ep);
         /* Reflect the change quickly. */
         push_hubs();
+        return;
+    }
+    /* 1:1 message to an observed node, picked in the graph detail panel. */
+    if (str_eq(cmd, "node_message")) {
+        lxmf_send_action(full);
         return;
     }
     /* Passive (relay-shedding) toggle from Settings. */
@@ -241,7 +268,9 @@ void module_tick(void) {
 }
 
 void module_handle_event(void) {
-    static char buf[1024];
+    /* Big enough to hold a composed 1:1 message (node_message) plus its JSON
+     * envelope — caps a DM body at ~3.5 KB. Other events are tiny. */
+    static char buf[4096];
     if (hal_msg_available() == 0) return;
     uint32_t n = hal_msg_recv(buf, sizeof(buf) - 1);
     if (n == 0) return;
