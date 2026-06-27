@@ -1,6 +1,6 @@
 {
   "schema": "ndf-permissions-1.0",
-  "document_id": "tools.geogram.aprs",
+  "document_id": "tools.geogram.chat",
   "owners": [],
   "access": {
     "view":    {"type": "public"},
