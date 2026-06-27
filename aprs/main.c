@@ -160,9 +160,14 @@ static uint64_t g_last_reconnect = 0;
  * g_ble_started tracks whether we've told the HAL to scan. */
 static int g_ble_on = 1, g_ble_relay = 1, g_ble_started = 0;
 static uint64_t g_ble_last_beacon = 0;
+static uint64_t g_ble_last_hello = 0;   /* last lightweight BLE presence beacon */
 /* compact BLE senders, defined with the module entry points */
 static void ble_tx_msg(const char *to, const char *text);
 static void ble_tx_pos(double lat, double lon, const char *comment);
+/* Build "label/value" chips for callsigns heard over BLE within REACH_WINDOW
+ * (most-recent first). Returns the number of chips written (defined with the
+ * seen-over-BLE registry, far below). */
+static int ble_reach_chips(char *out, unsigned max);
 /* Reticulum 1:1 sender (defined after the BLE frame packer); fans the same frame
  * out to every RNS delivery dest advertised under the recipient's npub. */
 static int rns_tx_msg(const char *to, const char *wire);
@@ -2540,13 +2545,30 @@ static void prompt_group(void) {
 static void prompt_newchat(void) {
   /* Full-screen panel; offer Private (Reticulum-only) from the start so a 1:1 can
    * begin off-APRS. The toggle comes back as prompt_toggle (ignored for #groups,
-   * and only honoured when we already know the contact's npub). */
-  const char *m = "{\"type\":\"ui.prompt\",\"id\":\"newchat\",\"title\":\"New message\","
-    "\"fullscreen\":true,"
-    "\"body\":\"Enter a callsign for a 1:1 chat, or #group.\","
-    "\"input\":{\"hint\":\"Callsign or #group\",\"max\":20},"
-    "\"toggle\":{\"label\":\"Private (Reticulum only)\",\"default\":false},"
-    "\"confirm\":\"Open\"}";
+   * and only honoured when we already know the contact's npub).
+   *
+   * Below the field we list the stations currently reachable over BLE (heard
+   * within REACH_WINDOW) as instant chips — one tap opens a 1:1 with them. */
+  char chips[700];
+  int nchips = ble_reach_chips(chips, sizeof(chips));
+  char m[1400];
+  s_cpy(m, "{\"type\":\"ui.prompt\",\"id\":\"newchat\",\"title\":\"New message\","
+           "\"fullscreen\":true,\"body\":\"", sizeof(m));
+  if (nchips > 0)
+    s_cat(m, "Enter a callsign or #group, or tap a station heard over BLE below.",
+          sizeof(m));
+  else
+    s_cat(m, "Enter a callsign for a 1:1 chat, or #group. "
+             "(No stations heard over BLE yet.)", sizeof(m));
+  s_cat(m, "\",", sizeof(m));
+  if (nchips > 0) {
+    s_cat(m, "\"chips\":[", sizeof(m));
+    s_cat(m, chips, sizeof(m));
+    s_cat(m, "],\"chipMode\":\"instant\",", sizeof(m));
+  }
+  s_cat(m, "\"input\":{\"hint\":\"Callsign or #group\",\"max\":20},"
+           "\"toggle\":{\"label\":\"Private (Reticulum only)\",\"default\":false},"
+           "\"confirm\":\"Open\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 static void prompt_recur(const char *convo) {
@@ -2618,7 +2640,9 @@ static void do_prompt_result(const char *buf) {
   jstr(buf, "prompt_value", val, sizeof(val));
   jstr(buf, "prompt_input", inp, sizeof(inp));
   if (s_eq(pid, "newchat")) {
-    const char *src = inp;
+    /* Typed text wins; otherwise a tapped reachable-station chip (its callsign
+     * arrives in prompt_value). */
+    const char *src = inp[0] ? inp : val;
     if (src[0] == '#') {
       char g[8]; norm_group(src, g);
       if (g[0]) { char id[10]; id[0] = '#'; s_cpy(id + 1, g, sizeof(id) - 1); convo_touch(id, "", 1); }
@@ -2741,6 +2765,9 @@ static int rns_tx_msg(const char *to, const char *wire) {
  * reach; we reply with each held message and clear the mailbox. No UI. */
 #define MAIL_TO       "?MAIL"
 #define IGATE_TO      "?IGATE"
+#define HELLO_TO      "?HELLO"               /* lightweight BLE presence beacon */
+#define PRESENCE_INTERVAL 30                 /* re-announce presence every 30 s */
+#define REACH_WINDOW  180                    /* "reachable now" = heard within 3 min */
 #define SDEV_MAX      100
 #define SDEV_TTL      (365ULL * 24 * 3600)   /* 1 year */
 #define GFILTER_CAP   30                      /* heard calls put in the g/ filter */
@@ -2814,6 +2841,57 @@ static void sdev_load(void) {
       g_sdev[g_sdev_n].ts = ts; g_sdev_n++;
     }
   }
+}
+
+/* Build chips of callsigns heard over BLE within REACH_WINDOW, most-recent
+ * first, capped to fit [out]. Each chip is {"label":"CALL","value":"CALL"}.
+ * Returns the number written; used by the "New message" prompt to offer the
+ * locally-reachable stations. */
+#define REACH_CHIPS_MAX 12
+/* A callsign safe to show/route: 1..15 printable callsign chars only. Rejects
+ * empties and any malformed entry carrying control/separator bytes (those would
+ * also break the prompt JSON). */
+static int valid_call(const char *c) {
+  if (!c || !c[0]) return 0;
+  int n = 0;
+  for (const char *p = c; *p; p++, n++) {
+    if (n >= 15) return 0;
+    char ch = *p;
+    int ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+             (ch >= '0' && ch <= '9') || ch == '-' || ch == '/';
+    if (!ok) return 0;
+  }
+  return 1;
+}
+static int ble_reach_chips(char *out, unsigned max) {
+  out[0] = 0;
+  uint64_t now = hal_time_epoch();
+  /* Collect recent indices, then selection-sort by ts (newest first). A copy of
+   * the timestamps lets us mark picked entries without touching the registry. */
+  int idx[SDEV_MAX]; uint64_t ts[SDEV_MAX]; int n = 0;
+  for (int i = 0; i < g_sdev_n; i++) {
+    if (now >= REACH_WINDOW && g_sdev[i].ts < now - REACH_WINDOW) continue;
+    if (s_eq(g_sdev[i].call, g_call)) continue;
+    if (!valid_call(g_sdev[i].call)) continue;   /* skip malformed entries */
+    idx[n] = i; ts[n] = g_sdev[i].ts; n++;
+  }
+  int written = 0;
+  for (int k = 0; k < n && written < REACH_CHIPS_MAX; k++) {
+    int best = -1; uint64_t bts = 0;
+    for (int j = 0; j < n; j++) {
+      if (ts[j] == (uint64_t)-1) continue;          /* already taken */
+      if (best < 0 || ts[j] > bts) { best = j; bts = ts[j]; }
+    }
+    if (best < 0) break;
+    ts[best] = (uint64_t)-1;
+    const char *call = g_sdev[idx[best]].call;
+    if (written) s_cat(out, ",", max);
+    s_cat(out, "{\"label\":\"", max); jesc(out, max, call);
+    s_cat(out, "\",\"value\":\"", max); jesc(out, max, call);
+    s_cat(out, "\"}", max);
+    written++;
+  }
+  return written;
 }
 
 /* g/ extra filter: our own call, the most-recently-seen stations (so APRS-IS
@@ -3849,8 +3927,16 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
   }
   if (mine) return;
 
-  /* Remember every BLE-local station we hear (store-and-forward registry). */
-  sdev_touch(from);
+  /* Remember every BLE-local station we hear (store-and-forward registry +
+   * the "reachable over BLE" list shown in New message). Only for frames that
+   * truly arrived over the radio — a Reticulum-over-internet copy (via "RET")
+   * is NOT BLE-reachable and must not pollute the registry. */
+  if (s_eq(via, "BLE") && valid_call(from)) sdev_touch(from);
+
+  /* Lightweight presence beacon: its only job is the registry touch above, so a
+   * BLE-only/GPS-less station is still discoverable. Carries no content — drop
+   * it before the dedup/feed path. */
+  if (s_eq(to, HELLO_TO)) return;
 
   /* Control frames are handled on EVERY receipt — BEFORE the content-dedup below
    * — because they carry no unique body: a repeated ?IGATE beacon must keep
@@ -4042,6 +4128,14 @@ void module_tick(void) {
     if (online && g_ble_on && now - g_last_igate_beacon >= 120) {
       ble_tx_from(g_call, IGATE_TO, "");
       g_last_igate_beacon = now;
+    }
+    /* Presence beacon: a tiny callsign-only advert every PRESENCE_INTERVAL so
+     * nearby stations learn we're reachable over BLE even with no GPS fix and no
+     * APRS-IS uplink (Wi-Fi off). Only when Bluetooth is actually powered. */
+    if (g_ble_on && hal_ble_available() &&
+        now - g_ble_last_hello >= PRESENCE_INTERVAL) {
+      ble_tx_from(g_call, HELLO_TO, "");
+      g_ble_last_hello = now;
     }
     /* Client: while an iGate is in reach, pull our mail every 5 minutes. */
     if (g_ble_on && now - g_last_igate_heard < 600 && now - g_last_mail_query >= 300) {
