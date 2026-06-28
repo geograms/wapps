@@ -268,7 +268,7 @@ static recur_t g_recur[RECUR_MAX];
 static void notify(const char *level, const char *body) {
   char m[256] = "{\"type\":\"notify\",\"level\":\"";
   s_cat(m, level, sizeof(m));
-  s_cat(m, "\",\"title\":\"APRS\",\"body\":\"", sizeof(m));
+  s_cat(m, "\",\"title\":\"Chat\",\"body\":\"", sizeof(m));
   jesc(m, sizeof(m), body);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
