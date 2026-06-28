@@ -435,8 +435,15 @@ static int a_next_chunk(const char *s, int max_len, int *pos,
     for (int i = limit; i > start; i--) {
       if (s[i] == ' ') { sp = i; break; }
     }
-    if (sp <= start) { end = limit; next = limit; }   /* hard break */
-    else { end = sp; next = sp; }                      /* word boundary */
+    if (sp <= start) {                                 /* hard break */
+      /* Never split a multi-byte UTF-8 codepoint across two chunks (emoji are
+       * 4 bytes): back up off any continuation byte (10xxxxxx) to the codepoint
+       * boundary so each chunk — and the rejoined whole — stays valid UTF-8. */
+      end = limit;
+      while (end > start && ((unsigned char)s[end] & 0xC0) == 0x80) end--;
+      if (end <= start) end = limit;                   /* codepoint > max_len */
+      next = end;
+    } else { end = sp; next = sp; }                    /* word boundary */
   }
 
   while (end > start && s[end - 1] == ' ') end--;      /* trim chunk tail */
