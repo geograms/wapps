@@ -1051,6 +1051,7 @@ static int extract_am(char *s, char *am) {
     am[6] = 0;
     char *start = (p > s && p[-1] == ' ') ? p - 1 : p;   /* eat a leading space */
     char *end = p + 9;
+    if (start == p && *end == ' ') end++;                /* front token: eat trailing space */
     unsigned n = 0; while (end[n]) { start[n] = end[n]; n++; } start[n] = 0;
     return 1;
   }
@@ -2425,14 +2426,21 @@ static void do_convo_send(const char *buf) {
    * is still verified against the signed file: sha256 token. */
   add_infohash(wire, sizeof(wire));
   /* 1:1 receipts: stamp a correlation id (am:<6hex>) on the wire so the peer can
-   * echo delivered/read back for WhatsApp-style ticks. Groups get no receipts. */
+   * echo delivered/read back for WhatsApp-style ticks. Groups get no receipts.
+   * PREPEND (not append): the message may end in a signature line ("~<60>") that
+   * multi-line reassembly relies on being alone on the last line, and the sig is
+   * computed over the (unmodified) core — an appended token would corrupt both.
+   * The receiver strips am before verifying/decrypting. */
   char am[8] = "";
   if (id[0] != '#') {
     unsigned char rb[3]; hal_crypto_random((char *)rb, 3);
     static const char hx[] = "0123456789abcdef";
     for (int i = 0; i < 3; i++) { am[i*2] = hx[rb[i] >> 4]; am[i*2+1] = hx[rb[i] & 15]; }
     am[6] = 0;
-    s_cat(wire, " am:", sizeof(wire)); s_cat(wire, am, sizeof(wire));
+    char w2[820];
+    s_cpy(w2, "am:", sizeof(w2)); s_cat(w2, am, sizeof(w2)); s_cat(w2, " ", sizeof(w2));
+    s_cat(w2, wire, sizeof(w2));
+    s_cpy(wire, w2, sizeof(wire));
   }
   if (id[0] == '#') {
     /* Strip the scope marker: a global group "#NEWS*" transmits the same
