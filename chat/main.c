@@ -1964,6 +1964,15 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   int rep;
   if (rmid[0]) { rep = midseen_has(rmid); if (!rep) midseen_add(rmid); }
   else { rep = seen_has(h); if (!rep) seen_add(h); }
+  /* 1:1: also fold the key-unknown double — a public copy (no rmid, content
+   * keyed) and its later encrypted backup (rmid keyed) share no dedup key but the
+   * same plaintext. Collapse them on (id,from,plaintext). Encrypted messages no
+   * longer ride APRS, so every copy decrypts to the same text (no undecryptable
+   * twin with a divergent plaintext). Groups keep their own dedup. */
+  if (!rep && id[0] != '#') {
+    unsigned ph = sig_hash(id, from, disp);
+    if (seen_has(ph)) rep = 1; else seen_add(ph);
+  }
   /* A repeated INCOMING message (direct OR a recurring bulletin) is a duplicate
    * — dual-path delivery (APRS-IS + a BLE iGate), a resend, or a station
    * re-broadcasting the same bulletin on a schedule. Drop it so the chat shows
@@ -2464,8 +2473,13 @@ static void do_convo_send(const char *buf) {
       return;   /* don't echo a private message that reached nobody */
     }
   } else {
+    /* Encrypted (ENC1) messages are NOT sent over APRS-IS: APRS is a 7-bit text
+     * protocol and mangles the base64 ciphertext (multi-line reassembly + charset),
+     * so the recipient gets an undecryptable "[encrypted - cannot decrypt]" copy
+     * alongside the good BLE/RNS one. Encrypted rides BLE + Reticulum (binary
+     * clean); only PUBLIC (plaintext) messages use APRS. */
     int seq0 = g_seq;
-    if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
+    if (net && !encrypted) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
     /* Map each APRS part-seq to this message's am so an incoming ack<seq> (the
      * standard APRS ack, APRSdroid included) marks the bubble delivered. */
     if (am[0]) for (int s = seq0; s < g_seq; s++) ackmap_add(s, am);
