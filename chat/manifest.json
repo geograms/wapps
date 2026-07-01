@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.chat",
-  "version":         "0.2.93",
+  "version":         "0.2.94",
   "kind":            "app",
   "title":           "Chat",
   "description":     "Chat - messaging, live map and beacons over the APRS network.",

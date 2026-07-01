@@ -3730,7 +3730,10 @@ static void route_frame(const char *line) {
         if (amine && follow_intercept(p.from, p.text)) return;
         if (amine && priv_intercept(p.from, p.text)) return;
         if (amine && rly_intercept(p.from, p.text)) return;
-        if (amine && rcpt_intercept(p.from, p.text)) return;
+        /* Receipts are control traffic addressed to the SENDER, but broadcast
+         * transports (BLE/RNS) let any station overhear them — consume them for
+         * everyone (not just the addressee) so they never render as Live/chat. */
+        if (rcpt_intercept(p.from, p.text)) return;
         /* A bare signature line is a continuation fragment, not a message:
          * keep it off the Live tab + notifications; da_ reassembles it. */
         int sigln = is_sig_line(p.text);
@@ -4328,7 +4331,9 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
     if (amine && follow_intercept(from, text)) return;
     if (amine && priv_intercept(from, text)) return;
     if (amine && rly_intercept(from, text)) return;
-    if (amine && rcpt_intercept(from, text)) return;
+    /* Consume receipts for any overhearer (broadcast BLE/RNS), not just the
+     * addressee, so a "?ACK …" frame never surfaces as a Live/chat message. */
+    if (rcpt_intercept(from, text)) return;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
