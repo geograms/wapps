@@ -970,6 +970,25 @@ __attribute__((import_module("hal"), import_name("rns_nodes")))
 int32_t hal_rns_nodes(const char *filter, uint32_t filter_len,
                       char *out, uint32_t out_cap);
 
+/* ── BLE street mesh (doc/mesh.md) ──────────────────────────────── *
+ *
+ * Read-only registry of the BLE mesh node: who is within reach (direct
+ * neighbors heard over route beacons) and which destinations are reachable
+ * multi-hop, plus this node's own status. Overflow protocol: when the JSON
+ * doesn't fit, the NEGATED required size is returned and nothing is written. */
+
+/* Mesh node status JSON
+ * ({running,callsign,advertising,class,powered,uptime,neighbors,routes,
+ *   beaconsSent,beaconsHeard,revision}). */
+__attribute__((import_module("hal"), import_name("mesh_status")))
+int32_t hal_mesh_status(char *out, uint32_t out_cap);
+
+/* Devices within reach as ready-to-render people-widget sections
+ * [{"title":"Nearby (n)","items":[{id,title,subtitle,tags,...}]},
+ *  {"title":"Multi-hop (n)","items":[...]}]. */
+__attribute__((import_module("hal"), import_name("mesh_devices")))
+int32_t hal_mesh_devices(char *out, uint32_t out_cap);
+
 /* ── Contacts (people this device already knows) ─────────────────────── *
  *
  * A reusable picker source: the people the user can address — those seen on
