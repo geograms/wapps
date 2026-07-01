@@ -1844,11 +1844,15 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   if (s_eq(dir, "in") && (is_blocked(from) || is_muted(from))) return 0;
   /* Receipt correlation id: pull `am:<6hex>` out of the wire + strip it so it
    * never displays (1:1 only; groups never carry it). */
-  char am[8] = ""; char ambuf[720];
+  char am[8] = ""; char ambuf[720]; char pvbuf[720];
   if (id[0] != '#') {
     s_cpy(ambuf, text, sizeof(ambuf));
     extract_am(ambuf, am);
     text = ambuf;
+    /* Strip the token from the list-preview too so the row subtitle is clean. */
+    char tmp[8]; s_cpy(pvbuf, preview, sizeof(pvbuf));
+    extract_am(pvbuf, tmp);
+    preview = pvbuf;
   }
   /* Interacting with this callsign: capture its public key if we'd parked one. */
   if (s_eq(dir, "in")) peer_note(from);
