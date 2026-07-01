@@ -880,6 +880,11 @@ static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent
   /* Encrypted (APRX 1:1): host shows a lock badge. */
   if (enc) s_cat(m, ",\"enc\":true", sz);
 }
+/* Set just before the outgoing local-echo convo_deliver of a 1:1 message so the
+ * emitted bubble carries its receipt id (rid = am) + initial tick state
+ * ("sent"); cleared immediately after so no other bubble picks them up. */
+static char g_send_rid[8] = "";
+static char g_send_status[12] = "";
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
                       double lat, double lon, const char *via,
@@ -904,6 +909,10 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   /* Private = this message went Reticulum-only (never APRS) — the host tags the
    * bubble so it's clearly distinct from public APRS traffic. */
   if (priv) s_cat(m, ",\"private\":true", sizeof(m));
+  /* WhatsApp-style receipt id + tick state (1:1 outgoing only; globals set by
+   * do_convo_send around the local echo). */
+  if (g_send_rid[0]) { s_cat(m, ",\"rid\":\"", sizeof(m)); s_cat(m, g_send_rid, sizeof(m)); s_cat(m, "\"", sizeof(m)); }
+  if (g_send_status[0]) { s_cat(m, ",\"status\":\"", sizeof(m)); s_cat(m, g_send_status, sizeof(m)); s_cat(m, "\"", sizeof(m)); }
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -922,6 +931,150 @@ static void convo_remove_from(const char *from) {
   jesc(m, sizeof(m), from);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
+}
+
+/* ── 1:1 delivery/read receipts (WhatsApp-style ticks) ────────────────────
+ * Every 1:1 message carries a small "am:<6hex>" correlation token. The receiver
+ * echoes it so the sender advances the bubble sent -> delivered -> read:
+ *   - delivered over APRS = the STANDARD APRS ack<seq> (APRSdroid-compatible,
+ *     handled in route_frame); over BLE/RNS = a "?ACK <am> d" control frame.
+ *   - read = a "?ACK <am> r" control frame sent when the user opens the chat.
+ * Receipt frames are consumed by rcpt_intercept (never rendered). Status is
+ * pushed to the host via ui.convo.status keyed by the message's rid (= am). */
+
+/* Advance a message's tick state on the host (keyed by its rid). */
+static void convo_status_emit(const char *rid, const char *status) {
+  if (!rid || !rid[0]) return;
+  char m[96] = "{\"type\":\"ui.convo.status\",\"rid\":\"";
+  s_cat(m, rid, sizeof(m));
+  s_cat(m, "\",\"status\":\"", sizeof(m)); s_cat(m, status, sizeof(m));
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* seq -> am, so an incoming APRS ack<seq> maps back to the message we sent. */
+#define ACKMAP_MAX 48
+static int  g_ackseq[ACKMAP_MAX];
+static char g_ackam[ACKMAP_MAX][8];
+static int  g_ackmap_w = 0;
+static void ackmap_add(int seq, const char *am) {
+  int i = g_ackmap_w++ % ACKMAP_MAX;
+  g_ackseq[i] = seq; s_cpy(g_ackam[i], am, 8);
+}
+static const char *ackmap_get(int seq) {
+  for (int i = 0; i < ACKMAP_MAX; i++)
+    if (g_ackam[i][0] && g_ackseq[i] == seq) return g_ackam[i];
+  return 0;
+}
+
+/* Received-but-unread 1:1 messages awaiting a read receipt on convo open. */
+#define RPEND_MAX 64
+static char g_rpend_convo[RPEND_MAX][16];
+static char g_rpend_am[RPEND_MAX][8];
+static char g_rpend_via[RPEND_MAX][8];
+static int  g_rpend_n = 0;
+static void rpend_add(const char *convo, const char *am, const char *via) {
+  if (!am[0]) return;
+  for (int i = 0; i < g_rpend_n; i++) if (s_eq(g_rpend_am[i], am)) return;
+  if (g_rpend_n >= RPEND_MAX) {                 /* drop oldest */
+    for (int i = 1; i < RPEND_MAX; i++) {
+      s_cpy(g_rpend_convo[i-1], g_rpend_convo[i], 16);
+      s_cpy(g_rpend_am[i-1], g_rpend_am[i], 8);
+      s_cpy(g_rpend_via[i-1], g_rpend_via[i], 8);
+    }
+    g_rpend_n = RPEND_MAX - 1;
+  }
+  s_cpy(g_rpend_convo[g_rpend_n], convo, 16);
+  s_cpy(g_rpend_am[g_rpend_n], am, 8);
+  s_cpy(g_rpend_via[g_rpend_n], via, 8);
+  g_rpend_n++;
+}
+
+/* Raw APRS message to [to] carrying [body], WITHOUT a {seq (so the recipient
+ * doesn't ack it) — same envelope as send_ack. */
+static void aprs_msg_noseq(const char *to, const char *body) {
+  if (!to[0] || g_sock < 0 || !g_logged) return;
+  char dest[10]; int i = 0;
+  for (; to[i] && i < 9; i++) dest[i] = up(to[i]);
+  dest[i] = 0;
+  while (s_len(dest) < 9) s_cat(dest, " ", sizeof(dest));
+  char line[128];
+  s_cpy(line, g_call, sizeof(line));
+  s_cat(line, ">APRS,TCPIP*::", sizeof(line));
+  s_cat(line, dest, sizeof(line));
+  s_cat(line, ":", sizeof(line));
+  s_cat(line, body, sizeof(line));
+  aprs_send_raw(g_sock, line);
+}
+
+/* Send a "?ACK <am> <state>" receipt to [to] over the arrival transport [via]
+ * plus the Reticulum backstop. state = 'd' delivered / 'r' read. */
+static void send_receipt(const char *to, const char *am, char state, const char *via) {
+  if (!to || !to[0] || to[0] == '#' || !am || !am[0]) return;
+  char body[24]; s_cpy(body, "?ACK ", sizeof(body)); s_cat(body, am, sizeof(body));
+  char sp[3] = {' ', state, 0}; s_cat(body, sp, sizeof(body));
+  if (s_eq(via, "NET")) aprs_msg_noseq(to, body);
+  else if (g_ble_on && s_eq(via, "BLE")) ble_tx_msg(to, body);
+  rns_tx_msg(to, body);   /* backstop (covers RET/RLY arrival + reliability) */
+}
+
+/* Intercept an inbound "?ACK <am> <d|r>" receipt: advance our bubble state and
+ * consume the frame (return 1) so it never renders as a chat message. */
+static int rcpt_intercept(const char *from, const char *text) {
+  (void)from;
+  if (!(text[0]=='?'&&text[1]=='A'&&text[2]=='C'&&text[3]=='K'&&text[4]==' ')) return 0;
+  const char *p = text + 5;
+  char am[8]; int i = 0;
+  while (*p && *p != ' ' && i < 7) am[i++] = *p++;
+  am[i] = 0;
+  if (*p == ' ') p++;
+  if (am[0] && (*p == 'd' || *p == 'r'))
+    convo_status_emit(am, *p == 'r' ? "read" : "delivered");
+  return 1;
+}
+
+/* Extract + strip an "am:<6hex>" token from [s] in place. Returns 1 and writes
+ * the 6-hex id to [am] when present. */
+static int extract_am(char *s, char *am) {
+  am[0] = 0;
+  for (char *p = s; *p; p++) {
+    if (!(p[0]=='a' && p[1]=='m' && p[2]==':')) continue;
+    if (p > s && p[-1] != ' ') continue;         /* must start a token */
+    int ok = 1;
+    for (int i = 0; i < 6; i++) {
+      char c = p[3+i];
+      if (!((c>='0'&&c<='9') || (c>='a'&&c<='f'))) { ok = 0; break; }
+    }
+    char after = p[9];
+    if (!ok || (after != 0 && after != ' ')) continue;
+    for (int i = 0; i < 6; i++) am[i] = p[3+i];
+    am[6] = 0;
+    char *start = (p > s && p[-1] == ' ') ? p - 1 : p;   /* eat a leading space */
+    char *end = p + 9;
+    unsigned n = 0; while (end[n]) { start[n] = end[n]; n++; } start[n] = 0;
+    return 1;
+  }
+  return 0;
+}
+
+/* User opened a 1:1 conversation → send read receipts for its pending msgs. */
+static void do_convo_open(const char *buf) {
+  char convo[16] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
+  if (!convo[0] || convo[0] == '#') return;      /* groups: no receipts */
+  int w = 0;
+  for (int i = 0; i < g_rpend_n; i++) {
+    if (s_eq(g_rpend_convo[i], convo)) {
+      send_receipt(convo, g_rpend_am[i], 'r', g_rpend_via[i]);
+    } else {
+      if (w != i) {
+        s_cpy(g_rpend_convo[w], g_rpend_convo[i], 16);
+        s_cpy(g_rpend_am[w], g_rpend_am[i], 8);
+        s_cpy(g_rpend_via[w], g_rpend_via[i], 8);
+      }
+      w++;
+    }
+  }
+  g_rpend_n = w;
 }
 
 /* ── Local hide / block (never transmitted) ───────────────────────────────
@@ -1689,6 +1842,14 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   /* Local block: never show anything from a blocked station (their own echoes of
    * our messages — dir "out" from g_call — are unaffected). */
   if (s_eq(dir, "in") && (is_blocked(from) || is_muted(from))) return 0;
+  /* Receipt correlation id: pull `am:<6hex>` out of the wire + strip it so it
+   * never displays (1:1 only; groups never carry it). */
+  char am[8] = ""; char ambuf[720];
+  if (id[0] != '#') {
+    s_cpy(ambuf, text, sizeof(ambuf));
+    extract_am(ambuf, am);
+    text = ambuf;
+  }
   /* Interacting with this callsign: capture its public key if we'd parked one. */
   if (s_eq(dir, "in")) peer_note(from);
   else if (id[0] != '#') peer_note(id);
@@ -1814,6 +1975,13 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
    * transports notifies only once. Group bulletins notify via their own caller;
    * our own echoes (dir "out") never notify. */
   if (s_eq(dir, "in") && id[0] != '#') notify_msg(from, from, disp, disp);
+  /* WhatsApp-style receipts: a freshly-delivered inbound 1:1 that carried an `am`
+   * confirms DELIVERED to the sender (over BLE/RNS; APRS uses the native ack sent
+   * by route_frame) and queues a READ receipt for when the user opens the chat. */
+  if (s_eq(dir, "in") && id[0] != '#' && am[0]) {
+    if (!s_eq(via, "NET")) send_receipt(from, am, 'd', via);
+    rpend_add(id, am, via);
+  }
   /* NOTE: group/DM conversation messages are deliberately NOT mirrored into the
    * Activity feed. The Activity tab is the micro-blog stream (FEED group) only —
    * group chatter belongs in Messages, not the public stream. FEED posts reach
@@ -2252,6 +2420,16 @@ static void do_convo_send(const char *buf) {
    * infohash (cleartext, unsigned) so the receiver can fetch it. The content
    * is still verified against the signed file: sha256 token. */
   add_infohash(wire, sizeof(wire));
+  /* 1:1 receipts: stamp a correlation id (am:<6hex>) on the wire so the peer can
+   * echo delivered/read back for WhatsApp-style ticks. Groups get no receipts. */
+  char am[8] = "";
+  if (id[0] != '#') {
+    unsigned char rb[3]; hal_crypto_random((char *)rb, 3);
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 3; i++) { am[i*2] = hx[rb[i] >> 4]; am[i*2+1] = hx[rb[i] & 15]; }
+    am[6] = 0;
+    s_cat(wire, " am:", sizeof(wire)); s_cat(wire, am, sizeof(wire));
+  }
   if (id[0] == '#') {
     /* Strip the scope marker: a global group "#NEWS*" transmits the same
      * "NEWS" bulletin as the local "#NEWS" — scope is only a local view. */
@@ -2274,7 +2452,11 @@ static void do_convo_send(const char *buf) {
       return;   /* don't echo a private message that reached nobody */
     }
   } else {
+    int seq0 = g_seq;
     if (net) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
+    /* Map each APRS part-seq to this message's am so an incoming ack<seq> (the
+     * standard APRS ack, APRSdroid included) marks the bubble delivered. */
+    if (am[0]) for (int s = seq0; s < g_seq; s++) ackmap_add(s, am);
     if (g_ble_on) ble_tx_msg(id, wire);
     /* Always-redundant Reticulum backstop: store-and-forward holds it for a peer
      * who wasn't on APRS at the time; the copy dedups on receipt (best effort). */
@@ -2314,7 +2496,10 @@ static void do_convo_send(const char *buf) {
       }
     }
   }
+  /* Stamp the local-echo bubble with its receipt id + "sent" tick. */
+  if (am[0]) { s_cpy(g_send_rid, am, sizeof(g_send_rid)); s_cpy(g_send_status, "sent", sizeof(g_send_status)); }
   convo_deliver(id, "out", g_call, wire, text, "");
+  g_send_rid[0] = 0; g_send_status[0] = 0;
   status(priv ? "TX (private/Reticulum)" : (loc ? "TX message + position" : "TX message"));
 }
 
@@ -3510,6 +3695,18 @@ static void route_frame(const char *line) {
       }
     }
   } else if (p.type == APRS_MESSAGE) {
+    /* An incoming ack<seq> for a message WE sent → mark that bubble delivered
+     * (standard APRS ack; APRSdroid speaks this too). rej<seq> is not delivery. */
+    if (is_ack_text(p.text)) {
+      int forme = 1;
+      for (int i = 0; g_call[i] || p.addressee[i]; i++)
+        if (up(g_call[i]) != up(p.addressee[i])) { forme = 0; break; }
+      if (forme && p.text[0] == 'a') {
+        const char *am = ackmap_get(to_int(p.text + 3));
+        if (am) convo_status_emit(am, "delivered");
+      }
+      return;   /* acks never route further / render */
+    }
     if (p.text[0] && !is_ack_text(p.text)) {
       if (p.is_bulletin) {
         /* Buffer the line; multi-line bulletins are reassembled before delivery. */
@@ -3529,6 +3726,7 @@ static void route_frame(const char *line) {
         if (amine && follow_intercept(p.from, p.text)) return;
         if (amine && priv_intercept(p.from, p.text)) return;
         if (amine && rly_intercept(p.from, p.text)) return;
+        if (amine && rcpt_intercept(p.from, p.text)) return;
         /* A bare signature line is a continuation fragment, not a message:
          * keep it off the Live tab + notifications; da_ reassembles it. */
         int sigln = is_sig_line(p.text);
@@ -4126,6 +4324,7 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
     if (amine && follow_intercept(from, text)) return;
     if (amine && priv_intercept(from, text)) return;
     if (amine && rly_intercept(from, text)) return;
+    if (amine && rcpt_intercept(from, text)) return;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
@@ -4441,6 +4640,7 @@ void module_handle_event(void) {
     status(g_auto ? "Auto-beacon ON" : "Auto-beacon OFF");
     notify("info", g_auto ? "Auto-beacon enabled" : "Auto-beacon disabled");
   } else if (s_eq(cmd, "conversations_send")) do_convo_send(buf);
+  else if (s_eq(cmd, "conversations_open")) do_convo_open(buf);
   else if (s_eq(cmd, "conversations_private")) do_convo_private(buf);
   else if (s_eq(cmd, "conversations_hide")) do_convo_hide(buf);
   else if (s_eq(cmd, "conversations_block")) do_convo_block(buf);
