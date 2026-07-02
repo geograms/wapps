@@ -4358,11 +4358,24 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
   if (fseen_has(h)) return;
   fseen_add(h);
 
-  /* Digipeater: rebroadcast this frame once, after a short staggered delay
-   * (see rq_*), ignoring content already repeated in the last 10 minutes. */
+  /* Digipeater: rebroadcast this frame, after a short staggered delay (see
+   * rq_*), ignoring content already repeated in the last 10 minutes. A 1:1
+   * message gets TWO extra staggered re-airs — the addressee may sit at the
+   * fringe of a bridging neighbor (multi-floor/street relay), where a single
+   * 120 s advert window routinely loses the scan-batching lottery; repeats
+   * multiply the catch probability and receivers dedup by content anyway. */
   {
     uint64_t now = hal_time_epoch();
-    if (!rpt_recent(h, now)) { rpt_mark(h, now); rq_push(compact, now + 1 + (h % 3)); }
+    if (!rpt_recent(h, now)) {
+      rpt_mark(h, now);
+      rq_push(compact, now + 1 + (h % 3));
+      int one2one = to[0] && to[0] != '#' && to[0] != '!' && to[0] != '?' &&
+                    text[0] != '?';
+      if (one2one) {
+        rq_push(compact, now + 75 + (h % 5));
+        rq_push(compact, now + 150 + (h % 7));
+      }
+    }
   }
 
   if (s_eq(to, "!")) {                    /* position: "lat,lon[,comment]" */
