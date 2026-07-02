@@ -86,7 +86,10 @@ int32_t module_init(void) {
 }
 
 int32_t module_tick(void) {
-    tick_refresh(0);
+    /* Every 5th tick (~10 s) force a re-push even when topology is unchanged,
+     * so the "seen Xs ago" freshness chips keep counting up. */
+    static int n = 0;
+    tick_refresh(++n % 5 == 0);
     return 0;
 }
 
@@ -99,10 +102,19 @@ int32_t module_handle_event(void) {
     if (!json_raw(buf, "command", cmd, sizeof(cmd))) return 0;
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
         tick_refresh(1);
-    } else if (str_eq(cmd, "devices_tap") || str_eq(cmd, "devices_message")) {
-        /* M2: open a 1:1 conversation with the tapped device. For M1 the tap
-         * just forces a refresh so the row's freshness updates. */
-        tick_refresh(1);
+    } else if (str_eq(cmd, "message") || str_eq(cmd, "devices_tap")) {
+        /* Row buttons arrive as the bare action name ("message"); row taps as
+         * "<field>_tap". Both carry the row id in "devices_id". */
+        /* Envelope button (or row tap): jump into the Chat wapp's 1:1
+         * conversation with this callsign — the host handles the navigation. */
+        char id[32] = "";
+        if (json_raw(buf, "devices_id", id, sizeof(id)) && id[0] && id[0] != '#') {
+            char m[128];
+            str_copy(m, "{\"type\":\"mesh.message\",\"callsign\":\"", sizeof(m));
+            str_cat(m, id, sizeof(m));
+            str_cat(m, "\"}", sizeof(m));
+            send_msg(m);
+        }
     }
     return 0;
 }
