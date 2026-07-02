@@ -2114,6 +2114,31 @@ static void relay_pick(void) {
   g_myrelay_n = cnt;
 }
 
+/* Rendezvous relay set (host-ranked by sha256(relay|pubkey)): the sender
+ * publishes to the RECIPIENT's set and the receiver polls its OWN set, so the
+ * two meet without the one-shot ?RLY announce (which an offline receiver —
+ * the whole point of the relay backup — never hears). */
+static char g_rdvrelay[RELAY_MAX][72]; static int g_rdvrelay_n = 0; /* ours */
+
+static int relay_rendezvous(const char *np, char dst[][72], int max) {
+  if (!np || !np[0]) return 0;
+  static char j[RELAY_MAX * 80 + 16];
+  int32_t n = hal_relay_for(np, s_len(np), j, sizeof(j) - 1);
+  if (n <= 0 || n >= (int32_t)sizeof(j)) return 0;
+  j[n] = 0;
+  int cnt = 0; const char *p = j;
+  while (*p && cnt < max) {
+    while (*p && *p != '"') p++;
+    if (!*p) break;
+    p++;
+    int k = 0; while (*p && *p != '"' && k < 71) dst[cnt][k++] = *p++;
+    dst[cnt][k] = 0;
+    if (*p == '"') p++;
+    if (k > 0) cnt++;
+  }
+  return cnt;
+}
+
 /* Tell [call] which relays we back up to (once per session) — a control frame
  * "?RLY h1 h2 h3" so the peer knows where to poll for messages from us. */
 static void relay_announce_to(const char *call) {
@@ -2189,6 +2214,16 @@ static void relay_pollset_json(char *out, unsigned cap) {
     s_cat(out, "\"", cap); s_cat(out, g_myrelay[i], cap); s_cat(out, "\"", cap);
     first = 0;
   }
+  /* Our rendezvous set — where peers that know our npub publish for us. */
+  for (int i = 0; i < g_rdvrelay_n; i++) {
+    int dup = 0;
+    for (int j = 0; j < g_pollrelay_n && !dup; j++) if (s_eq(g_rdvrelay[i], g_pollrelay[j])) dup = 1;
+    for (int j = 0; j < g_myrelay_n && !dup; j++) if (s_eq(g_rdvrelay[i], g_myrelay[j])) dup = 1;
+    if (dup) continue;
+    if (!first) s_cat(out, ",", cap);
+    s_cat(out, "\"", cap); s_cat(out, g_rdvrelay[i], cap); s_cat(out, "\"", cap);
+    first = 0;
+  }
   s_cat(out, "]", cap);
 }
 
@@ -2218,7 +2253,7 @@ static void relay_drain(void) {
   }
   s_cat(ids, "]", sizeof(ids));
   if (idn > 0) {
-    char rj[(POLLRELAY_MAX + RELAY_MAX) * 80 + 16];
+    char rj[(POLLRELAY_MAX + 2 * RELAY_MAX) * 80 + 16];
     relay_pollset_json(rj, sizeof(rj));
     hal_relay_dm_drop(ids, s_len(ids), rj, s_len(rj)); /* + local store drop, host-side */
   }
@@ -2232,7 +2267,8 @@ static void relay_tick(void) {
   if (now - g_last_relaypoll < RELAY_POLL_INTERVAL) return;
   g_last_relaypoll = now;
   if (g_myrelay_n == 0) relay_pick();
-  char rj[(POLLRELAY_MAX + RELAY_MAX) * 80 + 16];
+  g_rdvrelay_n = relay_rendezvous(g_pubkey, g_rdvrelay, RELAY_MAX);
+  char rj[(POLLRELAY_MAX + 2 * RELAY_MAX) * 80 + 16];
   relay_pollset_json(rj, sizeof(rj));
   hal_relay_dm_fetch(0, rj, s_len(rj)); /* since=0: DROP + rmid-dedup bound the set */
 }
@@ -2284,10 +2320,18 @@ static void deliver_1to1_backup(const char *call, const char *text) {
   for (int i = 0; text[i] && k < (int)sizeof(relaypt) - 1; i++) relaypt[k++] = text[i];
   relaypt[k] = 0;
   if (g_myrelay_n == 0) relay_pick();
-  if (g_myrelay_n > 0) {
-    relay_announce_to(call);
-    char rj[RELAY_MAX * 80 + 16]; relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
-    hal_relay_dm_send(np, s_len(np), relaypt, s_len(relaypt), rj, s_len(rj), rmid, s_len(rmid));
+  /* Publish where the RECIPIENT will look: their rendezvous set (host-ranked
+   * by their npub). Fall back to our own picks when the directory is empty. */
+  {
+    char rdv[RELAY_MAX][72];
+    int rn = relay_rendezvous(np, rdv, RELAY_MAX);
+    if (rn > 0 || g_myrelay_n > 0) {
+      relay_announce_to(call);
+      char rj[RELAY_MAX * 80 + 16];
+      if (rn > 0) relays_json(rdv, rn, rj, sizeof(rj));
+      else relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+      hal_relay_dm_send(np, s_len(np), relaypt, s_len(relaypt), rj, s_len(rj), rmid, s_len(rmid));
+    }
   }
   /* Direct, encrypted Reticulum copy (the dest came with the resolution). */
   char ct[640];
@@ -2511,12 +2555,17 @@ static void do_convo_send(const char *buf) {
    * rmid so it dedups against the direct copy above. */
   if (encrypted && id[0] != '#') {
     if (g_myrelay_n == 0) relay_pick();
-    if (g_myrelay_n > 0) {
-      relay_announce_to(id);
-      const char *np = pk_get(id);
-      if (np && np[0]) {
+    const char *np = pk_get(id);
+    if (np && np[0]) {
+      /* Publish where the RECIPIENT will look: their rendezvous set (host-
+       * ranked by their npub); fall back to our own picks if none known. */
+      char rdv[RELAY_MAX][72];
+      int rn = relay_rendezvous(np, rdv, RELAY_MAX);
+      if (rn > 0 || g_myrelay_n > 0) {
+        relay_announce_to(id);
         char rj[RELAY_MAX * 80 + 16];
-        relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
+        if (rn > 0) relays_json(rdv, rn, rj, sizeof(rj));
+        else relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
         hal_relay_dm_send(np, s_len(np), relaypt, s_len(relaypt),
                           rj, s_len(rj), rmid, s_len(rmid));
       }

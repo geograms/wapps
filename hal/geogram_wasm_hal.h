@@ -912,6 +912,14 @@ __attribute__((import_module("hal"), import_name("relay_dm_fetch")))
 int32_t hal_relay_dm_fetch(uint32_t since_sec,
                            const char *relays_json, uint32_t relays_len);
 
+/* Rendezvous relay set for [pubkey] (hex or base64url x-only): JSON array of
+ * relay identity hashes ranked by sha256(relay|pubkey). Sender (recipient's
+ * key) and receiver (own key) derive the SAME set independently, so the
+ * publish and poll sets meet even when the ?RLY announce was missed. */
+__attribute__((import_module("hal"), import_name("relay_for")))
+int32_t hal_relay_for(const char *pubkey, uint32_t pubkey_len,
+                      char *out, uint32_t out_cap);
+
 /* Pop the next fetched DM as JSON {"id":hex,"from":base64url,"ts":sec,
  * "text":plaintext,"mid":id} into out. Returns bytes written, 0 if none. */
 __attribute__((import_module("hal"), import_name("relay_dm_recv")))
