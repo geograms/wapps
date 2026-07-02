@@ -1837,12 +1837,17 @@ static void activity_capture(const char *from, const char *grp,
 /* Returns 1 if a message bubble was delivered, 0 if dropped (a like vote or a
  * repeated/duplicate message) — callers gate notifications on this so recurring
  * bulletins/duplicates don't re-notify. */
+static void trc(const char *tag, const char *a, const char *b);
+
 static int convo_deliver(const char *id, const char *dir, const char *from,
                           const char *text, const char *preview,
                           const char *via) {
   /* Local block: never show anything from a blocked station (their own echoes of
    * our messages — dir "out" from g_call — are unaffected). */
-  if (s_eq(dir, "in") && (is_blocked(from) || is_muted(from))) return 0;
+  if (s_eq(dir, "in") && (is_blocked(from) || is_muted(from))) {
+    trc("drop:blocked", from, "");
+    return 0;
+  }
   /* Receipt correlation id: pull `am:<6hex>` out of the wire + strip it so it
    * never displays (1:1 only; groups never carry it). */
   char am[8] = ""; char ambuf[720]; char pvbuf[720];
@@ -1950,7 +1955,7 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   char key[16]; u_itoa(h, key);
   /* Locally hidden message: stays gone even if it arrives again on another
    * transport (the key is the same content signature the host hid it under). */
-  if (is_hidden_key(key)) return 0;
+  if (is_hidden_key(key)) { trc("drop:hidden", from, ""); return 0; }
   /* Distance + position of the sender (incoming only), so the host can show
    * them on the map when the distance is tapped. */
   char meta[24] = "";
@@ -1969,7 +1974,11 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
    * same plaintext. Collapse them on (id,from,plaintext). Encrypted messages no
    * longer ride APRS, so every copy decrypts to the same text (no undecryptable
    * twin with a divergent plaintext). Groups keep their own dedup. */
-  if (!rep && id[0] != '#') {
+  /* Only when the primary key above hashed something OTHER than the final
+   * plaintext (encrypted content or an rmid) — for a plain message h already
+   * IS sig_hash(id,from,disp), and re-checking it here self-collides with the
+   * seen_add above, dropping every plain 1:1 as its own duplicate. */
+  if (!rep && id[0] != '#' && (enc || rmid[0])) {
     unsigned ph = sig_hash(id, from, disp);
     if (seen_has(ph)) rep = 1; else seen_add(ph);
   }
@@ -1978,7 +1987,7 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
    * re-broadcasting the same bulletin on a schedule. Drop it so the chat shows
    * each distinct message once and recurring bulletins don't pile up or get
    * auto-pinned (that banner was just noise). Our own sends are never dropped. */
-  if (rep && s_eq(dir, "in")) return 0;
+  if (rep && s_eq(dir, "in")) { trc("drop:dup", from, ""); return 0; }
   convo_msg(id, dir, from, disp, key, meta, lat, lon, via, mid, parent, auth, enc,
             (id[0] != '#') && convo_is_private(id));
   convo_touch(id, enc ? disp : preview, 0);   /* show decrypted text in the list */
@@ -3664,10 +3673,19 @@ static void ra_flush(void) {
  * signature/ciphertext is corrupted (decrypt fails). 256 covers it. */
 typedef struct { int used; char from[16]; char via[4]; char part[DA_PARTS][256]; int n; uint64_t t; } da_t;
 static da_t g_da[DA_MAX];
+static void trc(const char *tag, const char *a, const char *b) {
+  char t[160]; s_cpy(t, "[trc] ", sizeof(t)); s_cat(t, tag, sizeof(t));
+  s_cat(t, " ", sizeof(t)); s_cat(t, a, sizeof(t));
+  if (b && b[0]) { s_cat(t, " / ", sizeof(t)); s_cat(t, b, sizeof(t)); }
+  hal_log(6, t, s_len(t));
+}
+
 static void da_emit_one(const char *from, const char *full, const char *via) {
   char prev[256], sg[80]; const char *pv = full;
   if (sig_split(full, prev, sizeof(prev), sg, sizeof(sg))) pv = prev;
-  convo_deliver(from, "in", from, full, pv, via);
+  trc("da_emit", from, full);
+  int r = convo_deliver(from, "in", from, full, pv, via);
+  trc(r ? "delivered" : "DROPPED", from, full);
 }
 /* Buffer one direct-message part, keyed by (from, transport). A message that
  * arrives over BOTH transports (directly from APRS-IS AND re-broadcast by a BLE
@@ -4409,6 +4427,7 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
        * also received directly over APRS-IS dedups (shown once). */
+      trc("da_add", from, text);
       da_add(from, text, via);
     } else {
       char meta[24] = ""; double slat = 0, slon = 0;
@@ -4551,6 +4570,14 @@ void module_tick(void) {
       if (ble_poll(rec, sizeof(rec)) <= 0) break;
       char frame[300]; jstr(rec, "data", frame, sizeof(frame));
       int rssi = 0; { char rv[12]; if (jstr(rec, "rssi", rv, sizeof(rv))) rssi = to_int(rv); }
+      { /* trace: prove what the wapp actually sees off the radio (sep -> '|') */
+        char t[96]; s_cpy(t, "[chat] ble rx: ", sizeof(t));
+        unsigned tl = s_len(t);
+        for (unsigned k = 0; frame[k] && tl < sizeof(t) - 1 && k < 60; k++)
+          t[tl++] = (frame[k] == 0x1f) ? '|' : frame[k];
+        t[tl] = 0;
+        hal_log(6, t, s_len(t));
+      }
       if (frame[0]) ble_handle(frame, rssi, "BLE");   /* real Bluetooth radio */
     }
     if (g_lat != 0 || g_lon != 0) {
