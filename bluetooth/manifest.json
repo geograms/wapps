@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.bluetooth",
-  "version":         "0.1.4",
+  "version":         "0.2.0",
   "kind":            "app",
   "title":           "Bluetooth",
   "description":     "Bluetooth - the BLE street mesh: devices within reach and how far messages can travel.",

@@ -49,11 +49,85 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
 
 /* ── Buffers ─────────────────────────────────────────────────────────── */
 static char g_data[32768];   /* hal_mesh_devices output (sections JSON)     */
-static char g_msg[33280];    /* outbound ui.people.set wrapper              */
+static char g_msg[40960];    /* outbound ui.people.set wrapper              */
 static char g_status[1024];  /* hal_mesh_status output                      */
+static char g_scf[1024];     /* hal_mesh_scf_status output                  */
+static char g_xfers[4096];   /* hal_mesh_transfers output                   */
 static char g_last_rev[16] = "";
 
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
+
+/* Append a "Node" section (status/load/custody counters) and, when any bulk
+ * transfer exists, a "Transfers" section — reusing the people widget, so no
+ * new UI plumbing. The device sections arrive as "[...]": we splice our
+ * extra sections before the closing bracket. */
+static void append_mesh_sections(void) {
+    unsigned l = str_len(g_msg);
+    while (l && g_msg[l - 1] != ']') l--;          /* trim to last ']' */
+    if (!l) return;
+    g_msg[l - 1] = '\0';                           /* drop the ']' */
+
+    /* Node status line from hal_mesh_status + scf counters. */
+    char load[16] = "?", polite[16] = "?", pend[16] = "0", spool[16] = "0";
+    json_raw(g_status, "channelLoad", load, sizeof(load));
+    json_raw(g_status, "politeness", polite, sizeof(polite));
+    if (hal_mesh_scf_status(g_scf, sizeof(g_scf) - 1) > 0) {
+        json_raw(g_scf, "inTransit", pend, sizeof(pend));
+        json_raw(g_scf, "spoolPending", spool, sizeof(spool));
+    }
+    str_cat(g_msg, ",{\"title\":\"Node\",\"items\":[{\"id\":\"node\","
+                   "\"title\":\"This node\",\"subtitle\":\"load ", sizeof(g_msg));
+    str_cat(g_msg, load, sizeof(g_msg));
+    str_cat(g_msg, "/s - ", sizeof(g_msg));
+    str_cat(g_msg, polite, sizeof(g_msg));
+    str_cat(g_msg, " - carrying ", sizeof(g_msg));
+    str_cat(g_msg, pend, sizeof(g_msg));
+    str_cat(g_msg, " msg / ", sizeof(g_msg));
+    str_cat(g_msg, spool, sizeof(g_msg));
+    str_cat(g_msg, " file\",\"tags\":[\"", sizeof(g_msg));
+    str_cat(g_msg, polite, sizeof(g_msg));
+    str_cat(g_msg, "\"]}]}", sizeof(g_msg));
+
+    /* Transfers (only when non-empty; the host emits a JSON array). */
+    int xn = hal_mesh_transfers(g_xfers, sizeof(g_xfers) - 1);
+    if (xn > 4) {                                   /* more than "[]" */
+        g_xfers[xn] = '\0';
+        /* Build rows: name -> target have/size state. Cheap scan: each object
+         * is flat; reuse json_raw per occurrence by splitting on '{'. */
+        str_cat(g_msg, ",{\"title\":\"Transfers\",\"items\":[", sizeof(g_msg));
+        int first = 1;
+        for (char *p = g_xfers; *p; p++) {
+            if (*p != '{') continue;
+            char name[65] = "", tgt[12] = "", have[16] = "", size[16] = "", st[8] = "";
+            json_raw(p, "name", name, sizeof(name));
+            json_raw(p, "target", tgt, sizeof(tgt));
+            json_raw(p, "have", have, sizeof(have));
+            json_raw(p, "size", size, sizeof(size));
+            json_raw(p, "state", st, sizeof(st));
+            if (!name[0]) continue;
+            if (!first) str_cat(g_msg, ",", sizeof(g_msg));
+            first = 0;
+            str_cat(g_msg, "{\"id\":\"x_", sizeof(g_msg));
+            str_cat(g_msg, name, sizeof(g_msg));
+            str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
+            str_cat(g_msg, name, sizeof(g_msg));
+            str_cat(g_msg, "\",\"subtitle\":\"-> ", sizeof(g_msg));
+            str_cat(g_msg, tgt, sizeof(g_msg));
+            str_cat(g_msg, "  ", sizeof(g_msg));
+            str_cat(g_msg, have, sizeof(g_msg));
+            str_cat(g_msg, "/", sizeof(g_msg));
+            str_cat(g_msg, size, sizeof(g_msg));
+            str_cat(g_msg, " B\",\"tags\":[\"", sizeof(g_msg));
+            str_cat(g_msg, st, sizeof(g_msg));
+            str_cat(g_msg, "\"]}", sizeof(g_msg));
+            /* advance past this object */
+            while (*p && *p != '}') p++;
+            if (!*p) break;
+        }
+        str_cat(g_msg, "]}", sizeof(g_msg));
+    }
+    str_cat(g_msg, "]", sizeof(g_msg));             /* re-close the array */
+}
 
 static void push_devices(void) {
     int n = hal_mesh_devices(g_data, sizeof(g_data));
@@ -62,6 +136,7 @@ static void push_devices(void) {
     str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"devices\",\"sections\":",
              sizeof(g_msg));
     str_cat(g_msg, g_data, sizeof(g_msg));
+    append_mesh_sections();
     str_cat(g_msg, "}", sizeof(g_msg));
     send_msg(g_msg);
 }
@@ -102,6 +177,12 @@ int32_t module_handle_event(void) {
     if (!json_raw(buf, "command", cmd, sizeof(cmd))) return 0;
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
         tick_refresh(1);
+    } else if (str_eq(cmd, "setpref")) {
+        char kv[64] = "";
+        if (json_raw(buf, "setpref_kv", kv, sizeof(kv)) && kv[0]) {
+            hal_mesh_set_pref(kv, str_len(kv));
+            tick_refresh(1);
+        }
     } else if (str_eq(cmd, "message") || str_eq(cmd, "devices_tap")) {
         /* Row buttons arrive as the bare action name ("message"); row taps as
          * "<field>_tap". Both carry the row id in "devices_id". */

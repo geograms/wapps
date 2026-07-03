@@ -997,6 +997,18 @@ int32_t hal_mesh_status(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("mesh_devices")))
 int32_t hal_mesh_devices(char *out, uint32_t out_cap);
 
+/* Custody store + bulk spool counters JSON (M2/M3). */
+__attribute__((import_module("hal"), import_name("mesh_scf_status")))
+int32_t hal_mesh_scf_status(char *out, uint32_t out_cap);
+
+/* Bulk transfers JSON [{sha,name,target,size,have,state,active}]. */
+__attribute__((import_module("hal"), import_name("mesh_transfers")))
+int32_t hal_mesh_transfers(char *out, uint32_t out_cap);
+
+/* Set a mesh tunable "key=value" (msgQuotaMb, bulkQuotaMb). 0 ok. */
+__attribute__((import_module("hal"), import_name("mesh_set_pref")))
+int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
+
 /* ── Contacts (people this device already knows) ─────────────────────── *
  *
  * A reusable picker source: the people the user can address — those seen on
