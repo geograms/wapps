@@ -1012,6 +1012,13 @@ uint32_t hal_nostr_follows(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("nostr_wot")))
 uint32_t hal_nostr_wot(char *out, uint32_t out_cap);
 
+/* Discovery feed for users who follow nobody: writes a subscription id that
+ * only yields kind-1 posts which have gathered more than 2 distinct reactions
+ * (spam gets none, so it never appears). Drain it with hal_nostr_event_recv
+ * like any other sub. Returns subId byte length, 0 if unavailable. */
+__attribute__((import_module("hal"), import_name("nostr_discovery")))
+uint32_t hal_nostr_discovery(char *out, uint32_t out_cap);
+
 /* Follow / unfollow a pubkey ([key] hex or npub). */
 __attribute__((import_module("hal"), import_name("nostr_follow")))
 int32_t hal_nostr_follow(const char *key, uint32_t key_len);

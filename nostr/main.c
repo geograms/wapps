@@ -129,15 +129,19 @@ static void subscribe_all(void) {
         int wn = hal_nostr_wot(g_wot, sizeof(g_wot) - 1);
         if (wn > 0) g_wot[wn] = '\0'; else str_copy(g_wot, "[]", sizeof(g_wot));
         if (str_len(g_wot) > 2) {
+            /* Have a trust graph: subscribe kind-1 from it (spam-free). */
             str_copy(g_feedfilter, "{\"kinds\":[1],\"authors\":", sizeof(g_feedfilter));
             str_cat(g_feedfilter, g_wot, sizeof(g_feedfilter));
             str_cat(g_feedfilter, ",\"limit\":200}", sizeof(g_feedfilter));
+            int n = hal_nostr_subscribe(g_feedfilter, str_len(g_feedfilter),
+                                        g_sub_feed, sizeof(g_sub_feed) - 1);
+            if (n > 0) g_sub_feed[n] = '\0';
         } else {
-            str_copy(g_feedfilter, "{\"kinds\":[1],\"limit\":50}", sizeof(g_feedfilter));
+            /* Follow nobody yet: discovery feed — only posts with >2 likes,
+             * so a new user sees quality, not the raw firehose of spam. */
+            int n = hal_nostr_discovery(g_sub_feed, sizeof(g_sub_feed) - 1);
+            if (n > 0) g_sub_feed[n] = '\0';
         }
-        int n = hal_nostr_subscribe(g_feedfilter, str_len(g_feedfilter),
-                                    g_sub_feed, sizeof(g_sub_feed) - 1);
-        if (n > 0) g_sub_feed[n] = '\0';
     }
     if (!g_sub_dm[0] && g_self[0]) {
         /* DMs to us (#p=self) AND our own sent DMs (authors=self). */
