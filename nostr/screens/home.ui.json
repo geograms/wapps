@@ -1,11 +1,40 @@
 [
   {
     "$": "screen",
-    "name": "Feed",
+    "name": "Activity",
     "icon": "home",
-    "tip": "Notes from the accounts you follow",
+    "tip": "Notes from the accounts you follow. Share an update below.",
     "children": [
-      { "$": "field", "name": "feed", "$type": "chat", "hint": "What's happening?" }
+      { "$": "field", "name": "activity", "$type": "chat", "hint": "What's happening?" }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Messages",
+    "icon": "mail",
+    "tip": "Encrypted direct messages (kind-4), organised as conversations.",
+    "children": [
+      {
+        "$": "group",
+        "name": "conversations",
+        "$type": "conversations",
+        "label": "Messages",
+        "children": [
+          { "$": "action", "name": "new_dm", "icon": "edit", "slot": "list", "tip": "New direct message" }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Follows",
+    "icon": "people",
+    "tip": "Accounts you follow appear in your Activity feed.",
+    "children": [
+      { "$": "action", "name": "follow_add", "label": "Follow an npub", "icon": "person_add", "style": "primary",
+        "tip": "Paste an npub or hex pubkey to follow — their notes appear in Activity." },
+      { "$": "field", "name": "follow_input", "$type": "string", "label": "npub / hex pubkey", "hint": "npub1…", "slot": "menu" },
+      { "$": "field", "name": "follows_list", "$type": "people", "tip": "Who you follow; tap a row to unfollow." }
     ]
   },
   {

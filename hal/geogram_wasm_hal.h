@@ -1011,6 +1011,26 @@ int32_t hal_nostr_follow(const char *key, uint32_t key_len);
 __attribute__((import_module("hal"), import_name("nostr_unfollow")))
 int32_t hal_nostr_unfollow(const char *key, uint32_t key_len);
 
+/* Our own x-only pubkey (hex) into [out]; use it to build the Messages filter
+ * {"kinds":[4],"#p":[<self>]}. Returns bytes written, 0 if no profile. */
+__attribute__((import_module("hal"), import_name("nostr_self")))
+uint32_t hal_nostr_self(char *out, uint32_t out_cap);
+
+/* Encrypt [text] (NIP-04) to [recipient] (hex x-only pubkey), sign it as a
+ * kind-4 with the profile key, and publish across every enabled relay.
+ * Fire-and-forget; 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("nostr_dm_send")))
+int32_t hal_nostr_dm_send(const char *recipient, uint32_t recipient_len,
+                          const char *text, uint32_t text_len);
+
+/* Decrypt a kind-4 [content] sent by [sender] (hex x-only pubkey) with the
+ * profile key. Writes plaintext to [out]; returns bytes written, 0 if it is
+ * not addressed to us / cannot be decrypted. */
+__attribute__((import_module("hal"), import_name("nostr_dm_decrypt")))
+uint32_t hal_nostr_dm_decrypt(const char *sender, uint32_t sender_len,
+                              const char *content, uint32_t content_len,
+                              char *out, uint32_t out_cap);
+
 /* ── Reticulum visualization/management (read-only) ──────────────────── *
  *
  * The node's view of the Reticulum network, for the "reticulum" wapp to
