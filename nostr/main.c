@@ -341,6 +341,16 @@ int32_t module_handle_event(void) {
             g_sub_feed[0] = '\0';
             subscribe_all(); push_follows();
         }
+    } else if (str_eq(cmd, "dm_send")) {
+        char to[128] = "", text[6000] = "";
+        json_raw(buf, "dm_to", to, sizeof(to));
+        json_raw(buf, "dm_text", text, sizeof(text));
+        if (to[0] && text[0]) {
+            hal_nostr_dm_send(to, str_len(to), text, str_len(text));
+            char title[16]; short12(to, title);   /* local echo → Messages */
+            convo_upsert(to, title, text);
+            convo_msg(to, "out", "me", text, "", "0");
+        }
     } else if (str_eq(cmd, "relay_add")) {
         char uri[256] = "";
         if (json_raw(buf, "new_relay", uri, sizeof(uri)) && uri[0]) {

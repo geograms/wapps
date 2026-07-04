@@ -39,6 +39,20 @@
   },
   {
     "$": "screen",
+    "name": "New DM",
+    "icon": "edit",
+    "menu": true,
+    "tip": "Start an encrypted direct message (NIP-04).",
+    "children": [
+      { "$": "field", "name": "dm_to", "$type": "string", "label": "To",
+        "hint": "npub1…  or  hex pubkey" },
+      { "$": "field", "name": "dm_text", "$type": "string", "label": "Message",
+        "hint": "Type a message" },
+      { "$": "action", "name": "dm_send", "label": "Send DM", "icon": "send", "style": "primary" }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "NOSTR servers",
     "icon": "cloud",
     "menu": true,
