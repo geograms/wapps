@@ -84,6 +84,25 @@ static void json_escape_cat(char *dst, const char *s, unsigned m) {
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 static void short12(const char *hex, char *out) { str_copy(out, hex, 13); }
 
+/* "HH:MM" (UTC) from a unix-seconds string. */
+static void fmt_hhmm(const char *unix_s, char *out) {
+    long v = 0;
+    for (const char *p = unix_s; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+    int hh = (int)((v / 3600) % 24), mm = (int)((v / 60) % 60);
+    out[0] = '0' + hh / 10; out[1] = '0' + hh % 10; out[2] = ':';
+    out[3] = '0' + mm / 10; out[4] = '0' + mm % 10; out[5] = '\0';
+}
+
+/* Append the display-time fields the host feed wants: "time" (HH:MM clock) +
+ * "t" (absolute epoch, MILLISECONDS) so older posts get a date prefix. */
+static void cat_time_fields(char *dst, const char *ts, unsigned m) {
+    str_cat(dst, "\"time\":\"", m);
+    if (ts[0]) { char hm[8]; fmt_hhmm(ts, hm); str_cat(dst, hm, m); }
+    str_cat(dst, "\",\"t\":", m);
+    str_cat(dst, ts[0] ? ts : "0", m);
+    str_cat(dst, "000", m); /* seconds → ms */
+}
+
 /* ── State ───────────────────────────────────────────────────────────── */
 static char g_self[80] = "";       /* our x-only pubkey (hex)              */
 static char g_sub_feed[64] = "";   /* kind-1 subscription id               */
@@ -92,6 +111,8 @@ static char g_evt[8192];           /* one drained event JSON               */
 static char g_relays[8192];        /* hal_nostr_relays output              */
 static char g_msg[16384];          /* outbound UI message                  */
 static char g_follows[4096];       /* followed pubkeys JSON array          */
+static char g_wot[48128];          /* web-of-trust author set JSON         */
+static char g_feedfilter[52224];   /* built kind-1 WoT filter              */
 static char g_plain[6000];         /* decrypted DM plaintext               */
 static int  g_ticks = 0;
 
@@ -102,17 +123,20 @@ static void subscribe_all(void) {
         if (sn > 0) g_self[sn] = '\0';
     }
     if (!g_sub_feed[0]) {
-        int fn = hal_nostr_follows(g_follows, sizeof(g_follows) - 1);
-        if (fn > 0) g_follows[fn] = '\0'; else str_copy(g_follows, "[]", sizeof(g_follows));
-        char filter[4352];
-        if (str_len(g_follows) > 2) {
-            str_copy(filter, "{\"kinds\":[1],\"authors\":", sizeof(filter));
-            str_cat(filter, g_follows, sizeof(filter));
-            str_cat(filter, ",\"limit\":100}", sizeof(filter));
+        // Web of trust, not the firehose: kind-1 from follows + followers +
+        // follows-of-follows. Only fall back to a small global sample when the
+        // trust set is still empty (brand-new user with no follows).
+        int wn = hal_nostr_wot(g_wot, sizeof(g_wot) - 1);
+        if (wn > 0) g_wot[wn] = '\0'; else str_copy(g_wot, "[]", sizeof(g_wot));
+        if (str_len(g_wot) > 2) {
+            str_copy(g_feedfilter, "{\"kinds\":[1],\"authors\":", sizeof(g_feedfilter));
+            str_cat(g_feedfilter, g_wot, sizeof(g_feedfilter));
+            str_cat(g_feedfilter, ",\"limit\":200}", sizeof(g_feedfilter));
         } else {
-            str_copy(filter, "{\"kinds\":[1],\"limit\":50}", sizeof(filter));
+            str_copy(g_feedfilter, "{\"kinds\":[1],\"limit\":50}", sizeof(g_feedfilter));
         }
-        int n = hal_nostr_subscribe(filter, str_len(filter), g_sub_feed, sizeof(g_sub_feed) - 1);
+        int n = hal_nostr_subscribe(g_feedfilter, str_len(g_feedfilter),
+                                    g_sub_feed, sizeof(g_sub_feed) - 1);
         if (n > 0) g_sub_feed[n] = '\0';
     }
     if (!g_sub_dm[0] && g_self[0]) {
@@ -140,8 +164,8 @@ static void feed_append(const char *evt) {
     str_cat(g_msg, from, sizeof(g_msg));
     str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg));
     str_cat(g_msg, content, sizeof(g_msg));      /* already-escaped body */
-    str_cat(g_msg, "\",\"time\":", sizeof(g_msg));
-    str_cat(g_msg, ts[0] ? ts : "0", sizeof(g_msg));
+    str_cat(g_msg, "\",", sizeof(g_msg));
+    cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
     send_msg(g_msg);
 }
@@ -167,8 +191,9 @@ static void convo_msg(const char *peer, const char *dir, const char *from,
     str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg)); json_escape_cat(g_msg, text, sizeof(g_msg));
     str_cat(g_msg, "\",\"key\":\"\",\"meta\":\"\",\"mid\":\"", sizeof(g_msg));
     str_cat(g_msg, mid, sizeof(g_msg));
-    str_cat(g_msg, "\",\"time\":\"", sizeof(g_msg)); str_cat(g_msg, ts[0] ? ts : "0", sizeof(g_msg));
-    str_cat(g_msg, "\"}", sizeof(g_msg));
+    str_cat(g_msg, "\",", sizeof(g_msg));
+    cat_time_fields(g_msg, ts, sizeof(g_msg));
+    str_cat(g_msg, "}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
@@ -271,7 +296,11 @@ int32_t module_init(void) {
 int32_t module_tick(void) {
     subscribe_all();
     drain();
-    if (++g_ticks % 8 == 0) push_relays();
+    g_ticks++;
+    // The web-of-trust set grows as kind-3 contact lists arrive, so re-subscribe
+    // the feed a couple of times early to pick up follows-of-follows.
+    if (g_ticks == 10 || g_ticks == 30) { g_sub_feed[0] = '\0'; subscribe_all(); }
+    if (g_ticks % 8 == 0) push_relays();
     return 0;
 }
 

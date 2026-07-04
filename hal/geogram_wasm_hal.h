@@ -1001,9 +1001,16 @@ __attribute__((import_module("hal"), import_name("nostr_post")))
 int32_t hal_nostr_post(int32_t kind, const char *content, uint32_t content_len,
                        const char *tags, uint32_t tags_len);
 
-/* Followed pubkeys (hex) as a JSON array — the feed's author set. */
+/* Followed pubkeys (hex) as a JSON array — who the user explicitly follows. */
 __attribute__((import_module("hal"), import_name("nostr_follows")))
 uint32_t hal_nostr_follows(char *out, uint32_t out_cap);
+
+/* Web-of-trust author set as a JSON array (hex): the user's follows, the people
+ * who follow them, and their follows' follows (degree-2), capped. Subscribe the
+ * feed to kind-1 from THIS instead of the global firehose to cut spam. Grows as
+ * kind-3 contact lists arrive, so re-read it periodically. */
+__attribute__((import_module("hal"), import_name("nostr_wot")))
+uint32_t hal_nostr_wot(char *out, uint32_t out_cap);
 
 /* Follow / unfollow a pubkey ([key] hex or npub). */
 __attribute__((import_module("hal"), import_name("nostr_follow")))
