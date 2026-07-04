@@ -1,0 +1,27 @@
+[
+  {
+    "$": "screen",
+    "name": "Feed",
+    "icon": "home",
+    "tip": "Notes from the accounts you follow",
+    "children": [
+      { "$": "field", "name": "feed", "$type": "chat", "hint": "What's happening?" }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "NOSTR servers",
+    "icon": "cloud",
+    "menu": true,
+    "tip": "Relays this device talks to — internet (wss://), Reticulum (rns://) or this device (local)",
+    "children": [
+      { "$": "field", "name": "relays", "$type": "people",
+        "tip": "Tap a relay to remove it. Status shows reachability." },
+      { "$": "field", "name": "new_relay", "$type": "string",
+        "label": "Add a relay",
+        "hint": "wss://relay.example.com  |  rns://<id>  |  local" },
+      { "$": "action", "name": "relay_add", "label": "Add relay",
+        "icon": "add", "style": "primary" }
+    ]
+  }
+]

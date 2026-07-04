@@ -952,6 +952,65 @@ int32_t hal_relay_resolve(const char *callsign, uint32_t callsign_len,
 __attribute__((import_module("hal"), import_name("relay_resolve_recv")))
 uint32_t hal_relay_resolve_recv(char *out, uint32_t out_cap);
 
+/* ── hal.nostr — transport-abstract NOSTR client ─────────────────────────
+ *
+ * A normal NOSTR client, but the transport is chosen by each relay URI's
+ * scheme, so the wapp never cares which medium a relay is on:
+ *   wss:// | ws://   internet WebSocket
+ *   rns://<idhash>   a relay on the Reticulum mesh
+ *   local            THIS device (also served to others over RNS + a local
+ *                    wss server, so the device is itself a relay + Blossom).
+ * Every inbound event merges into the one local store; subscriptions are
+ * drained one event at a time (inbox-pop). The host holds the profile key and
+ * signs on hal_nostr_post — the nsec never enters the wasm sandbox. */
+
+/* Relay list + live status as JSON [{"uri","scheme","status"}]. Returns bytes
+ * written, or the negated required size if [out] is too small. */
+__attribute__((import_module("hal"), import_name("nostr_relays")))
+uint32_t hal_nostr_relays(char *out, uint32_t out_cap);
+
+/* Add/remove a relay by URI (wss://…, rns://<idhash>, local). 1 on success. */
+__attribute__((import_module("hal"), import_name("nostr_relay_add")))
+int32_t hal_nostr_relay_add(const char *uri, uint32_t uri_len);
+__attribute__((import_module("hal"), import_name("nostr_relay_remove")))
+int32_t hal_nostr_relay_remove(const char *uri, uint32_t uri_len);
+
+/* Open a subscription from a NIP-01 [filter] (JSON object or array of them),
+ * fanned across every enabled relay + the local store. Writes the opaque subId
+ * into [out]; returns its byte length, 0 on error. */
+__attribute__((import_module("hal"), import_name("nostr_subscribe")))
+uint32_t hal_nostr_subscribe(const char *filter, uint32_t filter_len,
+                             char *out, uint32_t out_cap);
+
+/* Pop the next buffered event JSON (NIP-01 event object) for subscription [sub]
+ * into [out]. Returns bytes written, 0 when the inbox is drained. Poll each
+ * tick. */
+__attribute__((import_module("hal"), import_name("nostr_event_recv")))
+uint32_t hal_nostr_event_recv(const char *sub, uint32_t sub_len,
+                              char *out, uint32_t out_cap);
+
+/* Close a subscription. */
+__attribute__((import_module("hal"), import_name("nostr_unsubscribe")))
+int32_t hal_nostr_unsubscribe(const char *sub, uint32_t sub_len);
+
+/* Build a NOSTR event of [kind] with [content] and [tags] (JSON array of tag
+ * arrays), sign it with the active profile key (host-side), and publish to the
+ * local store + every enabled relay. Fire-and-forget: the event appears on the
+ * feed's next hal_nostr_event_recv drain. */
+__attribute__((import_module("hal"), import_name("nostr_post")))
+int32_t hal_nostr_post(int32_t kind, const char *content, uint32_t content_len,
+                       const char *tags, uint32_t tags_len);
+
+/* Followed pubkeys (hex) as a JSON array — the feed's author set. */
+__attribute__((import_module("hal"), import_name("nostr_follows")))
+uint32_t hal_nostr_follows(char *out, uint32_t out_cap);
+
+/* Follow / unfollow a pubkey ([key] hex or npub). */
+__attribute__((import_module("hal"), import_name("nostr_follow")))
+int32_t hal_nostr_follow(const char *key, uint32_t key_len);
+__attribute__((import_module("hal"), import_name("nostr_unfollow")))
+int32_t hal_nostr_unfollow(const char *key, uint32_t key_len);
+
 /* ── Reticulum visualization/management (read-only) ──────────────────── *
  *
  * The node's view of the Reticulum network, for the "reticulum" wapp to
