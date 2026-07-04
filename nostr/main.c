@@ -322,6 +322,8 @@ int32_t module_handle_event(void) {
         char text[6000] = "";
         if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
             hal_nostr_post(1, text, str_len(text), "[]", 2);
+    } else if (str_eq(cmd, "clear_feed")) {
+        send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
     } else if (str_eq(cmd, "conversations_send")) {
         char peer[80] = "", text[6000] = "";
         json_raw(buf, "conversations_convo", peer, sizeof(peer));

@@ -5,7 +5,9 @@
     "icon": "home",
     "tip": "Notes from the accounts you follow. Share an update below.",
     "children": [
-      { "$": "field", "name": "activity", "$type": "chat", "hint": "What's happening?" }
+      { "$": "field", "name": "activity", "$type": "chat", "hint": "What's happening?" },
+      { "$": "action", "name": "clear_feed", "label": "Clear feed", "icon": "delete",
+        "slot": "menu", "tip": "Remove all posts currently in the feed" }
     ]
   },
   {
