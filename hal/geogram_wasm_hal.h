@@ -1019,6 +1019,22 @@ uint32_t hal_nostr_wot(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("nostr_discovery")))
 uint32_t hal_nostr_discovery(char *out, uint32_t out_cap);
 
+/* Engagement counts for a post: writes JSON {"likes":N,"replies":M,"mine":bool}
+ * for event [id]. 0/0/false until the host has seen reactions/replies for it
+ * (call hal_nostr_track first so it subscribes to them). */
+__attribute__((import_module("hal"), import_name("nostr_stats")))
+uint32_t hal_nostr_stats(const char *id, uint32_t id_len,
+                         char *out, uint32_t out_cap);
+
+/* Track post [ids] (JSON array of event ids) so the host subscribes to and
+ * counts their reactions (kind-7) and replies (kind-1 #e). Rolling window. */
+__attribute__((import_module("hal"), import_name("nostr_track")))
+int32_t hal_nostr_track(const char *ids, uint32_t ids_len);
+
+/* Like [id]: publish a signed kind-7 '+' reaction referencing it. */
+__attribute__((import_module("hal"), import_name("nostr_react")))
+int32_t hal_nostr_react(const char *id, uint32_t id_len);
+
 /* Follow / unfollow a pubkey ([key] hex or npub). */
 __attribute__((import_module("hal"), import_name("nostr_follow")))
 int32_t hal_nostr_follow(const char *key, uint32_t key_len);

@@ -114,6 +114,10 @@ static char g_follows[4096];       /* followed pubkeys JSON array          */
 static char g_wot[48128];          /* web-of-trust author set JSON         */
 static char g_feedfilter[52224];   /* built kind-1 WoT filter              */
 static char g_plain[6000];         /* decrypted DM plaintext               */
+static char g_pids[96][66];        /* recent post ids (ring) for stats     */
+static int  g_npids = 0;
+static char g_track[7168];         /* built ids JSON array for tracking    */
+static char g_stat[128];           /* one hal_nostr_stats result           */
 static int  g_ticks = 0;
 
 /* ── Subscriptions ───────────────────────────────────────────────────── */
@@ -158,16 +162,22 @@ static void subscribe_all(void) {
 
 /* ── Activity feed ───────────────────────────────────────────────────── */
 static void feed_append(const char *evt) {
-    char pubkey[80] = "", content[6000] = "", ts[24] = "";
+    char pubkey[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
     json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
     json_raw(evt, "content", content, sizeof(content)); /* still escaped */
     json_raw(evt, "created_at", ts, sizeof(ts));
+    json_raw(evt, "id", id, sizeof(id));
     if (!content[0]) return;
+    if (id[0]) { str_copy(g_pids[g_npids % 96], id, 66); g_npids++; } /* track */
     char from[16] = ""; short12(pubkey, from);
     str_copy(g_msg, "{\"type\":\"ui.chat.append\",\"field\":\"activity\",\"message\":{\"dir\":\"in\",\"from\":\"", sizeof(g_msg));
     str_cat(g_msg, from, sizeof(g_msg));
     str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg));
     str_cat(g_msg, content, sizeof(g_msg));      /* already-escaped body */
+    /* The event id becomes the post's mid so the host can count likes/replies
+     * and attach a reaction to it. */
+    str_cat(g_msg, "\",\"mid\":\"", sizeof(g_msg));
+    str_cat(g_msg, id, sizeof(g_msg));
     str_cat(g_msg, "\",", sizeof(g_msg));
     cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
@@ -288,6 +298,46 @@ static void push_relays(void) {
     send_msg(g_msg);
 }
 
+/* ── Engagement (likes/replies) ──────────────────────────────────────── */
+/* Ask the host to count reactions/replies for the posts on screen, then push
+ * the counts back as generic ui.activity.stats messages the feed renders. */
+static void push_stats(void) {
+    int valid = g_npids < 96 ? g_npids : 96;
+    if (valid == 0) return;
+    str_copy(g_track, "[", sizeof(g_track));
+    for (int i = 0; i < valid; i++) {
+        if (i) str_cat(g_track, ",", sizeof(g_track));
+        str_cat(g_track, "\"", sizeof(g_track));
+        str_cat(g_track, g_pids[i], sizeof(g_track));
+        str_cat(g_track, "\"", sizeof(g_track));
+    }
+    str_cat(g_track, "]", sizeof(g_track));
+    hal_nostr_track(g_track, str_len(g_track));
+
+    for (int i = 0; i < valid; i++) {
+        int n = hal_nostr_stats(g_pids[i], str_len(g_pids[i]), g_stat, sizeof(g_stat) - 1);
+        if (n <= 0) continue;
+        g_stat[n] = '\0';
+        char likes[12] = "", replies[12] = "", mine[8] = "";
+        json_raw(g_stat, "likes", likes, sizeof(likes));
+        json_raw(g_stat, "replies", replies, sizeof(replies));
+        json_raw(g_stat, "mine", mine, sizeof(mine));
+        int noLikes = (!likes[0] || (likes[0] == '0' && !likes[1]));
+        int noReplies = (!replies[0] || (replies[0] == '0' && !replies[1]));
+        if (noLikes && noReplies) continue; /* skip zero-engagement (default) */
+        str_copy(g_msg, "{\"type\":\"ui.activity.stats\",\"mid\":\"", sizeof(g_msg));
+        str_cat(g_msg, g_pids[i], sizeof(g_msg));
+        str_cat(g_msg, "\",\"likes\":", sizeof(g_msg));
+        str_cat(g_msg, likes[0] ? likes : "0", sizeof(g_msg));
+        str_cat(g_msg, ",\"replies\":", sizeof(g_msg));
+        str_cat(g_msg, replies[0] ? replies : "0", sizeof(g_msg));
+        str_cat(g_msg, ",\"mine\":", sizeof(g_msg));
+        str_cat(g_msg, (mine[0] == 't') ? "true" : "false", sizeof(g_msg));
+        str_cat(g_msg, "}", sizeof(g_msg));
+        send_msg(g_msg);
+    }
+}
+
 /* ── Module entry points ─────────────────────────────────────────────── */
 int32_t module_init(void) {
     hal_log(6, "[nostr] up", 10);
@@ -305,6 +355,7 @@ int32_t module_tick(void) {
     // the feed a couple of times early to pick up follows-of-follows.
     if (g_ticks == 10 || g_ticks == 30) { g_sub_feed[0] = '\0'; subscribe_all(); }
     if (g_ticks % 8 == 0) push_relays();
+    if (g_ticks % 5 == 0) push_stats();   /* refresh like/reply counts */
     return 0;
 }
 
@@ -324,6 +375,12 @@ int32_t module_handle_event(void) {
             hal_nostr_post(1, text, str_len(text), "[]", 2);
     } else if (str_eq(cmd, "clear_feed")) {
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
+    } else if (str_eq(cmd, "activity_like")) {
+        char mid[80] = "";
+        if (json_raw(buf, "activity_mid", mid, sizeof(mid)) && mid[0]) {
+            hal_nostr_react(mid, str_len(mid));
+            push_stats(); /* reflect the new like immediately */
+        }
     } else if (str_eq(cmd, "conversations_send")) {
         char peer[80] = "", text[6000] = "";
         json_raw(buf, "conversations_convo", peer, sizeof(peer));
