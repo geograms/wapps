@@ -1043,6 +1043,11 @@ uint32_t hal_nostr_profile(const char *pubkey, uint32_t pubkey_len,
 __attribute__((import_module("hal"), import_name("nostr_react")))
 int32_t hal_nostr_react(const char *id, uint32_t id_len);
 
+/* Repost [id] (kind-6 "retweet"): publish a signed kind-6 tagged e=id, p=author. */
+__attribute__((import_module("hal"), import_name("nostr_repost")))
+int32_t hal_nostr_repost(const char *id, uint32_t id_len,
+                         const char *author, uint32_t author_len);
+
 /* Reply to [parent]: publish a signed kind-1 note tagged e=parent. */
 __attribute__((import_module("hal"), import_name("nostr_reply")))
 int32_t hal_nostr_reply(const char *parent, uint32_t parent_len,

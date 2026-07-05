@@ -529,6 +529,11 @@ int32_t module_handle_event(void) {
             hal_nostr_react(mid, str_len(mid));
             push_one_stat(mid); /* reflect THIS like immediately */
         }
+    } else if (str_eq(cmd, "activity_repost")) {
+        char mid[80] = "", author[80] = "";
+        json_raw(buf, "activity_mid", mid, sizeof(mid));
+        json_raw(buf, "activity_author", author, sizeof(author));
+        if (mid[0]) hal_nostr_repost(mid, str_len(mid), author, str_len(author));
     } else if (str_eq(cmd, "activity_reply")) {
         char target[80] = "", text[6000] = "";
         json_raw(buf, "activity_target_mid", target, sizeof(target));
