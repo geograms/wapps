@@ -29,13 +29,23 @@ static void s_cat(char *d, const char *s, unsigned m) {
   while (l + i < m - 1 && s[i]) { d[l + i] = s[i]; i++; } d[l + i] = 0;
 }
 static char up(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
-/* APRS message acks/rejects: body is "ack<n>" or "rej<n>" — not chat text. */
+/* APRS message acks/rejects: the WHOLE body is "ack<id>" or "rej<id>" where
+ * <id> is 1-5 ALPHANUMERIC chars (APRS spec) — bots like MPAD use letter ids
+ * ("ackKU"). Full-match only: "acknowledge this" or "ack123 extra" is chat
+ * text, not an ack. A letter-id ack that slipped through here used to be
+ * bridged BLE<->IS and re-originated under the addressee's callsign with a
+ * bogus {0 id — spoofed malformed acks that message bots answered forever. */
 static int is_ack_text(const char *t) {
-  if ((t[0] == 'a' && t[1] == 'c' && t[2] == 'k') ||
-      (t[0] == 'r' && t[1] == 'e' && t[2] == 'j')) {
-    return t[3] >= '0' && t[3] <= '9';
+  if (!((t[0] == 'a' && t[1] == 'c' && t[2] == 'k') ||
+        (t[0] == 'r' && t[1] == 'e' && t[2] == 'j'))) return 0;
+  int n = 0;
+  for (; t[3 + n]; n++) {
+    char c = t[3 + n];
+    int alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z');
+    if (!alnum || n >= 5) return 0;
   }
-  return 0;
+  return n >= 1;
 }
 
 /* extract "key":"value" from buf; returns 1 if found */
@@ -139,6 +149,25 @@ static int   g_sock = -1;
 static int   g_logged = 0;
 static int   g_seq = 1;
 static char  g_call[16] = "N0CALL";  /* replaced at init by hal_identity() */
+/* The device profile's own callsign, snapshotted at init and NEVER overridden
+ * by settings. g_call can drift (a stale saved Settings callsign fed to a
+ * background engine); self-checks must match EITHER, or the station starts
+ * showing + notifying its own boomeranged posts as if from someone else. */
+static char  g_idcall[16] = "";
+/* Is [c] one of OUR callsigns (case-insensitive): the working g_call OR the
+ * immutable profile identity g_idcall? Used to drop our own frames looping
+ * back over any transport (APRS-IS echo, BLE iGate relay, digipeat). */
+static int is_self_call(const char *c) {
+  const char *own[2] = { g_call, g_idcall };
+  for (int k = 0; k < 2; k++) {
+    if (!own[k][0]) continue;
+    int eq = 1;
+    for (int i = 0; own[k][i] || c[i]; i++)
+      if (up(own[k][i]) != up(c[i])) { eq = 0; break; }
+    if (eq) return 1;
+  }
+  return 0;
+}
 static double g_lat = 0, g_lon = 0;
 static int   g_radius = 100;
 static char  g_symbol[8] = "/>";
@@ -1806,6 +1835,10 @@ static void activity_react_emit(const char *mid, const char *from, int like, int
 /* Echo one of OUR Activity posts (dir "out") with a mid so it can receive likes
  * + replies like any other post. */
 static void activity_echo_self(const char *text, const char *parent) {
+  /* Seed the incoming-feed dedup with our own post: if a copy of it ever
+   * boomerangs past the self-checks (relay/digipeat edge case), it collapses
+   * against this echo instead of appearing as a second feed item. */
+  act_seen_add(sig_hash("actf", g_call, text));
   char mid[5]; msg_id(g_call, text, mid);
   char t[8]; fmt_time(t);
   char m[520] = "{\"type\":\"ui.chat.append\",\"field\":\"activity\",\"message\":{\"dir\":\"out\",\"convo\":\"\",\"from\":\"";
@@ -3543,6 +3576,10 @@ static void deliver_bulletin(const char *gname, const char *from,
   for (int i = 0; gname[i] && gname[i] != '*' && nj < 6; i++) nm[nj++] = gname[i];
   nm[nj] = 0;
   if (!nm[0]) return;
+  /* Belt-and-braces self-drop: our own bulletin boomeranged by an iGate /
+   * digipeater must never render as an incoming post or fire a notification,
+   * even if an upstream mine-check missed it (e.g. a stale g_call). */
+  if (is_self_call(from)) return;
   /* NOSTR key beacon: record the sender's pubkey and stop (not a chat). */
   if (pk_intercept(nm, from, text)) return;
   /* Strip any APRX signature for the preview / like detection; convo_deliver
@@ -3626,7 +3663,19 @@ static void ra_emit(ra_t *e) {
     s_cat(full, e->line[i], sizeof(full));
   }
   e->used = 0; e->seen = 0;
-  if (full[0]) deliver_bulletin(e->grp, e->from, full, e->within, e->via);
+  if (!full[0]) return;
+  /* iGate IS->BLE: relay the REASSEMBLED bulletin as ONE compact frame (BLE
+   * receivers deliver bulletins whole — a per-line relay showed each APRS
+   * 67-char fragment as its own post). Only for NET-arrived bulletins (a
+   * BLE-arrived one is already on the air; re-airing it would loop). Skip a
+   * frame that doesn't fit the compact BLE buffer whole: truncating would
+   * re-create exactly the corrupted-fragment posts this path is fixing. */
+  if (g_ble_relay && g_ble_on && s_eq(e->via, "NET")) {
+    char convo[12]; convo[0] = '#'; s_cpy(convo + 1, e->grp, sizeof(convo) - 1);
+    if (s_len(e->from) + 1 + s_len(convo) + 1 + s_len(full) < 218)
+      ble_tx_from(e->from, convo, full);
+  }
+  deliver_bulletin(e->grp, e->from, full, e->within, e->via);
 }
 static void ra_add(const char *grp, const char *from, char line_id,
                    const char *text, int within, const char *via) {
@@ -3765,11 +3814,7 @@ static void route_frame(const char *line) {
 
   aprs_packet_t p;
   if (!aprs_parse(line, &p)) return;
-  int mine = 1;
-  for (int i = 0; g_call[i] || p.from[i]; i++) {
-    if (up(g_call[i]) != up(p.from[i])) { mine = 0; break; }
-  }
-  if (mine) return;
+  if (is_self_call(p.from)) return;
 
   if (p.type == APRS_POSITION && p.has_pos) {
     push_marker(p.from, p.lat, p.lon, 0, p.comment);
@@ -3805,10 +3850,10 @@ static void route_frame(const char *line) {
         /* Buffer the line; multi-line bulletins are reassembled before delivery. */
         ra_add(p.group, p.from, p.bulletin_id ? p.bulletin_id : '0', p.text,
                within_radius(p.from), "NET");
-        if (g_ble_relay && g_ble_on) {
-          char convo[12]; convo[0] = '#'; s_cpy(convo + 1, p.group, sizeof(convo) - 1);
-          ble_tx_from(p.from, convo, p.text);
-        }
+        /* iGate IS->BLE relay happens in ra_emit, AFTER reassembly: relaying
+         * each BLNx line as its own BLE frame turned one long post into
+         * several fragment posts on every BLE receiver (the BLE path delivers
+         * bulletins whole, with no line id to rejoin them). */
       } else {
         int amine = 1;
         for (int i = 0; g_call[i] || p.addressee[i]; i++) {
@@ -4320,11 +4365,7 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
   }
   from[fi] = 0; to[ti] = 0; text[xi] = 0;
   if (!from[0]) return;
-  int mine = 1;
-  for (int i = 0; g_call[i] || from[i]; i++) {
-    if (up(g_call[i]) != up(from[i])) { mine = 0; break; }
-  }
-  if (mine) return;
+  if (is_self_call(from)) return;
 
   /* Remember every BLE-local station we hear (store-and-forward registry +
    * the "reachable over BLE" list shown in New message). Only for frames that
@@ -4436,6 +4477,9 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
     /* Consume receipts for any overhearer (broadcast BLE/RNS), not just the
      * addressee, so a "?ACK …" frame never surfaces as a Live/chat message. */
     if (rcpt_intercept(from, text)) return;
+    /* Same for native APRS ack/rej lines bridged onto BLE (e.g. by an older
+     * relay): control traffic, never chat and never re-originated. */
+    if (is_ack_text(text)) return;
     if (amine) {
       /* Buffer through the same reassembler as APRS-IS: a multi-line message
        * forwarded by a BLE iGate as separate parts is rejoined, and a message
@@ -4452,12 +4496,15 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
      * BLE frame), so a multi-line/encrypted DM alerts once with readable text. */
     /* iGate BLE -> APRS-IS, but never for a message addressed to us (we are the
      * endpoint; re-injecting it would loop back as a duplicate). Gated under the
-     * sender's call with a qAR q-construct (clean RF path, not TCPIP*). Any ack
-     * the addressee sends back is addressed to the sender — a spotted BLE device
-     * — so the IS->BLE path relays it home automatically. */
-    if (g_ble_relay && g_logged && !amine) {
+     * sender's call with a qAR q-construct (clean RF path, not TCPIP*).
+     * NEVER gate an ack/rej: an ack is point-to-point between the original
+     * endpoints; re-originating one puts a spoofed ack on APRS-IS under someone
+     * else's callsign. seq -1 = no {n — the copy must not solicit acks (a
+     * fabricated {0 turned bridged acks into "messages" that bots answered,
+     * looping forever under a third party's callsign). */
+    if (g_ble_relay && g_logged && !amine && !is_ack_text(text)) {
       char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
-      char line[260]; aprs_build_message_via(line, sizeof(line), from, to, text, 0, via);
+      char line[260]; aprs_build_message_via(line, sizeof(line), from, to, text, -1, via);
       aprs_send_raw(g_sock, line);
     }
   }
@@ -4486,7 +4533,10 @@ void module_init(void) {
    * if set, overrides this via read_config. */
   char id[16];
   uint32_t n = hal_identity(id, sizeof(id) - 1);
-  if (n > 0 && n < sizeof(id)) { id[n] = 0; if (id[0]) s_cpy(g_call, id, sizeof(g_call)); }
+  if (n > 0 && n < sizeof(id)) {
+    id[n] = 0;
+    if (id[0]) { s_cpy(g_call, id, sizeof(g_call)); s_cpy(g_idcall, id, sizeof(g_idcall)); }
+  }
   sdev_load();     /* restore the seen-devices registry (store-and-forward) */
   groups_load();   /* restore subscribed groups so the g/ filter is correct now */
   /* Cache our public key (base64url) and the persisted pubkey-beacon pref. */

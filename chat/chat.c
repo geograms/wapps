@@ -370,8 +370,13 @@ void aprs_build_message_via(char *out, unsigned max, const char *from,
   a_cat(out, dest, max);
   a_cat(out, ":", max);
   a_cat(out, text, max);
-  a_cat(out, "{", max);
-  char nb[16]; a_itoa(seq, nb); a_cat(out, nb, max);
+  /* seq < 0 = no message number: the recipient must not ack this line (used
+   * when re-originating a third-party message whose own {id we don't carry —
+   * fabricating one made recipients ack ids the sender never issued). */
+  if (seq >= 0) {
+    a_cat(out, "{", max);
+    char nb[16]; a_itoa(seq, nb); a_cat(out, nb, max);
+  }
 }
 void aprs_build_message(char *out, unsigned max, const char *from,
                         const char *to, const char *text, int seq) {

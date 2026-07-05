@@ -86,7 +86,9 @@ int aprs_poll_line(int handle, char *line, int max);
 int aprs_parse(const char *line, aprs_packet_t *out);
 
 /* Build (without sending) the TNC2 lines — exposed for testing.
- * No trailing CRLF; aprs_send_* append it before transmitting. */
+ * No trailing CRLF; aprs_send_* append it before transmitting.
+ * seq >= 0 appends the "{<seq>" message number; seq < 0 omits it (the
+ * recipient must not ack the line — e.g. a re-originated third-party copy). */
 void aprs_build_message(char *out, unsigned max, const char *from,
                         const char *to, const char *text, int seq);
 /* Like aprs_build_message but with an explicit path (the part after ">APRS,").
