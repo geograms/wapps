@@ -112,7 +112,8 @@ static void cat_time_fields(char *dst, const char *ts, unsigned m) {
 
 /* ── State ───────────────────────────────────────────────────────────── */
 static char g_self[80] = "";       /* our x-only pubkey (hex)              */
-static char g_sub_feed[64] = "";   /* kind-1 subscription id               */
+static char g_sub_disc[64] = "";   /* discovery (popular >2-like) sub — "All" */
+static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
 static char g_sub_dm[64] = "";     /* kind-4 subscription id               */
 static char g_evt[8192];           /* one drained event JSON               */
 static char g_relays[8192];        /* hal_nostr_relays output              */
@@ -139,25 +140,29 @@ static void subscribe_all(void) {
         int sn = hal_nostr_self(g_self, sizeof(g_self) - 1);
         if (sn > 0) g_self[sn] = '\0';
     }
-    if (!g_sub_feed[0]) {
-        // Web of trust, not the firehose: kind-1 from follows + followers +
-        // follows-of-follows. Only fall back to a small global sample when the
-        // trust set is still empty (brand-new user with no follows).
+    /* (a) Global firehose — ALWAYS on: recent kind-1 from EVERYONE, so the
+     * "All" tab shows posts from people you don't follow (not just your feed).
+     * The host engine rate-caps this (~60 events/s) so it can't flood the UI. */
+    if (!g_sub_disc[0]) {
+        const char *gf = "{\"kinds\":[1],\"limit\":120}";
+        int n = hal_nostr_subscribe(gf, str_len(gf), g_sub_disc,
+                                    sizeof(g_sub_disc) - 1);
+        if (n > 0) g_sub_disc[n] = '\0';
+    }
+    /* (b) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
+     * post/reply from someone you follow arrives (even ones that never clear
+     * discovery's like gate). This drives the "Following" tab. Opens once the
+     * trust set is non-empty; a brand-new user sees only discovery until then. */
+    if (!g_sub_follows[0]) {
         int wn = hal_nostr_wot(g_wot, sizeof(g_wot) - 1);
         if (wn > 0) g_wot[wn] = '\0'; else str_copy(g_wot, "[]", sizeof(g_wot));
         if (str_len(g_wot) > 2) {
-            /* Have a trust graph: subscribe kind-1 from it (spam-free). */
             str_copy(g_feedfilter, "{\"kinds\":[1],\"authors\":", sizeof(g_feedfilter));
             str_cat(g_feedfilter, g_wot, sizeof(g_feedfilter));
             str_cat(g_feedfilter, ",\"limit\":200}", sizeof(g_feedfilter));
             int n = hal_nostr_subscribe(g_feedfilter, str_len(g_feedfilter),
-                                        g_sub_feed, sizeof(g_sub_feed) - 1);
-            if (n > 0) g_sub_feed[n] = '\0';
-        } else {
-            /* Follow nobody yet: discovery feed — only posts with >2 likes,
-             * so a new user sees quality, not the raw firehose of spam. */
-            int n = hal_nostr_discovery(g_sub_feed, sizeof(g_sub_feed) - 1);
-            if (n > 0) g_sub_feed[n] = '\0';
+                                        g_sub_follows, sizeof(g_sub_follows) - 1);
+            if (n > 0) g_sub_follows[n] = '\0';
         }
     }
     if (!g_sub_dm[0] && g_self[0]) {
@@ -174,6 +179,25 @@ static void subscribe_all(void) {
 }
 
 /* ── Activity feed ───────────────────────────────────────────────────── */
+/* The first e-tag id (replied-to / referenced event) inside the event's "tags"
+ * array, or "" if none. A kind-1 with an e-tag is treated as a reply so it stays
+ * out of the roots-only "All" tab (but still shows under "Following"). */
+static void first_etag(const char *evt, char *out, unsigned cap) {
+    out[0] = '\0';
+    const char *p = evt;
+    for (const char *q = evt; q[0]; q++) {
+        if (q[0]=='"'&&q[1]=='t'&&q[2]=='a'&&q[3]=='g'&&q[4]=='s'&&q[5]=='"') { p = q; break; }
+    }
+    for (; p[0]; p++) {
+        if (p[0]=='['&&p[1]=='"'&&p[2]=='e'&&p[3]=='"'&&p[4]==','&&p[5]=='"') {
+            const char *s = p + 6; unsigned o = 0;
+            while (*s && *s != '"' && o < cap - 1) out[o++] = *s++;
+            out[o] = '\0';
+            return;
+        }
+    }
+}
+
 static void feed_append(const char *evt) {
     char pubkey[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
     json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
@@ -181,6 +205,7 @@ static void feed_append(const char *evt) {
     json_raw(evt, "created_at", ts, sizeof(ts));
     json_raw(evt, "id", id, sizeof(id));
     if (!content[0]) return;
+    char parent[80] = ""; first_etag(evt, parent, sizeof(parent));
     if (id[0]) { g_rdone[g_npids % 96] = 0; str_copy(g_pids[g_npids % 96], id, 66); g_npids++; }
     if (pubkey[0]) {                                        /* track author */
         str_copy(g_authors[g_nauth % 96], pubkey, 66);
@@ -196,6 +221,8 @@ static void feed_append(const char *evt) {
      * and attach a reaction to it. */
     str_cat(g_msg, "\",\"mid\":\"", sizeof(g_msg));
     str_cat(g_msg, id, sizeof(g_msg));
+    str_cat(g_msg, "\",\"parent\":\"", sizeof(g_msg));
+    str_cat(g_msg, parent, sizeof(g_msg)); /* reply target, or "" for a root */
     str_cat(g_msg, "\",", sizeof(g_msg));
     cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
@@ -254,8 +281,13 @@ static void dm_ingest(const char *evt) {
 }
 
 static void drain(void) {
-    for (int i = 0; i < 20 && g_sub_feed[0]; i++) {
-        int n = hal_nostr_event_recv(g_sub_feed, str_len(g_sub_feed), g_evt, sizeof(g_evt) - 1);
+    for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
+        int n = hal_nostr_event_recv(g_sub_disc, str_len(g_sub_disc), g_evt, sizeof(g_evt) - 1);
+        if (n <= 0) break;
+        g_evt[n] = '\0'; feed_append(g_evt);
+    }
+    for (int i = 0; i < 20 && g_sub_follows[0]; i++) {
+        int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
         g_evt[n] = '\0'; feed_append(g_evt);
     }
@@ -490,9 +522,16 @@ int32_t module_tick(void) {
     subscribe_all();
     drain();
     g_ticks++;
-    // The web-of-trust set grows as kind-3 contact lists arrive, so re-subscribe
-    // the feed a couple of times early to pick up follows-of-follows.
-    if (g_ticks == 10 || g_ticks == 30) { g_sub_feed[0] = '\0'; subscribe_all(); }
+    // The web-of-trust set grows as kind-3 contact lists arrive, so re-open the
+    // follows feed a couple of times early to pick up follows-of-follows.
+    // (Discovery is author-independent — leave it live.)
+    if (g_ticks == 10 || g_ticks == 30) {
+        if (g_sub_follows[0]) {
+            hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+            g_sub_follows[0] = '\0';
+        }
+        subscribe_all();
+    }
     if (g_ticks % 8 == 0) push_relays();
     if (g_ticks % 5 == 0) push_stats();      /* refresh like/reply counts */
     if (g_ticks % 3 == 2) push_profiles();   /* fetch + show author names */
@@ -514,11 +553,15 @@ int32_t module_handle_event(void) {
         if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
             hal_nostr_post(1, text, str_len(text), "[]", 2);
     } else if (str_eq(cmd, "activity_refresh")) {
-        /* Pull-to-refresh / return-to-stream: drop the feed sub and re-open it
-         * so the relays re-send the latest matching posts. */
-        if (g_sub_feed[0]) {
-            hal_nostr_unsubscribe(g_sub_feed, str_len(g_sub_feed));
-            g_sub_feed[0] = '\0';
+        /* Pull-to-refresh / return-to-stream: drop BOTH feed subs and re-open
+         * them so the relays re-send the latest matching posts. */
+        if (g_sub_disc[0]) {
+            hal_nostr_unsubscribe(g_sub_disc, str_len(g_sub_disc));
+            g_sub_disc[0] = '\0';
+        }
+        if (g_sub_follows[0]) {
+            hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+            g_sub_follows[0] = '\0';
         }
         subscribe_all();
     } else if (str_eq(cmd, "clear_feed")) {
@@ -558,14 +601,20 @@ int32_t module_handle_event(void) {
         char key[128] = "";
         if (json_raw(buf, "follow_input", key, sizeof(key)) && key[0]) {
             hal_nostr_follow(key, str_len(key));
-            g_sub_feed[0] = '\0';  /* re-subscribe with the new author set */
+            if (g_sub_follows[0]) {  /* re-open follows feed with new author set */
+                hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+                g_sub_follows[0] = '\0';
+            }
             subscribe_all(); push_follows();
         }
     } else if (str_eq(cmd, "follows_list_tap") || str_eq(cmd, "follows_list")) {
         char key[128] = "";
         if (json_raw(buf, "follows_list_id", key, sizeof(key)) && key[0]) {
             hal_nostr_unfollow(key, str_len(key));
-            g_sub_feed[0] = '\0';
+            if (g_sub_follows[0]) {
+                hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+                g_sub_follows[0] = '\0';
+            }
             subscribe_all(); push_follows();
         }
     } else if (str_eq(cmd, "dm_send")) {
