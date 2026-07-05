@@ -140,13 +140,12 @@ static void subscribe_all(void) {
         int sn = hal_nostr_self(g_self, sizeof(g_self) - 1);
         if (sn > 0) g_self[sn] = '\0';
     }
-    /* (a) Global firehose — ALWAYS on: recent kind-1 from EVERYONE, so the
-     * "All" tab shows posts from people you don't follow (not just your feed).
-     * The host engine rate-caps this (~60 events/s) so it can't flood the UI. */
+    /* (a) Discovery — ALWAYS on: global kind-1 posts that have gathered at least
+     * 2 distinct likes (host-side reaction gate). This is the QUALITY breadth of
+     * the "All" tab — popular posts from people you don't follow, not the raw
+     * spam firehose. */
     if (!g_sub_disc[0]) {
-        const char *gf = "{\"kinds\":[1],\"limit\":120}";
-        int n = hal_nostr_subscribe(gf, str_len(gf), g_sub_disc,
-                                    sizeof(g_sub_disc) - 1);
+        int n = hal_nostr_discovery(g_sub_disc, sizeof(g_sub_disc) - 1);
         if (n > 0) g_sub_disc[n] = '\0';
     }
     /* (b) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
