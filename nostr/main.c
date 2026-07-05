@@ -84,6 +84,13 @@ static void json_escape_cat(char *dst, const char *s, unsigned m) {
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 static void short12(const char *hex, char *out) { str_copy(out, hex, 13); }
 
+static void u64_str(unsigned long long v, char *out) {
+    char tmp[24]; int n = 0;
+    if (v == 0) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0 && n < 23) { tmp[n++] = '0' + (int)(v % 10); v /= 10; }
+    int i = 0; while (n > 0) out[i++] = tmp[--n]; out[i] = '\0';
+}
+
 /* "HH:MM" (UTC) from a unix-seconds string. */
 static void fmt_hhmm(const char *unix_s, char *out) {
     long v = 0;
@@ -473,7 +480,8 @@ int32_t module_handle_event(void) {
         if (target[0] && text[0]) {
             hal_nostr_reply(target, str_len(target), text, str_len(text));
             char esc[6100] = ""; json_escape_cat(esc, text, sizeof(esc));
-            reply_append(target, "", g_self, esc, "0"); /* local echo */
+            char now[24]; u64_str(hal_time_epoch(), now); /* real ts, not epoch 0 */
+            reply_append(target, "", g_self, esc, now);   /* local echo */
         }
     } else if (str_eq(cmd, "conversations_send")) {
         char peer[80] = "", text[6000] = "";
