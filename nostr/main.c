@@ -365,6 +365,7 @@ static void push_replies_for(const char *postid) {
 static void push_stats(void) {
     int valid = g_npids < 96 ? g_npids : 96;
     if (valid == 0) return;
+    int rfetch = 0; /* bound reply store-queries per poll (main thread) */
     str_copy(g_track, "[", sizeof(g_track));
     for (int i = 0; i < valid; i++) {
         if (i) str_cat(g_track, ",", sizeof(g_track));
@@ -385,8 +386,10 @@ static void push_stats(void) {
         json_raw(g_stat, "mine", mine, sizeof(mine));
         int noLikes = (!likes[0] || (likes[0] == '0' && !likes[1]));
         int noReplies = (!replies[0] || (replies[0] == '0' && !replies[1]));
-        /* Pull replies into the post's thread once it has any. */
-        if (!noReplies && !g_rdone[i]) { push_replies_for(g_pids[i]); g_rdone[i] = 1; }
+        /* Pull replies into the post's thread once it has any (bounded/poll). */
+        if (!noReplies && !g_rdone[i] && rfetch < 3) {
+            push_replies_for(g_pids[i]); g_rdone[i] = 1; rfetch++;
+        }
         if (noLikes && noReplies) continue; /* skip zero-engagement (default) */
         str_copy(g_msg, "{\"type\":\"ui.activity.stats\",\"mid\":\"", sizeof(g_msg));
         str_cat(g_msg, g_pids[i], sizeof(g_msg));
@@ -405,8 +408,11 @@ static void push_stats(void) {
  * generic ui.profile.set messages, so the feed shows names instead of npubs. */
 static void push_profiles(void) {
     int valid = g_nauth < 96 ? g_nauth : 96;
+    int did = 0;
     for (int i = 0; i < valid; i++) {
         if (g_adone[i]) continue;
+        if (did >= 6) break; /* bound the store queries per poll (main thread) */
+        did++;
         int n = hal_nostr_profile(g_authors[i], str_len(g_authors[i]),
                                   g_prof, sizeof(g_prof) - 1);
         if (n <= 0) continue;
