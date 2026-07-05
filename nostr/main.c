@@ -353,6 +353,11 @@ static void push_replies_for(const char *postid) {
             g_adone[g_nauth % 96] = 0;
             g_nauth++;
         }
+        if (rid[0]) { /* track the reply for its own like/reply counts */
+            g_rdone[g_npids % 96] = 0;
+            str_copy(g_pids[g_npids % 96], rid, 66);
+            g_npids++;
+        }
         if (content[0]) reply_append(postid, rid, pk, content, ts);
         while (*p && *p != '}') p++;
         if (!*p) break;
