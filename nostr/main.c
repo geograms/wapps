@@ -367,6 +367,31 @@ static void push_replies_for(const char *postid) {
 /* ── Engagement (likes/replies) ──────────────────────────────────────── */
 /* Ask the host to count reactions/replies for the posts on screen, then push
  * the counts back as generic ui.activity.stats messages the feed renders. */
+/* Push ONE post's like/reply counts right now, regardless of whether it's in
+ * g_pids and regardless of the zero-engagement skip. Used the instant the user
+ * likes/replies so the heart/count reflects immediately (the optimistic tally
+ * lives in the host engine, keyed by this exact mid). */
+static void push_one_stat(const char* mid) {
+    if (!mid || !mid[0]) return;
+    int n = hal_nostr_stats(mid, str_len(mid), g_stat, sizeof(g_stat) - 1);
+    if (n <= 0) return;
+    g_stat[n] = '\0';
+    char likes[12] = "", replies[12] = "", mine[8] = "";
+    json_raw(g_stat, "likes", likes, sizeof(likes));
+    json_raw(g_stat, "replies", replies, sizeof(replies));
+    json_raw(g_stat, "mine", mine, sizeof(mine));
+    str_copy(g_msg, "{\"type\":\"ui.activity.stats\",\"mid\":\"", sizeof(g_msg));
+    str_cat(g_msg, mid, sizeof(g_msg));
+    str_cat(g_msg, "\",\"likes\":", sizeof(g_msg));
+    str_cat(g_msg, likes[0] ? likes : "0", sizeof(g_msg));
+    str_cat(g_msg, ",\"replies\":", sizeof(g_msg));
+    str_cat(g_msg, replies[0] ? replies : "0", sizeof(g_msg));
+    str_cat(g_msg, ",\"mine\":", sizeof(g_msg));
+    str_cat(g_msg, (mine[0] == 't') ? "true" : "false", sizeof(g_msg));
+    str_cat(g_msg, "}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
 static void push_stats(void) {
     int valid = g_npids < 96 ? g_npids : 96;
     if (valid == 0) return;
@@ -494,7 +519,7 @@ int32_t module_handle_event(void) {
         char mid[80] = "";
         if (json_raw(buf, "activity_mid", mid, sizeof(mid)) && mid[0]) {
             hal_nostr_react(mid, str_len(mid));
-            push_stats(); /* reflect the new like immediately */
+            push_one_stat(mid); /* reflect THIS like immediately */
         }
     } else if (str_eq(cmd, "activity_reply")) {
         char target[80] = "", text[6000] = "";
@@ -505,6 +530,7 @@ int32_t module_handle_event(void) {
             char esc[6100] = ""; json_escape_cat(esc, text, sizeof(esc));
             char now[24]; u64_str(hal_time_epoch(), now); /* real ts, not epoch 0 */
             reply_append(target, "", g_self, esc, now);   /* local echo */
+            push_one_stat(target); /* bump the parent's reply count now */
         }
     } else if (str_eq(cmd, "conversations_send")) {
         char peer[80] = "", text[6000] = "";
