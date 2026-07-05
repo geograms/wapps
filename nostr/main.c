@@ -416,7 +416,7 @@ static void push_profiles(void) {
     int did = 0;
     for (int i = 0; i < valid; i++) {
         if (g_adone[i]) continue;
-        if (did >= 6) break; /* bound the store queries per poll (main thread) */
+        if (did >= 30) break; /* profile lookups are cache reads now (off-thread) */
         did++;
         int n = hal_nostr_profile(g_authors[i], str_len(g_authors[i]),
                                   g_prof, sizeof(g_prof) - 1);
