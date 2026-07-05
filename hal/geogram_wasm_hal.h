@@ -1031,9 +1031,29 @@ uint32_t hal_nostr_stats(const char *id, uint32_t id_len,
 __attribute__((import_module("hal"), import_name("nostr_track")))
 int32_t hal_nostr_track(const char *ids, uint32_t ids_len);
 
+/* Author profile for [pubkey] (hex): writes JSON
+ * {"name","pic","about","nip05","npub"} from its kind-0 metadata. Empty name
+ * until the kind-0 arrives — calling this also subscribes to (fetches) it, so
+ * poll again shortly. */
+__attribute__((import_module("hal"), import_name("nostr_profile")))
+uint32_t hal_nostr_profile(const char *pubkey, uint32_t pubkey_len,
+                           char *out, uint32_t out_cap);
+
 /* Like [id]: publish a signed kind-7 '+' reaction referencing it. */
 __attribute__((import_module("hal"), import_name("nostr_react")))
 int32_t hal_nostr_react(const char *id, uint32_t id_len);
+
+/* Reply to [parent]: publish a signed kind-1 note tagged e=parent. */
+__attribute__((import_module("hal"), import_name("nostr_reply")))
+int32_t hal_nostr_reply(const char *parent, uint32_t parent_len,
+                        const char *text, uint32_t text_len);
+
+/* Stored replies to post [id]: writes JSON [{"id","pubkey","content","ts"}]
+ * (kind-1 events that #e it). Returns bytes written, or the negated required
+ * size if [out] is too small. */
+__attribute__((import_module("hal"), import_name("nostr_replies")))
+uint32_t hal_nostr_replies(const char *id, uint32_t id_len,
+                           char *out, uint32_t out_cap);
 
 /* Follow / unfollow a pubkey ([key] hex or npub). */
 __attribute__((import_module("hal"), import_name("nostr_follow")))
