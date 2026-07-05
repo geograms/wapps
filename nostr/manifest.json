@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.nostr",
-  "version":         "0.2.7",
+  "version":         "0.2.8",
   "kind":            "app",
   "title":           "NOSTR",
   "description":     "A NOSTR client — follow accounts, read their notes, and post your own. Relays are transport-abstract: internet (wss://), Reticulum (rns://), or this device itself.",

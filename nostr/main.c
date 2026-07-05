@@ -348,6 +348,11 @@ static void push_replies_for(const char *postid) {
         json_raw(p, "pubkey", pk, sizeof(pk));
         json_raw(p, "content", content, sizeof(content)); /* stays escaped */
         json_raw(p, "ts", ts, sizeof(ts));
+        if (pk[0]) { /* fetch the reply author's profile too */
+            str_copy(g_authors[g_nauth % 96], pk, 66);
+            g_adone[g_nauth % 96] = 0;
+            g_nauth++;
+        }
         if (content[0]) reply_append(postid, rid, pk, content, ts);
         while (*p && *p != '}') p++;
         if (!*p) break;
@@ -410,10 +415,14 @@ static void push_profiles(void) {
         json_raw(g_prof, "name", name, sizeof(name));
         if (!name[0]) continue; /* kind-0 not in yet — retry next poll */
         char pic[512] = "", about[1024] = "", nip05[128] = "", npub[80] = "";
+        char website[256] = "", lud16[128] = "", banner[512] = "";
         json_raw(g_prof, "pic", pic, sizeof(pic));
         json_raw(g_prof, "about", about, sizeof(about));
         json_raw(g_prof, "nip05", nip05, sizeof(nip05));
         json_raw(g_prof, "npub", npub, sizeof(npub));
+        json_raw(g_prof, "website", website, sizeof(website));
+        json_raw(g_prof, "lud16", lud16, sizeof(lud16));
+        json_raw(g_prof, "banner", banner, sizeof(banner));
         char key[16] = ""; str_copy(key, g_authors[i], 13); /* short12 = from */
         /* json_raw values keep their escaping, so embed them verbatim. */
         str_copy(g_msg, "{\"type\":\"ui.profile.set\",\"key\":\"", sizeof(g_msg));
@@ -423,6 +432,9 @@ static void push_profiles(void) {
         str_cat(g_msg, "\",\"about\":\"", sizeof(g_msg)); str_cat(g_msg, about, sizeof(g_msg));
         str_cat(g_msg, "\",\"nip05\":\"", sizeof(g_msg)); str_cat(g_msg, nip05, sizeof(g_msg));
         str_cat(g_msg, "\",\"npub\":\"", sizeof(g_msg)); str_cat(g_msg, npub, sizeof(g_msg));
+        str_cat(g_msg, "\",\"website\":\"", sizeof(g_msg)); str_cat(g_msg, website, sizeof(g_msg));
+        str_cat(g_msg, "\",\"lud16\":\"", sizeof(g_msg)); str_cat(g_msg, lud16, sizeof(g_msg));
+        str_cat(g_msg, "\",\"banner\":\"", sizeof(g_msg)); str_cat(g_msg, banner, sizeof(g_msg));
         str_cat(g_msg, "\"}", sizeof(g_msg));
         send_msg(g_msg);
         g_adone[i] = 1;
