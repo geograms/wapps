@@ -513,6 +513,14 @@ int32_t module_handle_event(void) {
         char text[6000] = "";
         if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
             hal_nostr_post(1, text, str_len(text), "[]", 2);
+    } else if (str_eq(cmd, "activity_refresh")) {
+        /* Pull-to-refresh / return-to-stream: drop the feed sub and re-open it
+         * so the relays re-send the latest matching posts. */
+        if (g_sub_feed[0]) {
+            hal_nostr_unsubscribe(g_sub_feed, str_len(g_sub_feed));
+            g_sub_feed[0] = '\0';
+        }
+        subscribe_all();
     } else if (str_eq(cmd, "clear_feed")) {
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
     } else if (str_eq(cmd, "activity_like")) {
