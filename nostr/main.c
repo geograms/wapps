@@ -197,7 +197,9 @@ static void first_etag(const char *evt, char *out, unsigned cap) {
     }
 }
 
-static void feed_append(const char *evt) {
+/* pop=1 marks a post that came from the discovery (>=2 likes) feed, so the host
+ * keeps it in the All tab even after the transient like count resets. */
+static void feed_append_ex(const char *evt, int pop) {
     char pubkey[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
     json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
     json_raw(evt, "content", content, sizeof(content)); /* still escaped */
@@ -222,7 +224,9 @@ static void feed_append(const char *evt) {
     str_cat(g_msg, id, sizeof(g_msg));
     str_cat(g_msg, "\",\"parent\":\"", sizeof(g_msg));
     str_cat(g_msg, parent, sizeof(g_msg)); /* reply target, or "" for a root */
-    str_cat(g_msg, "\",", sizeof(g_msg));
+    str_cat(g_msg, "\",\"pop\":", sizeof(g_msg));
+    str_cat(g_msg, pop ? "1" : "0", sizeof(g_msg));
+    str_cat(g_msg, ",", sizeof(g_msg));
     cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
     send_msg(g_msg);
@@ -283,12 +287,12 @@ static void drain(void) {
     for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_disc, str_len(g_sub_disc), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append(g_evt);
+        g_evt[n] = '\0'; feed_append_ex(g_evt, 1); /* discovery = popular */
     }
     for (int i = 0; i < 20 && g_sub_follows[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append(g_evt);
+        g_evt[n] = '\0'; feed_append_ex(g_evt, 0); /* a follow's post */
     }
     for (int i = 0; i < 20 && g_sub_dm[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_dm, str_len(g_sub_dm), g_evt, sizeof(g_evt) - 1);
