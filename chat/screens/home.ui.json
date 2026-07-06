@@ -25,11 +25,44 @@
         "$type": "conversations",
         "label": "Messages",
         "children": [
-          { "$": "action", "name": "add_group", "icon": "add", "slot": "list", "tip": "Add a group" },
-          { "$": "action", "name": "new_chat", "icon": "edit", "slot": "list", "tip": "New message" },
-          { "$": "action", "name": "recur", "icon": "repeat", "slot": "room", "tip": "Recurring bulletin" },
-          { "$": "action", "name": "conversations_private", "label": "Private (only internet)", "icon": "lock", "slot": "room", "tip": "Toggle a private conversation — messages go over the internet only (off the APRS network), encrypted to this contact" },
-          { "$": "field", "name": "include_location", "$type": "bool", "label": "Include my location", "default": false, "localOnly": true, "slot": "menu" }
+          {
+            "$": "action",
+            "name": "add_group",
+            "icon": "add",
+            "slot": "list",
+            "tip": "Add a group"
+          },
+          {
+            "$": "action",
+            "name": "new_chat",
+            "icon": "edit",
+            "slot": "list",
+            "tip": "New message"
+          },
+          {
+            "$": "action",
+            "name": "recur",
+            "icon": "repeat",
+            "slot": "room",
+            "tip": "Recurring bulletin"
+          },
+          {
+            "$": "action",
+            "name": "conversations_private",
+            "label": "Private (only internet)",
+            "icon": "lock",
+            "slot": "room",
+            "tip": "Toggle a private conversation — messages go over the internet only (off the APRS network), encrypted to this contact"
+          },
+          {
+            "$": "field",
+            "name": "include_location",
+            "$type": "bool",
+            "label": "Include my location",
+            "default": false,
+            "localOnly": true,
+            "slot": "menu"
+          }
         ]
       }
     ]
@@ -65,7 +98,14 @@
     "icon": "people",
     "tip": "Callsigns you follow appear in your Activity feed.",
     "children": [
-      { "$": "action", "name": "follow", "label": "Follow a callsign", "icon": "person_add", "style": "primary", "tip": "Follow a callsign — their posts, replies, likes and status appear in your Activity feed." },
+      {
+        "$": "action",
+        "name": "follow",
+        "label": "Follow a callsign",
+        "icon": "person_add",
+        "style": "primary",
+        "tip": "Follow a callsign — their posts, replies, likes and status appear in your Activity feed."
+      },
       {
         "$": "field",
         "name": "follows_list",
@@ -91,9 +131,21 @@
             "label": "Type",
             "default": "position",
             "children": [
-              { "$": "option", "name": "position", "label": "Position" },
-              { "$": "option", "name": "status", "label": "Status" },
-              { "$": "option", "name": "emergency", "label": "Emergency" }
+              {
+                "$": "option",
+                "name": "position",
+                "label": "Position"
+              },
+              {
+                "$": "option",
+                "name": "status",
+                "label": "Status"
+              },
+              {
+                "$": "option",
+                "name": "emergency",
+                "label": "Emergency"
+              }
             ]
           },
           {
@@ -152,6 +204,107 @@
   },
   {
     "$": "screen",
+    "name": "APRS",
+    "icon": "settings_input_antenna",
+    "menu": true,
+    "tip": "APRS-IS access: licensed callsign, passcode and server. Off by default.",
+    "children": [
+      {
+        "$": "group",
+        "name": "aprsis",
+        "tip": "APRS-IS carries traffic onto licensed amateur-radio networks, so it requires a callsign assigned by your local radio authority. The auto-generated Geogram callsign (X1…) is not valid there. While this switch is off, Geogram never connects to APRS-IS — messaging keeps working over Bluetooth and Reticulum.",
+        "children": [
+          {
+            "$": "field",
+            "name": "aprsis_enabled",
+            "$type": "bool",
+            "label": "Use APRS-IS",
+            "default": false,
+            "tip": "Enable the APRS-IS connection using the licensed callsign below. Verified with “Verify & apply”."
+          },
+          {
+            "$": "field",
+            "name": "aprsis_call",
+            "$type": "string",
+            "label": "Licensed callsign",
+            "default": "",
+            "tip": "Your authority-assigned amateur callsign, optionally with an SSID, e.g. N0CALL-9. Used for the APRS-IS login and as your station callsign while APRS-IS is enabled."
+          },
+          {
+            "$": "field",
+            "name": "aprsis_pass",
+            "$type": "string",
+            "label": "APRS-IS passcode",
+            "default": "",
+            "tip": "The numeric APRS-IS passcode for your callsign. It is verified before the switch takes effect."
+          },
+          {
+            "$": "action",
+            "name": "aprs_apply",
+            "label": "Verify & apply",
+            "style": "primary",
+            "tip": "Check the callsign + passcode and apply the switch. With a wrong passcode APRS-IS stays disabled."
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "network",
+        "tip": "APRS-IS server and digipeater path.",
+        "children": [
+          {
+            "$": "field",
+            "name": "server",
+            "$type": "string",
+            "label": "APRS-IS server",
+            "default": "rotate.aprs2.net"
+          },
+          {
+            "$": "field",
+            "name": "port",
+            "$type": "string",
+            "label": "Port",
+            "default": "14580"
+          },
+          {
+            "$": "field",
+            "name": "path",
+            "$type": "string",
+            "label": "Digipeater path",
+            "default": "WIDE1-1,WIDE2-1"
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "control",
+        "children": [
+          {
+            "$": "action",
+            "name": "connect",
+            "label": "Connect",
+            "style": "primary",
+            "tip": "Connect to APRS-IS now (requires the switch above)."
+          },
+          {
+            "$": "action",
+            "name": "disconnect",
+            "label": "Disconnect",
+            "style": "secondary"
+          }
+        ]
+      },
+      {
+        "$": "field",
+        "name": "aprs_status",
+        "$type": "log",
+        "label": "Status",
+        "tip": "APRS-IS connection log."
+      }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Settings",
     "menu": true,
     "tip": "Station identity, position, network and filter.",
@@ -161,14 +314,6 @@
         "name": "identity",
         "tip": "Your station.",
         "children": [
-          {
-            "$": "field",
-            "name": "callsign",
-            "$type": "string",
-            "label": "Callsign",
-            "default": "",
-            "tip": "Your amateur callsign with SSID, e.g. N0CALL-9. The APRS-IS passcode is computed from this."
-          },
           {
             "$": "field",
             "name": "symbol",
@@ -184,26 +329,40 @@
         "name": "position",
         "tip": "Your position and how far around it to listen.",
         "children": [
-          { "$": "field", "name": "my_lat", "$type": "string", "label": "Latitude", "default": "40.2056" },
-          { "$": "field", "name": "my_lon", "$type": "string", "label": "Longitude", "default": "-8.4196" },
-          { "$": "field", "name": "radius_km", "$type": "string", "label": "Filter radius (km)", "default": "100" }
-        ]
-      },
-      {
-        "$": "group",
-        "name": "network",
-        "tip": "APRS-IS server and digipeater path.",
-        "children": [
-          { "$": "field", "name": "server", "$type": "string", "label": "APRS-IS server", "default": "rotate.aprs2.net" },
-          { "$": "field", "name": "port", "$type": "string", "label": "Port", "default": "14580" },
-          { "$": "field", "name": "path", "$type": "string", "label": "Digipeater path", "default": "WIDE1-1,WIDE2-1" }
+          {
+            "$": "field",
+            "name": "my_lat",
+            "$type": "string",
+            "label": "Latitude",
+            "default": "40.2056"
+          },
+          {
+            "$": "field",
+            "name": "my_lon",
+            "$type": "string",
+            "label": "Longitude",
+            "default": "-8.4196"
+          },
+          {
+            "$": "field",
+            "name": "radius_km",
+            "$type": "string",
+            "label": "Filter radius (km)",
+            "default": "100"
+          }
         ]
       },
       {
         "$": "group",
         "name": "tags",
         "children": [
-          { "$": "field", "name": "tags", "$type": "string", "label": "Subscribed tags", "default": "#cq" }
+          {
+            "$": "field",
+            "name": "tags",
+            "$type": "string",
+            "label": "Subscribed tags",
+            "default": "#cq"
+          }
         ]
       },
       {
@@ -211,8 +370,24 @@
         "name": "bluetooth",
         "tip": "Exchange short APRS messages directly over Bluetooth, off-grid.",
         "children": [
-          { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": true, "apply": "ble_apply", "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)." },
-          { "$": "field", "name": "ble_relay", "$type": "bool", "label": "Act as an iGate (bridge Bluetooth ↔ APRS-IS)", "default": true, "apply": "ble_apply", "tip": "When online, gate APRS messages heard over Bluetooth to APRS-IS, and relay APRS-IS messages addressed to Bluetooth stations in range back to them. On by default." }
+          {
+            "$": "field",
+            "name": "ble_enabled",
+            "$type": "bool",
+            "label": "Exchange over Bluetooth",
+            "default": true,
+            "apply": "ble_apply",
+            "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)."
+          },
+          {
+            "$": "field",
+            "name": "ble_relay",
+            "$type": "bool",
+            "label": "Act as an iGate (bridge Bluetooth ↔ APRS-IS)",
+            "default": true,
+            "apply": "ble_apply",
+            "tip": "When online, gate APRS messages heard over Bluetooth to APRS-IS, and relay APRS-IS messages addressed to Bluetooth stations in range back to them. On by default."
+          }
         ]
       },
       {
@@ -220,7 +395,14 @@
         "name": "media",
         "tip": "Images shared in messages are fetched over the network. Large ones can wait for an explicit tap.",
         "children": [
-          { "$": "field", "name": "media_auto_mb", "$type": "string", "label": "Auto-download images up to (MB)", "default": "10", "tip": "Images at or below this size download automatically; larger ones show their size and a tap-to-download button. Set 0 to always tap to download." }
+          {
+            "$": "field",
+            "name": "media_auto_mb",
+            "$type": "string",
+            "label": "Auto-download images up to (MB)",
+            "default": "10",
+            "tip": "Images at or below this size download automatically; larger ones show their size and a tap-to-download button. Set 0 to always tap to download."
+          }
         ]
       },
       {
@@ -228,19 +410,49 @@
         "name": "identity_broadcast",
         "tip": "Periodically broadcast your public key so other stations can map your callsign to it and send you encrypted messages.",
         "children": [
-          { "$": "field", "name": "pubkey_beacon", "$type": "bool", "label": "Broadcast my public key", "default": true, "tip": "Every 30 min, send your profile's public key (base64, ~43 chars) as a bulletin to group NOSTR over APRS-IS and Bluetooth. Peers learn your callsign → pubkey so they can message you encrypted." },
-          { "$": "action", "name": "pubkey_apply", "label": "Apply key broadcast", "style": "primary", "tip": "Save the setting above and send one broadcast now." },
-          { "$": "field", "name": "sign_msgs", "$type": "bool", "label": "Sign my messages", "default": false, "tip": "Append a short cryptographic signature (~60 chars, one extra APRS line) to outgoing messages so others can verify they came from your callsign. Verifying needs the sender's broadcast public key." },
-          { "$": "action", "name": "sign_apply", "label": "Apply signing", "style": "primary", "tip": "Save the message-signing setting above." }
+          {
+            "$": "field",
+            "name": "pubkey_beacon",
+            "$type": "bool",
+            "label": "Broadcast my public key",
+            "default": true,
+            "tip": "Every 30 min, send your profile's public key (base64, ~43 chars) as a bulletin to group NOSTR over APRS-IS and Bluetooth. Peers learn your callsign → pubkey so they can message you encrypted."
+          },
+          {
+            "$": "action",
+            "name": "pubkey_apply",
+            "label": "Apply key broadcast",
+            "style": "primary",
+            "tip": "Save the setting above and send one broadcast now."
+          },
+          {
+            "$": "field",
+            "name": "sign_msgs",
+            "$type": "bool",
+            "label": "Sign my messages",
+            "default": false,
+            "tip": "Append a short cryptographic signature (~60 chars, one extra APRS line) to outgoing messages so others can verify they came from your callsign. Verifying needs the sender's broadcast public key."
+          },
+          {
+            "$": "action",
+            "name": "sign_apply",
+            "label": "Apply signing",
+            "style": "primary",
+            "tip": "Save the message-signing setting above."
+          }
         ]
       },
       {
         "$": "group",
         "name": "control",
         "children": [
-          { "$": "action", "name": "connect", "label": "Connect", "style": "primary", "tip": "Connect to APRS-IS and start receiving." },
-          { "$": "action", "name": "disconnect", "label": "Disconnect", "style": "secondary" },
-          { "$": "action", "name": "center", "label": "Center map", "style": "secondary", "tip": "Recenter the map on your position." }
+          {
+            "$": "action",
+            "name": "center",
+            "label": "Center map",
+            "style": "secondary",
+            "tip": "Recenter the map on your position."
+          }
         ]
       }
     ]
@@ -257,18 +469,50 @@
         "tip": "Ping nearby stations over Bluetooth; each digipeater replies with its callsign, hop count and location.",
         "children": [
           {
-            "$": "field", "name": "ping_ttl", "$type": "enum", "label": "Max hops", "default": "3",
+            "$": "field",
+            "name": "ping_ttl",
+            "$type": "enum",
+            "label": "Max hops",
+            "default": "3",
             "children": [
-              { "$": "option", "name": "1", "label": "1" },
-              { "$": "option", "name": "2", "label": "2" },
-              { "$": "option", "name": "3", "label": "3" },
-              { "$": "option", "name": "4", "label": "4" }
+              {
+                "$": "option",
+                "name": "1",
+                "label": "1"
+              },
+              {
+                "$": "option",
+                "name": "2",
+                "label": "2"
+              },
+              {
+                "$": "option",
+                "name": "3",
+                "label": "3"
+              },
+              {
+                "$": "option",
+                "name": "4",
+                "label": "4"
+              }
             ]
           },
-          { "$": "action", "name": "ping", "label": "Send ping", "style": "primary", "tip": "Broadcast a BLE ping; nearby stations reply with callsign, hops and location." }
+          {
+            "$": "action",
+            "name": "ping",
+            "label": "Send ping",
+            "style": "primary",
+            "tip": "Broadcast a BLE ping; nearby stations reply with callsign, hops and location."
+          }
         ]
       },
-      { "$": "field", "name": "pingresults", "$type": "log", "label": "Responses", "tip": "Stations that answered, with hop count and distance." }
+      {
+        "$": "field",
+        "name": "pingresults",
+        "$type": "log",
+        "label": "Responses",
+        "tip": "Stations that answered, with hop count and distance."
+      }
     ]
   },
   {
@@ -282,8 +526,20 @@
         "name": "keys_group",
         "tip": "Each station that broadcasts its public key is recorded here (callsign, key fingerprint, time since last heard).",
         "children": [
-          { "$": "action", "name": "keys_refresh", "label": "Refresh", "style": "secondary", "tip": "Rebuild the list from the stored key database." },
-          { "$": "field", "name": "keys_list", "$type": "log", "label": "Known public keys", "tip": "callsign  key-fingerprint..  age. The full key is stored for encryption." }
+          {
+            "$": "action",
+            "name": "keys_refresh",
+            "label": "Refresh",
+            "style": "secondary",
+            "tip": "Rebuild the list from the stored key database."
+          },
+          {
+            "$": "field",
+            "name": "keys_list",
+            "$type": "log",
+            "label": "Known public keys",
+            "tip": "callsign  key-fingerprint..  age. The full key is stored for encryption."
+          }
         ]
       }
     ]

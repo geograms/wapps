@@ -168,6 +168,34 @@ static int is_self_call(const char *c) {
   }
   return 0;
 }
+
+/* ── APRS-IS access control ────────────────────────────────────────────────
+ * APRS-IS feeds licensed amateur-radio networks, so it may only be used with
+ * a callsign assigned by a radio authority. Geogram's auto-generated X1/X3
+ * identities are NOT valid there: the connection is OFF by default and comes
+ * up only after the user supplies a licensed callsign + its (verified)
+ * APRS-IS passcode in the APRS panel. While enabled, that callsign IS the
+ * station's working callsign (g_call) on every transport, so signatures and
+ * key beacons stay consistent. */
+static int  g_aprsis_on = 0;            /* master switch (default OFF) */
+static char g_aprsis_call[16] = "";     /* licensed callsign for APRS-IS */
+static int  g_aprsis_pass = -1;         /* verified APRS-IS passcode */
+
+/* A Geogram auto-generated callsign: "X1…"/"X3…". The X1/X3 prefixes are not
+ * allocated by the ITU, so they can't be authority-assigned — frames from
+ * such calls must NEVER be originated onto APRS-IS (own or relayed). */
+static int is_autogen_call(const char *c) {
+  return c[0] && up(c[0]) == 'X' && (c[1] == '1' || c[1] == '3');
+}
+
+/* Transport chip shown on messages: the internal token for APRS-IS-arrived
+ * traffic is "NET" (compared all over the routing code); show it to the user
+ * as "APRS-IS" so the origin is explicit. Other tags (BLE/RET/RLY) pass
+ * through unchanged. */
+static const char *via_label(const char *via) {
+  return (via && via[0]=='N' && via[1]=='E' && via[2]=='T' && !via[3])
+           ? "APRS-IS" : via;
+}
 static double g_lat = 0, g_lon = 0;
 static int   g_radius = 100;
 static char  g_symbol[8] = "/>";
@@ -193,6 +221,7 @@ static uint64_t g_ble_last_hello = 0;   /* last lightweight BLE presence beacon 
 /* compact BLE senders, defined with the module entry points */
 static void ble_tx_msg(const char *to, const char *text);
 static void ble_tx_pos(double lat, double lon, const char *comment);
+static void log_line(const char *field, const char *text);
 /* Build "label/value" chips for callsigns heard over BLE within REACH_WINDOW
  * (most-recent first). Returns the number of chips written (defined with the
  * seen-over-BLE registry, far below). */
@@ -373,7 +402,7 @@ static void chat_append(const char *field, const char *convo, const char *dir,
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
   s_cat(m, "\"", sizeof(m));
   if (via && via[0]) {
-    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
+    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via_label(via));
     s_cat(m, "\"", sizeof(m));
   }
   if (recur) s_cat(m, ",\"recur\":true,\"time\":\"", sizeof(m));
@@ -455,7 +484,10 @@ static void request_history(void) {
 /* read shared config from a command's bundled fields */
 static void read_config(const char *buf) {
   char v[64];
-  if (jstr(buf, "callsign", v, sizeof(v)) && v[0]) s_cpy(g_call, v, sizeof(g_call));
+  /* NOTE: no "callsign" override here any more. The working callsign is owned
+   * by the profile identity (module_init) and the APRS panel (aprs_apply):
+   * a free-text override let stale saved fields silently re-callsign a
+   * background engine, and let unverified calls onto APRS-IS. */
   if (jstr(buf, "my_lat", v, sizeof(v))) g_lat = to_dbl(v);
   if (jstr(buf, "my_lon", v, sizeof(v))) g_lon = to_dbl(v);
   if (jstr(buf, "radius_km", v, sizeof(v)) && v[0]) g_radius = to_int(v);
@@ -473,6 +505,14 @@ static void read_config(const char *buf) {
 static void do_connect(const char *buf) {
   read_config(buf);
   request_history();   /* bring back this area's older Live messages on open */
+  /* APRS-IS is opt-in: without a verified licensed callsign there is no
+   * connection at all (Bluetooth + Reticulum keep working). */
+  if (!g_aprsis_on) {
+    status("APRS-IS is off - enable it in the APRS panel (licensed callsign required)");
+    log_line("aprs_status", "APRS-IS is off. Enable the switch above with your "
+                            "licensed callsign and passcode.");
+    return;
+  }
   s_cpy(g_host, APRS_DEFAULT_HOST, sizeof(g_host));
   g_port = APRS_DEFAULT_PORT;
   char v[64];
@@ -486,6 +526,107 @@ static void do_connect(const char *buf) {
   if (g_sock < 0) { status("connect: socket error (will retry)"); return; }
   char line[128] = "Connecting to "; s_cat(line, g_host, sizeof(line));
   status(line);
+  log_line("aprs_status", line);
+}
+
+/* Persistence + validation for the APRS panel — declared with the other KV
+ * savers (see aprsis_save/aprsis_load near igate_save). */
+static void aprsis_save(void);
+static void aprsis_load(void);
+
+/* A plausible authority-assigned callsign: 3-7 alphanumeric chars containing
+ * at least one digit and one letter, optionally "-<1..2 digit SSID>". This is
+ * a sanity filter, not a licence check — the passcode match is the gate the
+ * APRS-IS servers themselves enforce. */
+static int aprs_call_valid(const char *c) {
+  int base = 0, digits = 0, letters = 0;
+  int i = 0;
+  for (; c[i] && c[i] != '-'; i++) {
+    char u = up(c[i]);
+    if (u >= '0' && u <= '9') digits++;
+    else if (u >= 'A' && u <= 'Z') letters++;
+    else return 0;
+    base++;
+  }
+  if (base < 3 || base > 7 || !digits || !letters) return 0;
+  if (c[i] == '-') {                       /* optional SSID */
+    int sn = 0;
+    for (i++; c[i]; i++) { if (c[i] < '0' || c[i] > '9') return 0; sn++; }
+    if (sn < 1 || sn > 2) return 0;
+  }
+  return 1;
+}
+
+/* APRS panel "Verify & apply": validate the licensed callsign + passcode and
+ * flip the APRS-IS switch. Everything is checked BEFORE anything is enabled —
+ * a wrong passcode (or an auto-generated X1/X3 call) leaves APRS-IS off. */
+static void do_aprs_apply(const char *buf) {
+  read_config(buf);
+  int want = jbool(buf, "aprsis_enabled");
+  char call[16] = "", pass[16] = "";
+  jstr(buf, "aprsis_call", call, sizeof(call));
+  jstr(buf, "aprsis_pass", pass, sizeof(pass));
+  for (int i = 0; call[i]; i++) call[i] = up(call[i]);
+
+  if (!want) {                       /* switch off: sever APRS-IS entirely */
+    g_aprsis_on = 0;
+    if (call[0]) s_cpy(g_aprsis_call, call, sizeof(g_aprsis_call));
+    aprsis_save();
+    g_want_connect = 0;
+    if (g_sock >= 0) { aprs_disconnect(g_sock); g_sock = -1; g_logged = 0; }
+    if (g_idcall[0]) s_cpy(g_call, g_idcall, sizeof(g_call));  /* back to X1 identity */
+    status("APRS-IS disabled");
+    log_line("aprs_status", "APRS-IS disabled. No traffic is sent or received "
+                            "on APRS-IS; Bluetooth/Reticulum stay active.");
+    notify("info", "APRS-IS disabled");
+    return;
+  }
+
+  if (!call[0]) {
+    notify("error", "Enter your licensed callsign first");
+    return;
+  }
+  if (is_autogen_call(call)) {
+    notify("error", "X1/X3 callsigns are auto-generated by Geogram and not "
+                    "licensed - APRS-IS needs a callsign assigned by your "
+                    "radio authority");
+    log_line("aprs_status", "Rejected: auto-generated callsigns are not valid "
+                            "on APRS-IS.");
+    return;
+  }
+  if (!aprs_call_valid(call)) {
+    notify("error", "That does not look like a licensed callsign "
+                    "(e.g. N0CALL or N0CALL-9)");
+    return;
+  }
+  int digitsOnly = pass[0] != 0;
+  for (int i = 0; pass[i]; i++)
+    if (pass[i] < '0' || pass[i] > '9') { digitsOnly = 0; break; }
+  int entered = digitsOnly ? to_int(pass) : -1;
+  if (entered < 0) {
+    notify("error", "Enter the numeric APRS-IS passcode for your callsign");
+    return;
+  }
+  if (entered != aprs_passcode(call)) {
+    notify("error", "Wrong APRS-IS passcode for that callsign - APRS-IS stays "
+                    "disabled");
+    log_line("aprs_status", "Passcode check FAILED - APRS-IS stays disabled.");
+    return;
+  }
+
+  /* Verified: persist + switch the station to the licensed callsign. */
+  g_aprsis_on = 1;
+  s_cpy(g_aprsis_call, call, sizeof(g_aprsis_call));
+  g_aprsis_pass = entered;
+  aprsis_save();
+  s_cpy(g_call, g_aprsis_call, sizeof(g_call));   /* licensed call everywhere */
+  {
+    char l[96] = "Passcode verified. Station callsign is now ";
+    s_cat(l, g_aprsis_call, sizeof(l));
+    log_line("aprs_status", l);
+  }
+  notify("success", "APRS-IS enabled - connecting");
+  do_connect(buf);                    /* (re)connect under the licensed call */
 }
 
 static void do_beacon(const char *buf, int emergency) {
@@ -929,7 +1070,7 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
   s_cat(m, "\"", sizeof(m));
   if (via && via[0]) {
-    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via);
+    s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via_label(via));
     s_cat(m, "\"", sizeof(m));
   }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m));
@@ -1816,7 +1957,7 @@ static void activity_feed(const char *convo, const char *from,
   if (parent && parent[0]) { s_cat(m, "\",\"parent\":\"", sizeof(m)); s_cat(m, parent, sizeof(m)); }
   s_cat(m, "\",\"meta\":\"", sizeof(m)); jesc(m, sizeof(m), meta);
   s_cat(m, "\"", sizeof(m));
-  if (via && via[0]) { s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via); s_cat(m, "\"", sizeof(m)); }
+  if (via && via[0]) { s_cat(m, ",\"via\":\"", sizeof(m)); jesc(m, sizeof(m), via_label(via)); s_cat(m, "\"", sizeof(m)); }
   s_cat(m, ",\"time\":\"", sizeof(m)); s_cat(m, t, sizeof(m)); s_cat(m, "\"", sizeof(m));
   cat_pos(m, sizeof(m), lat, lon);
   s_cat(m, "}}", sizeof(m));
@@ -3400,6 +3541,31 @@ static void igate_load(void) {
   uint32_t n = hal_kv_get("igate", 5, b, sizeof(b) - 1);
   if (n >= 1) g_ble_relay = (b[0] != '0');
 }
+/* APRS-IS access persists in KV "aprsis" as "<0|1>|<call>|<passcode>". Absent
+ * or malformed keeps the safe default: disabled, no licensed callsign. */
+static void aprsis_save(void) {
+  char v[40]; v[0] = g_aprsis_on ? '1' : '0'; v[1] = '|'; v[2] = 0;
+  s_cat(v, g_aprsis_call, sizeof(v));
+  s_cat(v, "|", sizeof(v));
+  if (g_aprsis_pass >= 0) { char nb[12]; u_itoa((unsigned)g_aprsis_pass, nb); s_cat(v, nb, sizeof(v)); }
+  hal_kv_set("aprsis", 6, v, s_len(v));
+}
+static void aprsis_load(void) {
+  char v[40];
+  uint32_t n = hal_kv_get("aprsis", 6, v, sizeof(v) - 1);
+  if (n < 2) return;
+  v[n] = 0;
+  int on = (v[0] == '1');
+  const char *p = v + 2;                  /* past "<0|1>|" */
+  int ci = 0;
+  while (*p && *p != '|' && ci < 15) g_aprsis_call[ci++] = *p++;
+  g_aprsis_call[ci] = 0;
+  g_aprsis_pass = (*p == '|' && p[1]) ? to_int(p + 1) : -1;
+  /* Never come up enabled without a full, self-consistent record. */
+  g_aprsis_on = (on && g_aprsis_call[0] && g_aprsis_pass >= 0 &&
+                 !is_autogen_call(g_aprsis_call) &&
+                 g_aprsis_pass == aprs_passcode(g_aprsis_call));
+}
 /* Broadcast our npub once: APRS-IS bulletin to group "NOSTR" + same over BLE.
  * Receivers map the sender callsign (frame from-field) to the npub text. */
 static void pkbeacon_send(void) {
@@ -4448,8 +4614,10 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
     /* iGate BLE → APRS-IS: re-originate the bulletin under the sender's
      * callsign with a qAR q-construct (we are the gateway). A clean RF-gated
      * path is essential — a TCPIP* path makes APRS-IS treat it as a loop and
-     * drop it, which is why the old third-party form never appeared. */
-    if (g_ble_relay && g_logged) {
+     * drop it, which is why the old third-party form never appeared.
+     * NEVER gate an auto-generated X1/X3 callsign onto APRS-IS: those are not
+     * authority-assigned, so their traffic stays on Bluetooth/Reticulum. */
+    if (g_ble_relay && g_logged && !is_autogen_call(from)) {
       char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
       char line[260]; aprs_build_bulletin_via(line, sizeof(line), from, to + 1, '0', text, via);
       aprs_send_raw(g_sock, line);
@@ -4501,8 +4669,10 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
      * endpoints; re-originating one puts a spoofed ack on APRS-IS under someone
      * else's callsign. seq -1 = no {n — the copy must not solicit acks (a
      * fabricated {0 turned bridged acks into "messages" that bots answered,
-     * looping forever under a third party's callsign). */
-    if (g_ble_relay && g_logged && !amine && !is_ack_text(text)) {
+     * looping forever under a third party's callsign). And NEVER gate an
+     * auto-generated X1/X3 callsign onto APRS-IS — not authority-assigned. */
+    if (g_ble_relay && g_logged && !amine && !is_ack_text(text) &&
+        !is_autogen_call(from)) {
       char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
       char line[260]; aprs_build_message_via(line, sizeof(line), from, to, text, -1, via);
       aprs_send_raw(g_sock, line);
@@ -4564,11 +4734,20 @@ void module_init(void) {
   for (int i = 0; i < g_blocked_n; i++) host_state_emit("block", g_blocked[i], 1);
   { char b[4]; uint32_t n = hal_kv_get("signmsgs", 8, b, sizeof(b) - 1);
     if (n >= 1) g_sign_msgs = (b[0] != '0'); }
-  status("APRS ready - connecting to APRS-IS automatically...");
-  /* Ask the host to run our "connect" command with the current settings
-   * (auto-connect on load; no manual Connect needed). */
-  const char *m = "{\"type\":\"host.run_command\",\"command\":\"connect\"}";
-  hal_msg_send(m, s_len(m));
+  /* APRS-IS is strictly opt-in (licensed callsign + verified passcode, set in
+   * the APRS panel). Only then auto-connect; otherwise stay off-grid — the
+   * X1/X3 identity must never appear on APRS-IS. */
+  aprsis_load();
+  if (g_aprsis_on) {
+    s_cpy(g_call, g_aprsis_call, sizeof(g_call));   /* licensed call everywhere */
+    status("APRS ready - connecting to APRS-IS automatically...");
+    /* Ask the host to run our "connect" command with the current settings
+     * (auto-connect on load; no manual Connect needed). */
+    const char *m = "{\"type\":\"host.run_command\",\"command\":\"connect\"}";
+    hal_msg_send(m, s_len(m));
+  } else {
+    status("APRS-IS off (enable it in the APRS panel) - Bluetooth/Reticulum active");
+  }
 }
 
 void module_tick(void) {
@@ -4677,9 +4856,10 @@ void module_tick(void) {
     }
   }
 
-  /* Auto-reconnect: keep retrying (5s backoff) while we want a link. */
+  /* Auto-reconnect: keep retrying (5s backoff) while we want a link. Hard-
+   * gated on the APRS-IS switch: with it off there is never a connection. */
   if (g_sock < 0) {
-    if (!g_want_connect) return;
+    if (!g_want_connect || !g_aprsis_on) return;
     uint64_t now = hal_time_epoch();
     if (now - g_last_reconnect < 5) return;
     g_last_reconnect = now;
@@ -4692,7 +4872,9 @@ void module_tick(void) {
   if (!g_logged) {
     int st = hal_socket_status(g_sock);
     if (st == 1) {
-      int pass = aprs_passcode(g_call);
+      /* Login with the user-verified APRS-IS passcode (licensed callsign is
+       * already the working g_call while the APRS panel switch is on). */
+      int pass = (g_aprsis_pass >= 0) ? g_aprsis_pass : aprs_passcode(g_call);
       /* Include the heard stations in the server-side g/ filter so APRS-IS
        * pushes messages addressed to them (store-and-forward iGate). */
       build_gfilter(g_gfilter, sizeof(g_gfilter));
@@ -4855,6 +5037,7 @@ void module_handle_event(void) {
     char c[16] = ""; jstr(buf, "follows_list_id", c, sizeof(c));
     follow_remove(c);
   }
+  else if (s_eq(cmd, "aprs_apply")) do_aprs_apply(buf);
   else if (s_eq(cmd, "ble_apply")) {
     read_config(buf);
     g_ble_on = jbool_def(buf, "ble_enabled", 1);
