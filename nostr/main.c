@@ -115,6 +115,7 @@ static char g_self[80] = "";       /* our x-only pubkey (hex)              */
 static char g_sub_disc[64] = "";   /* discovery (popular >2-like) sub — "All" */
 static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
 static char g_sub_dm[64] = "";     /* kind-4 subscription id               */
+static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
 static char g_evt[8192];           /* one drained event JSON               */
 static char g_relays[8192];        /* hal_nostr_relays output              */
 static char g_msg[16384];          /* outbound UI message                  */
@@ -198,8 +199,10 @@ static void first_etag(const char *evt, char *out, unsigned cap) {
 }
 
 /* pop=1 marks a post that came from the discovery (>=2 likes) feed, so the host
- * keeps it in the All tab even after the transient like count resets. */
-static void feed_append_ex(const char *evt, int pop) {
+ * keeps it in the All tab even after the transient like count resets.
+ * field routes the post to a chat feed ("activity" = main stream,
+ * "search_results" = the Search panel). */
+static void feed_append_to(const char *evt, int pop, const char *field) {
     char pubkey[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
     json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
     json_raw(evt, "content", content, sizeof(content)); /* still escaped */
@@ -214,7 +217,9 @@ static void feed_append_ex(const char *evt, int pop) {
         g_nauth++;
     }
     char from[16] = ""; short12(pubkey, from);
-    str_copy(g_msg, "{\"type\":\"ui.chat.append\",\"field\":\"activity\",\"message\":{\"dir\":\"in\",\"from\":\"", sizeof(g_msg));
+    str_copy(g_msg, "{\"type\":\"ui.chat.append\",\"field\":\"", sizeof(g_msg));
+    str_cat(g_msg, field, sizeof(g_msg));
+    str_cat(g_msg, "\",\"message\":{\"dir\":\"in\",\"from\":\"", sizeof(g_msg));
     str_cat(g_msg, from, sizeof(g_msg));
     str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg));
     str_cat(g_msg, content, sizeof(g_msg));      /* already-escaped body */
@@ -229,6 +234,25 @@ static void feed_append_ex(const char *evt, int pop) {
     str_cat(g_msg, ",", sizeof(g_msg));
     cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
+/* A kind-0 profile hit in search → a "person" result card. The header name +
+ * avatar are resolved host-side from the stored profile (by short12 pubkey);
+ * tapping the author opens the full profile. */
+static void search_profile(const char *evt) {
+    char pubkey[80] = "";
+    json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
+    if (!pubkey[0]) return;
+    char from[16] = ""; short12(pubkey, from);
+    str_copy(g_msg,
+        "{\"type\":\"ui.chat.append\",\"field\":\"search_results\",\"message\":"
+        "{\"dir\":\"in\",\"from\":\"", sizeof(g_msg));
+    str_cat(g_msg, from, sizeof(g_msg));
+    /* 👤 = 👤 ; label marks it as a person, not a post. */
+    str_cat(g_msg,
+        "\",\"text\":\"\\uD83D\\uDC64 Profile — tap the name to open\","
+        "\"mid\":\"\",\"parent\":\"\",\"pop\":0,\"t\":0}}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
@@ -287,17 +311,27 @@ static void drain(void) {
     for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_disc, str_len(g_sub_disc), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_ex(g_evt, 1); /* discovery = popular */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 1, "activity"); /* discovery = popular */
     }
     for (int i = 0; i < 20 && g_sub_follows[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_ex(g_evt, 0); /* a follow's post */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* a follow's post */
     }
     for (int i = 0; i < 20 && g_sub_dm[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_dm, str_len(g_sub_dm), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
         g_evt[n] = '\0'; dm_ingest(g_evt);
+    }
+    /* Search results (NIP-50): kind-1 posts → result cards; kind-0 profiles →
+     * a "person" card (the host resolves name+avatar by pubkey). */
+    for (int i = 0; i < 30 && g_sub_search[0]; i++) {
+        int n = hal_nostr_event_recv(g_sub_search, str_len(g_sub_search), g_evt, sizeof(g_evt) - 1);
+        if (n <= 0) break;
+        g_evt[n] = '\0';
+        char k[8] = ""; json_raw(g_evt, "kind", k, sizeof(k));
+        if (str_eq(k, "0")) search_profile(g_evt);
+        else feed_append_to(g_evt, 0, "search_results");
     }
 }
 
@@ -569,6 +603,25 @@ int32_t module_handle_event(void) {
         subscribe_all();
     } else if (str_eq(cmd, "clear_feed")) {
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
+    } else if (str_eq(cmd, "search_go")) {
+        /* NIP-50 search: one subscribe fans out to the local FTS index AND every
+         * connected relay. kinds:[0,1] = profiles + notes. */
+        char q[256] = "";
+        json_raw(buf, "search_input", q, sizeof(q));
+        send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"search_results\"}");
+        if (g_sub_search[0]) {
+            hal_nostr_unsubscribe(g_sub_search, str_len(g_sub_search));
+            g_sub_search[0] = '\0';
+        }
+        if (q[0]) {
+            char filter[400];
+            str_copy(filter, "{\"kinds\":[0,1],\"search\":\"", sizeof(filter));
+            json_escape_cat(filter, q, sizeof(filter));
+            str_cat(filter, "\",\"limit\":40}", sizeof(filter));
+            int m = hal_nostr_subscribe(filter, str_len(filter),
+                                        g_sub_search, sizeof(g_sub_search) - 1);
+            if (m > 0) g_sub_search[m] = '\0';
+        }
     } else if (str_eq(cmd, "activity_like")) {
         char mid[80] = "";
         if (json_raw(buf, "activity_mid", mid, sizeof(mid)) && mid[0]) {

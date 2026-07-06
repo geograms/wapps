@@ -55,6 +55,19 @@
   },
   {
     "$": "screen",
+    "name": "Search",
+    "icon": "search",
+    "menu": true,
+    "tip": "Find posts and people across your feed and the connected relays.",
+    "children": [
+      { "$": "field", "name": "search_input", "$type": "string", "label": "Search",
+        "hint": "Words, #topic, or a name" },
+      { "$": "action", "name": "search_go", "label": "Search", "icon": "search", "style": "primary" },
+      { "$": "field", "name": "search_results", "$type": "chat" }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "NOSTR servers",
     "icon": "cloud",
     "menu": true,
