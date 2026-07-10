@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.nostr",
-  "version":         "0.2.20",
+  "version":         "0.2.21",
   "kind":            "app",
   "title":           "NOSTR",
   "description":     "A NOSTR client — follow accounts, read their notes, and post your own. Relays are transport-abstract: internet (wss://), Reticulum (rns://), or this device itself.",
@@ -13,7 +13,7 @@
   "permissions":     ["network"],
   "platforms":       ["linux", "windows", "macos", "android"],
   "hardware":        ["N/A", "intel", "arm"],
-  "provides": { "functions": [], "events": [], "variables": [], "functionalities": [] },
+  "provides": { "functions": [], "events": [], "variables": [], "functionalities": [], "intents": ["social"] },
   "requires": {
     "hal":       ["log", "msg", "kv", "time", "crypto", "nostr", "contacts"],
     "events":    [], "libraries": [], "variables": []

@@ -116,6 +116,8 @@ static char g_sub_disc[64] = "";   /* discovery (popular >2-like) sub — "All" 
 static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
 static char g_sub_dm[64] = "";     /* kind-4 subscription id               */
 static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
+static char g_sub_post[64] = "";   /* one publication + its replies — host
+                                    * deep-link (launcher hero card tap)   */
 static char g_evt[8192];           /* one drained event JSON               */
 static char g_relays[8192];        /* hal_nostr_relays output              */
 static char g_msg[16384];          /* outbound UI message                  */
@@ -322,6 +324,14 @@ static void drain(void) {
         int n = hal_nostr_event_recv(g_sub_dm, str_len(g_sub_dm), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
         g_evt[n] = '\0'; dm_ingest(g_evt);
+    }
+    /* Deep-linked publication (host view.open): the post and its replies go
+     * into the activity feed like a follow's post — the host is polling the
+     * archive and opens the thread page the moment the root arrives. */
+    for (int i = 0; i < 20 && g_sub_post[0]; i++) {
+        int n = hal_nostr_event_recv(g_sub_post, str_len(g_sub_post), g_evt, sizeof(g_evt) - 1);
+        if (n <= 0) break;
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity");
     }
     /* Search results (NIP-50): kind-1 posts → result cards; kind-0 profiles →
      * a "person" card (the host resolves name+avatar by pubkey). */
@@ -580,6 +590,37 @@ int32_t module_handle_event(void) {
     uint32_t n = hal_msg_recv(buf, sizeof(buf) - 1);
     if (n == 0) return 0;
     buf[n] = '\0';
+    /* Host deep-link: {"type":"view.open","view":"post:<id>"} — the launcher
+     * hero card asks for one publication. Subscribe to that event id AND the
+     * kind-1 replies referencing it (#e), so the thread fills fast; the host
+     * opens the thread page once the root post lands in the archive. */
+    {
+        char type[24] = "";
+        if (json_raw(buf, "type", type, sizeof(type)) &&
+            str_eq(type, "view.open")) {
+            char view[96] = "";
+            if (json_raw(buf, "view", view, sizeof(view)) &&
+                view[0] == 'p' && view[1] == 'o' && view[2] == 's' &&
+                view[3] == 't' && view[4] == ':' && view[5]) {
+                const char *mid = view + 5;
+                if (g_sub_post[0]) {
+                    hal_nostr_unsubscribe(g_sub_post, str_len(g_sub_post));
+                    g_sub_post[0] = '\0';
+                }
+                char filter[320];
+                str_copy(filter, "[{\"ids\":[\"", sizeof(filter));
+                str_cat(filter, mid, sizeof(filter));
+                str_cat(filter, "\"]},{\"kinds\":[1],\"#e\":[\"", sizeof(filter));
+                str_cat(filter, mid, sizeof(filter));
+                str_cat(filter, "\"],\"limit\":100}]", sizeof(filter));
+                int m = hal_nostr_subscribe(filter, str_len(filter),
+                                            g_sub_post, sizeof(g_sub_post) - 1);
+                if (m > 0) g_sub_post[m] = '\0';
+                drain(); /* the local relay answers immediately — pull it now */
+            }
+            return 0;
+        }
+    }
     char cmd[64] = "";
     if (!json_raw(buf, "command", cmd, sizeof(cmd))) return 0;
 
