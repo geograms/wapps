@@ -52,7 +52,7 @@
             "label": "Private (only internet)",
             "icon": "lock",
             "slot": "room",
-            "tip": "Toggle a private conversation — messages go over the internet only (off the APRS network), encrypted to this contact"
+            "tip": "Toggle a private conversation — messages go over Reticulum only, encrypted to this contact"
           },
           {
             "$": "field",
@@ -153,7 +153,7 @@
             "name": "beacon_comment",
             "$type": "string",
             "label": "Comment",
-            "default": "Aurora APRS station"
+            "default": "Aurora station"
           },
           {
             "$": "field",
@@ -204,21 +204,21 @@
   },
   {
     "$": "screen",
-    "name": "APRS",
+    "name": "APRS (legacy)",
     "icon": "settings_input_antenna",
     "menu": true,
-    "tip": "APRS-IS access: licensed callsign, passcode and server. Off by default.",
+    "tip": "Legacy APRS-IS access — requires a government-issued amateur-radio callsign. Reticulum is the primary transport and needs no licence. Off by default.",
     "children": [
       {
         "$": "group",
         "name": "aprsis",
-        "tip": "APRS-IS carries traffic onto licensed amateur-radio networks, so it requires a callsign assigned by your local radio authority. The auto-generated Geogram callsign (X1…) is not valid there. While this switch is off, Geogram never connects to APRS-IS — messaging keeps working over Bluetooth and Reticulum.",
+        "tip": "LEGACY: APRS-IS carries traffic onto licensed amateur-radio networks, so it requires a callsign assigned by your local radio authority. The auto-generated Geogram callsign (X1…) is not valid there. While this switch is off, Geogram never connects to APRS-IS — messaging works fully over Reticulum (primary) and Bluetooth.",
         "children": [
           {
             "$": "field",
             "name": "aprsis_enabled",
             "$type": "bool",
-            "label": "Use APRS-IS",
+            "label": "Use APRS-IS (legacy, ham licence required)",
             "default": false,
             "tip": "Enable the APRS-IS connection using the licensed callsign below. Verified with “Verify & apply”."
           },
@@ -368,7 +368,7 @@
       {
         "$": "group",
         "name": "bluetooth",
-        "tip": "Exchange short APRS messages directly over Bluetooth, off-grid.",
+        "tip": "Exchange short messages directly over Bluetooth, off-grid.",
         "children": [
           {
             "$": "field",
@@ -377,7 +377,7 @@
             "label": "Exchange over Bluetooth",
             "default": true,
             "apply": "ble_apply",
-            "tip": "Scan for and broadcast APRS frames over BLE (shared with other apps)."
+            "tip": "Scan for and broadcast chat frames over BLE (shared with other apps)."
           },
           {
             "$": "field",
@@ -416,7 +416,7 @@
             "$type": "bool",
             "label": "Broadcast my public key",
             "default": true,
-            "tip": "Every 30 min, send your profile's public key (base64, ~43 chars) as a bulletin to group NOSTR over APRS-IS and Bluetooth. Peers learn your callsign → pubkey so they can message you encrypted."
+            "tip": "Every 30 min, send your profile's public key (base64, ~43 chars) as a bulletin to group NOSTR over Reticulum, Bluetooth and (when enabled) APRS-IS. Peers learn your callsign → pubkey so they can message you encrypted."
           },
           {
             "$": "action",
@@ -431,7 +431,7 @@
             "$type": "bool",
             "label": "Sign my messages",
             "default": false,
-            "tip": "Append a short cryptographic signature (~60 chars, one extra APRS line) to outgoing messages so others can verify they came from your callsign. Verifying needs the sender's broadcast public key."
+            "tip": "Append a short cryptographic signature (~60 chars, one extra line) to outgoing messages so others can verify they came from your callsign. Verifying needs the sender's broadcast public key."
           },
           {
             "$": "action",

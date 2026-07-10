@@ -1,6 +1,6 @@
 {
   "screen.beacon": "Beacon",
-  "screen.beacon_tip": "Compose and send an APRS position beacon.",
+  "screen.beacon_tip": "Compose and send a position beacon over Reticulum, Bluetooth and (when enabled) APRS.",
   "group.station": "Station",
   "group.position": "Position",
   "field.callsign": "Callsign",

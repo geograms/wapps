@@ -36,8 +36,11 @@ used on capable hardware).
 
 ## Behaviour
 
-- Frames are deduped by content across BLE and APRS-IS, so a station on both
-  shows each message once.
+- The identical compact frame also rides **Reticulum** (broadcast + directed
+  datagrams, tagged `RET` on receipt) — the PRIMARY transport; BLE is the
+  local off-grid path and APRS-IS is legacy/opt-in (licensed callsign only).
+- Frames are deduped by content across Reticulum, BLE and APRS-IS, so a
+  station on several transports shows each message once.
 - With "Relay Bluetooth ↔ internet" on, a dual-link station bridges: BLE→internet
   is re-originated as APRS third-party traffic (`MYCALL>APRS,TCPIP*:}<TNC2>`,
   reconstructed from the compact fields); internet→BLE re-encodes the parsed

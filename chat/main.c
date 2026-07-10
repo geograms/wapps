@@ -190,11 +190,12 @@ static int is_autogen_call(const char *c) {
 
 /* Transport chip shown on messages: the internal token for APRS-IS-arrived
  * traffic is "NET" (compared all over the routing code); show it to the user
- * as "APRS-IS" so the origin is explicit. Other tags (BLE/RET/RLY) pass
- * through unchanged. */
+ * as "APRS-IS" so the origin is explicit; "RET" (Reticulum, the primary
+ * transport) is spelled out. Other tags (BLE/RLY) pass through unchanged. */
 static const char *via_label(const char *via) {
-  return (via && via[0]=='N' && via[1]=='E' && via[2]=='T' && !via[3])
-           ? "APRS-IS" : via;
+  if (via && via[0]=='N' && via[1]=='E' && via[2]=='T' && !via[3]) return "APRS-IS";
+  if (via && via[0]=='R' && via[1]=='E' && via[2]=='T' && !via[3]) return "Reticulum";
+  return via;
 }
 static double g_lat = 0, g_lon = 0;
 static int   g_radius = 100;
@@ -229,6 +230,16 @@ static int ble_reach_chips(char *out, unsigned max);
 /* Reticulum 1:1 sender (defined after the BLE frame packer); fans the same frame
  * out to every RNS delivery dest advertised under the recipient's npub. */
 static int rns_tx_msg(const char *to, const char *wire);
+/* Reticulum is the PRIMARY transport (APRS-IS is legacy/opt-in and requires a
+ * licensed callsign): 1 when the local RNS node is up. Defined with rns_tx_msg. */
+static int rns_up(void);
+/* Broadcast a position over the licence-free paths (BLE if on, Reticulum if up).
+ * Defined with the BLE frame packer. */
+static void pos_broadcast(double lat, double lon, const char *comment);
+/* Broadcast a group bulletin / geo-chat frame over Reticulum (same compact
+ * frame as BLE, so receivers dedup cross-transport copies). No-op when the
+ * RNS node is down. Defined with the BLE frame packer. */
+static void rns_tx_bulletin(const char *to, const char *text);
 
 /* ── Public-key beacon ───────────────────────────────────────────────────
  * Periodically broadcast this station's public key so peers can map our
@@ -340,21 +351,26 @@ static void status(const char *text) {
 }
 
 /* Persistent transport indicators on the map (replaces flickering toasts):
- * APRS-IS connected? and BLE active? Pushed only when a value changes, so a
- * flapping link never spams. -1 = nothing pushed yet. */
-static int g_ind_net = -1, g_ind_ble = -1, g_ind_adapter = -1;
+ * Reticulum up? APRS-IS connected? BLE active? Pushed only when a value
+ * changes, so a flapping link never spams. -1 = nothing pushed yet. */
+static int g_ind_net = -1, g_ind_ble = -1, g_ind_adapter = -1, g_ind_ret = -1;
 static void push_status(void) {
   int net = (g_sock >= 0 && g_logged) ? 1 : 0;
+  int ret = rns_up() ? 1 : 0;
   /* The physical Bluetooth adapter state (the user can turn Bluetooth off at the
    * OS level at any time). BLE is "on" only when our setting is enabled AND the
    * adapter is actually powered. */
   int adapter = hal_ble_available() ? 1 : 0;
   int ble = (g_ble_on && adapter) ? 1 : 0;
-  if (net == g_ind_net && ble == g_ind_ble && adapter == g_ind_adapter) return;
-  g_ind_net = net; g_ind_ble = ble; g_ind_adapter = adapter;
+  if (net == g_ind_net && ble == g_ind_ble && adapter == g_ind_adapter &&
+      ret == g_ind_ret) return;
+  g_ind_net = net; g_ind_ble = ble; g_ind_adapter = adapter; g_ind_ret = ret;
   char m[256];
+  /* Reticulum first — it is the primary transport. */
   s_cpy(m, "{\"type\":\"ui.map.status\",\"items\":["
-           "{\"id\":\"aprsis\",\"label\":\"NET\",\"on\":", sizeof(m));
+           "{\"id\":\"ret\",\"label\":\"RET\",\"on\":", sizeof(m));
+  s_cat(m, ret ? "true" : "false", sizeof(m));
+  s_cat(m, "},{\"id\":\"aprsis\",\"label\":\"NET\",\"on\":", sizeof(m));
   s_cat(m, net ? "true" : "false", sizeof(m));
   s_cat(m, "}", sizeof(m));
   /* Only advertise the BLE channel when Bluetooth is actually on. With the
@@ -632,8 +648,8 @@ static void do_aprs_apply(const char *buf) {
 static void do_beacon(const char *buf, int emergency) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
-  if (!net && !g_ble_on) {
-    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+  if (!net && !g_ble_on && !rns_up()) {
+    notify("warning", "Enable Reticulum or Bluetooth first");
     return;
   }
   char typ[16] = "position", comment[120] = "";
@@ -641,14 +657,14 @@ static void do_beacon(const char *buf, int emergency) {
   jstr(buf, "beacon_comment", comment, sizeof(comment));
   if (emergency || s_eq(typ, "emergency")) {
     char c[140] = "EMERGENCY "; s_cat(c, comment, sizeof(c));
+    pos_broadcast(g_lat, g_lon, c);
     if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, "\\!", "TCPIP*", c);
-    if (g_ble_on) ble_tx_pos(g_lat, g_lon, c);
     push_marker(g_call, g_lat, g_lon, "red", c);
     status("TX emergency beacon");
     notify("warning", "Emergency beacon sent");
   } else {
+    pos_broadcast(g_lat, g_lon, comment);
     if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", comment);
-    if (g_ble_on) ble_tx_pos(g_lat, g_lon, comment);
     push_marker(g_call, g_lat, g_lon, "blue", comment);
     status("TX position beacon");
   }
@@ -2584,25 +2600,26 @@ static void do_convo_send(const char *buf) {
   jstr(buf, "conversations_input", text, sizeof(text));
   if (!id[0] || !text[0]) return;
   int net = (g_sock >= 0 && g_logged);
-  /* Private (Reticulum-only) 1:1 rides Reticulum alone; a normal message still
-   * needs APRS-IS or BLE up. */
+  int rns = rns_up();
+  /* Private (Reticulum-only) 1:1 rides Reticulum alone; a normal message needs
+   * a live path — Reticulum (primary), BLE (local) or legacy APRS-IS. */
   int priv = (id[0] != '#') && convo_is_private(id);
-  if (!priv && !net && !g_ble_on) {
-    /* No live radio path. We can still try the NOSTR-relay backstop (resolve the
+  if (!priv && !net && !g_ble_on && !rns) {
+    /* No live path. We can still try the NOSTR-relay backstop (resolve the
      * recipient's key, then queue an encrypted copy at relays for later pickup);
      * only give up entirely if no relays are reachable either. */
     if (g_myrelay_n == 0) relay_pick();
     if (g_myrelay_n == 0 || id[0] == '#') {
-      notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+      notify("warning", "Enable Reticulum (or Bluetooth) first");
       return;
     }
   }
-  /* Optionally share our location — never in private mode (a position beacon is an
-   * APRS/BLE broadcast that would leak the off-APRS thread). */
+  /* Optionally share our location — never in private mode (a position beacon is a
+   * broadcast that would leak the private thread). */
   int loc = !priv && jbool(buf, "include_location") && (g_lat != 0 || g_lon != 0);
   if (loc) {
+    pos_broadcast(g_lat, g_lon, "");
     if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", "");
-    if (g_ble_on) ble_tx_pos(g_lat, g_lon, "");
     push_marker(g_call, g_lat, g_lon, "blue", "");
   }
   /* Encrypt a 1:1 message to a callsign whose public key we know (ENC1: + a
@@ -2684,11 +2701,14 @@ static void do_convo_send(const char *buf) {
     char gname[8]; int gj = 0;
     for (int i = 1; id[i] && id[i] != '*' && gj < 6; i++) gname[gj++] = id[i];
     gname[gj] = 0;
+    char bid[10]; bid[0] = '#'; s_cpy(bid + 1, gname, sizeof(bid) - 1);
+    /* Primary: Reticulum broadcast — same compact frame as BLE, so the
+     * receiver's ble_handle/deliver_bulletin path and content dedup treat it
+     * identically to an APRS/BLE copy (see pkbeacon_send). */
+    rns_tx_bulletin(bid, wire);
+    if (g_ble_on) ble_tx_msg(bid, wire); /* compact BLE: to = "#group" (no scope) */
+    /* Legacy APRS-IS (opt-in, licensed callsign only). */
     if (net) aprs_send_bulletin_multi(g_sock, g_call, gname, wire, APRS_MAX_MSG_LEN);
-    if (g_ble_on) {
-      char bid[10]; bid[0] = '#'; s_cpy(bid + 1, gname, sizeof(bid) - 1);
-      ble_tx_msg(bid, wire);            /* compact BLE: to = "#group" (no scope) */
-    }
     /* Public group post → also store as our own NOSTR note (peers can request
      * it later). Not for 1:1 DMs, which are private. */
     host_note_emit(text, gname, "");
@@ -2700,35 +2720,36 @@ static void do_convo_send(const char *buf) {
       return;   /* don't echo a private message that reached nobody */
     }
   } else {
-    /* Encrypted (ENC1) messages are NOT sent over APRS-IS: APRS is a 7-bit text
-     * protocol and mangles the base64 ciphertext (multi-line reassembly + charset),
-     * so the recipient gets an undecryptable "[encrypted - cannot decrypt]" copy
-     * alongside the good BLE/RNS one. Encrypted rides BLE + Reticulum (binary
-     * clean); only PUBLIC (plaintext) messages use APRS. */
+    /* Primary: Reticulum — directed to every known device of the recipient plus
+     * an encrypted-safe broadcast; store-and-forward holds it for an offline
+     * peer. Copies arriving over more than one transport dedup on receipt. */
+    rns_tx_msg(id, wire);
+    if (g_ble_on) ble_tx_msg(id, wire);
+    /* Legacy APRS-IS (opt-in, licensed callsign only). Encrypted (ENC1) messages
+     * are NEVER sent over APRS-IS: APRS is a 7-bit text protocol and mangles the
+     * base64 ciphertext (multi-line reassembly + charset), so the recipient gets
+     * an undecryptable "[encrypted - cannot decrypt]" copy alongside the good
+     * RNS/BLE one. Only PUBLIC (plaintext) messages use APRS. */
     int seq0 = g_seq;
     if (net && !encrypted) aprs_send_message_multi(g_sock, g_call, id, wire, APRS_MAX_MSG_LEN, &g_seq);
     /* Map each APRS part-seq to this message's am so an incoming ack<seq> (the
      * standard APRS ack, APRSdroid included) marks the bubble delivered. */
     if (am[0]) for (int s = seq0; s < g_seq; s++) ackmap_add(s, am);
-    if (g_ble_on) ble_tx_msg(id, wire);
-    /* Always-redundant Reticulum backstop: store-and-forward holds it for a peer
-     * who wasn't on APRS at the time; the copy dedups on receipt (best effort). */
-    rns_tx_msg(id, wire);
     /* Unknown recipient key: the message went out only as PUBLIC (unencrypted)
-     * APRS/BLE. Tell the user in-chat, and ask the NOSTR relays to resolve the
+     * broadcast. Tell the user in-chat, and ask the NOSTR relays to resolve the
      * callsign→npub so we can ALSO queue an encrypted backup for later pickup. */
     if (!encrypted && id[0] != '#') {
       if (g_myrelay_n == 0) relay_pick();
       if (g_myrelay_n > 0) {
         if (pubnote_once(id))
-          convo_sysnote(id, "Key unknown - sent as a public APRS message. "
-                            "Checking NOSTR relays to deliver privately too.");
+          convo_sysnote(id, "Key unknown - sent unencrypted (no key for this "
+                            "contact yet). Checking NOSTR relays to deliver privately too.");
         char rj[RELAY_MAX * 80 + 16]; relays_json(g_myrelay, g_myrelay_n, rj, sizeof(rj));
         hal_relay_resolve(id, s_len(id), rj, s_len(rj));
         pendsend_add(id, text);
       } else if (pubnote_once(id)) {
-        convo_sysnote(id, "Key unknown - sent as a public APRS message "
-                          "(no relays reachable for a private backup).");
+        convo_sysnote(id, "Key unknown - sent unencrypted (no key for this "
+                          "contact yet; no relays reachable for a private backup).");
       }
     }
   }
@@ -2805,13 +2826,13 @@ static void do_set_radius(const char *buf) {
     s_cat(b, nb, sizeof(b)); s_cat(b, " km", sizeof(b)); status(b); }
 }
 
-/* Send a geo-chat: a position beacon carrying the typed comment. Real
- * TX over APRS-IS (verified login with the computed passcode). */
+/* Send a geo-chat: a position beacon carrying the typed comment. Rides
+ * Reticulum (primary) + BLE; also APRS-IS when the legacy opt-in is on. */
 static void do_geochat_send(const char *buf) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
-  if (!net && !g_ble_on) {
-    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+  if (!net && !g_ble_on && !rns_up()) {
+    notify("warning", "Enable Reticulum or Bluetooth first");
     return;
   }
   char text[400] = "";
@@ -2831,8 +2852,9 @@ static void do_geochat_send(const char *buf) {
     char tagged[80];
     s_cpy(tagged, ">>", sizeof(tagged));
     s_cat(tagged, chunk, sizeof(tagged));
-    if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", tagged);
+    rns_tx_bulletin("", tagged);            /* primary: Reticulum broadcast */
     if (g_ble_on) ble_tx_msg("", tagged);   /* compact BLE: area/geo-chat text */
+    if (net) aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", tagged);
     n++;
   }
   /* Local echo: the whole message as one Live bubble. */
@@ -2847,13 +2869,13 @@ static void do_geochat_send(const char *buf) {
 
 /* Post a micro-update to the shared feed group (FEED): a Twitter-style status
  * that everyone following us sees in their Activity tab. Sent as a bulletin
- * (multi-line, optionally signed) over APRS-IS and BLE, then echoed into our own
- * Activity feed. */
+ * (multi-line, optionally signed) over Reticulum + BLE (and legacy APRS-IS when
+ * opted in), then echoed into our own Activity feed. */
 static void do_activity_send(const char *buf) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
-  if (!net && !g_ble_on) {
-    notify("warning", "Connect to APRS-IS or enable Bluetooth first");
+  if (!net && !g_ble_on && !rns_up()) {
+    notify("warning", "Enable Reticulum or Bluetooth first");
     return;
   }
   char text[400] = "";
@@ -2869,8 +2891,9 @@ static void do_activity_send(const char *buf) {
   }
   /* Append the BitTorrent infohash if this post references media we host. */
   add_infohash(wire, sizeof(wire));
-  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
+  rns_tx_bulletin("#" FEED_GROUP, wire);   /* primary: Reticulum broadcast */
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
+  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
   /* Local echo of our own post (with a mid, so it can receive likes/replies). */
   activity_echo_self(text, "");
   /* Store the post as our own NOSTR note so peers can request it later. */
@@ -2886,9 +2909,10 @@ static void do_activity_like(const char *buf) {
   int unlike = jbool(buf, "activity_unlike");
   char wire[16]; s_cpy(wire, mid, sizeof(wire));
   s_cat(wire, unlike ? ":unlike" : ":like", sizeof(wire));
+  rns_tx_bulletin("#" FEED_GROUP, wire);   /* primary: Reticulum broadcast */
+  if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
   if (g_sock >= 0 && g_logged)
     aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
-  if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
   activity_react_emit(mid, g_call, !unlike, 1);   /* our own vote tallies now */
 }
 
@@ -2896,7 +2920,7 @@ static void do_activity_like(const char *buf) {
 static void do_activity_reply(const char *buf) {
   read_config(buf);
   int net = (g_sock >= 0 && g_logged);
-  if (!net && !g_ble_on) { notify("warning", "Connect to APRS-IS or enable Bluetooth first"); return; }
+  if (!net && !g_ble_on && !rns_up()) { notify("warning", "Enable Reticulum or Bluetooth first"); return; }
   char mid[6] = "", text[400] = "";
   jstr(buf, "activity_target_mid", mid, sizeof(mid));
   jstr(buf, "activity_input", text, sizeof(text));
@@ -2904,8 +2928,9 @@ static void do_activity_reply(const char *buf) {
   char wire[480] = "+"; s_cat(wire, mid, sizeof(wire));
   s_cat(wire, " ", sizeof(wire)); s_cat(wire, text, sizeof(wire));
   add_infohash(wire, sizeof(wire));
-  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
+  rns_tx_bulletin("#" FEED_GROUP, wire);   /* primary: Reticulum broadcast */
   if (g_ble_on) ble_tx_msg("#" FEED_GROUP, wire);
+  if (net) aprs_send_bulletin_multi(g_sock, g_call, FEED_GROUP, wire, APRS_MAX_MSG_LEN);
   activity_echo_self(text, mid);       /* our reply, threaded under its parent */
   host_note_emit(text, "activity", mid); /* note carries the parent for backfill */
   status("TX reply");
@@ -2938,20 +2963,26 @@ static void prompt_unfollow(void) {
  * the first send); the periodic re-broadcasts transmit silently so our view
  * doesn't fill with copies (receivers dedup the repeats). */
 static void recur_broadcast(recur_t *r, int echo) {
-  if (g_sock >= 0 && g_logged)
-    aprs_send_bulletin_multi(g_sock, g_call, r->group, r->text, APRS_MAX_MSG_LEN);
   char convo[40];
   convo[0] = '#'; int j = 1;
   for (int i = 0; r->group[i] && j < 39; i++) convo[j++] = r->group[i];
   convo[j] = 0;
+  /* Primary: Reticulum broadcast (same compact frame as BLE — receivers dedup). */
+  rns_tx_bulletin(convo, r->text);
   if (g_ble_on) ble_tx_msg(convo, r->text);
+  /* Legacy APRS-IS (opt-in, licensed callsign only). */
+  if (g_sock >= 0 && g_logged)
+    aprs_send_bulletin_multi(g_sock, g_call, r->group, r->text, APRS_MAX_MSG_LEN);
   if (echo) convo_deliver(convo, "out", g_call, r->text, r->text, "");
 }
 
 /* Begin a recurring bulletin into [group] (re-broadcast every 5 min for
  * [secs], first one now). Reuses the slot for the same group if present. */
 static void recur_begin(const char *group, const char *text, int secs) {
-  if (g_sock < 0 || !g_logged) { notify("warning", "Connect first"); return; }
+  int net = (g_sock >= 0 && g_logged);
+  if (!net && !g_ble_on && !rns_up()) {
+    notify("warning", "Enable Reticulum, Bluetooth or APRS-IS first"); return;
+  }
   if (!group[0] || !text[0]) { notify("warning", "Pick a group and message"); return; }
   if (secs < RECUR_INTERVAL) secs = RECUR_INTERVAL;
   if (secs > 172800) secs = 172800;             /* 48h cap */
@@ -3231,6 +3262,43 @@ static void ble_tx_pos(double lat, double lon, const char *comment) {
   append_dbl(t, sizeof(t), lon);
   if (comment && comment[0]) { s_cat(t, ",", sizeof(t)); s_cat(t, comment, sizeof(t)); }
   ble_tx_msg("!", t);
+}
+
+/* Is the local Reticulum node up? Probes hal_rns_delivery_dest (returns 0 while
+ * the node is down — same check pkbeacon_send uses). Cached for one second so
+ * the per-tick status indicator and the send gates don't hammer the HAL. */
+static int rns_up(void) {
+  static uint64_t probed = 0;
+  static int up = 0;
+  uint64_t now = hal_time_epoch();
+  if (!probed || now != probed) {
+    char d[80];
+    up = hal_rns_delivery_dest(d, sizeof(d) - 1) > 0;
+    probed = now;
+  }
+  return up;
+}
+
+/* Broadcast a group bulletin / geo-chat frame over Reticulum. The frame reuses
+ * the compact BLE format, so the receiver's RNS drain feeds it into ble_handle
+ * and it dedups against BLE/APRS copies of the same content. */
+static void rns_tx_bulletin(const char *to, const char *text) {
+  if (!rns_up()) return;
+  char frame[900];
+  ble_pack(frame, sizeof(frame), g_call, to, text);
+  hal_rns_broadcast(frame, s_len(frame));
+}
+
+/* Manual/emergency position beacons over the licence-free transports: BLE (local
+ * radio) and a Reticulum broadcast (crosses NATs via the hubs). Automatic
+ * interval beacons deliberately stay off RNS to limit hub flood traffic. */
+static void pos_broadcast(double lat, double lon, const char *comment) {
+  char t[96] = "";
+  append_dbl(t, sizeof(t), lat); s_cat(t, ",", sizeof(t));
+  append_dbl(t, sizeof(t), lon);
+  if (comment && comment[0]) { s_cat(t, ",", sizeof(t)); s_cat(t, comment, sizeof(t)); }
+  if (g_ble_on) ble_tx_msg("!", t);
+  rns_tx_bulletin("!", t);
 }
 
 /* Send a 1:1 over Reticulum to EVERY device advertising the recipient's npub
@@ -4616,8 +4684,11 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
      * path is essential — a TCPIP* path makes APRS-IS treat it as a loop and
      * drop it, which is why the old third-party form never appeared.
      * NEVER gate an auto-generated X1/X3 callsign onto APRS-IS: those are not
-     * authority-assigned, so their traffic stays on Bluetooth/Reticulum. */
-    if (g_ble_relay && g_logged && !is_autogen_call(from)) {
+     * authority-assigned, so their traffic stays on Bluetooth/Reticulum. Only
+     * frames heard over REAL Bluetooth are gated — Reticulum ("RET") copies
+     * come from the whole network (originators presumed unlicensed) and would
+     * flood APRS-IS under our callsign. */
+    if (g_ble_relay && g_logged && s_eq(via, "BLE") && !is_autogen_call(from)) {
       char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
       char line[260]; aprs_build_bulletin_via(line, sizeof(line), from, to + 1, '0', text, via);
       aprs_send_raw(g_sock, line);
@@ -4670,9 +4741,11 @@ static void ble_handle(const char *compact, int rssi, const char *via) {
      * else's callsign. seq -1 = no {n — the copy must not solicit acks (a
      * fabricated {0 turned bridged acks into "messages" that bots answered,
      * looping forever under a third party's callsign). And NEVER gate an
-     * auto-generated X1/X3 callsign onto APRS-IS — not authority-assigned. */
+     * auto-generated X1/X3 callsign onto APRS-IS — not authority-assigned.
+     * Only genuine-Bluetooth ("BLE") arrivals are gated: a Reticulum ("RET")
+     * copy is network-wide traffic from presumed-unlicensed originators. */
     if (g_ble_relay && g_logged && !amine && !is_ack_text(text) &&
-        !is_autogen_call(from)) {
+        s_eq(via, "BLE") && !is_autogen_call(from)) {
       char via[24]; s_cpy(via, "qAR,", sizeof(via)); s_cat(via, g_call, sizeof(via));
       char line[260]; aprs_build_message_via(line, sizeof(line), from, to, text, -1, via);
       aprs_send_raw(g_sock, line);
@@ -4747,6 +4820,80 @@ void module_init(void) {
     hal_msg_send(m, s_len(m));
   } else {
     status("APRS-IS off (enable it in the APRS panel) - Bluetooth/Reticulum active");
+  }
+}
+
+/* Legacy APRS-IS housekeeping: auto-reconnect, login, drop detection, inbound
+ * drain and the timed APRS auto-beacon. Extracted from module_tick so its
+ * early returns only skip APRS work — with the APRS-IS switch off (the
+ * default), the Reticulum pull / relay polling in module_tick still runs. */
+static void aprs_tick(void) {
+  /* Auto-reconnect: keep retrying (5s backoff) while we want a link. Hard-
+   * gated on the APRS-IS switch: with it off there is never a connection. */
+  if (g_sock < 0) {
+    if (!g_want_connect || !g_aprsis_on) return;
+    uint64_t now = hal_time_epoch();
+    if (now - g_last_reconnect < 5) return;
+    g_last_reconnect = now;
+    g_logged = 0;
+    g_sock = aprs_connect(g_host, g_port);
+    if (g_sock >= 0) status("Reconnecting to APRS-IS...");
+    return;
+  }
+
+  if (!g_logged) {
+    int st = hal_socket_status(g_sock);
+    if (st == 1) {
+      /* Login with the user-verified APRS-IS passcode (licensed callsign is
+       * already the working g_call while the APRS panel switch is on). */
+      int pass = (g_aprsis_pass >= 0) ? g_aprsis_pass : aprs_passcode(g_call);
+      /* Include the heard stations in the server-side g/ filter so APRS-IS
+       * pushes messages addressed to them (store-and-forward iGate). */
+      build_gfilter(g_gfilter, sizeof(g_gfilter));
+      aprs_login_ex(g_sock, g_call, pass, g_lat, g_lon, g_radius, g_gfilter);
+      g_logged = 1;
+      char b[64] = "Connected. passcode "; char nb[16];
+      { int v = pass, j = 0; char t[12]; if (v == 0) t[j++]='0'; while (v>0){t[j++]=(char)('0'+v%10);v/=10;} int k=0; while(j>0)nb[k++]=t[--j]; nb[k]=0; }
+      s_cat(b, nb, sizeof(b)); status(b);
+      /* No toast on (re)connect — the APRS-IS indicator shows the state and a
+       * flapping link would otherwise flicker notifications. */
+      center_map();
+      push_radius();
+    } else if (st == 2) {
+      /* connect failed — drop and let the reconnect path retry */
+      aprs_disconnect(g_sock); g_sock = -1;
+      status("Connection failed - retrying...");
+    }
+    return;
+  }
+
+  /* logged in: detect a dropped connection and reconnect */
+  if (hal_socket_status(g_sock) == 2) {
+    aprs_disconnect(g_sock); g_sock = -1; g_logged = 0;
+    status("Connection lost - reconnecting...");
+    /* No toast — the APRS-IS indicator turns grey; reconnection is automatic. */
+    return;
+  }
+
+  /* drain inbound packets from APRS-IS */
+  char line[512];
+  for (int guard = 0; guard < 40; guard++) {
+    int n = aprs_poll_line(g_sock, line, sizeof(line));
+    if (n <= 0) break;
+    route_frame(line);
+  }
+  ra_flush();   /* deliver multi-line bulletins once their parts have arrived */
+  da_flush();   /* deliver multi-line direct messages (reassemble signed ones) */
+
+  /* timed beacon */
+  if (g_auto && g_logged) {
+    uint64_t now = hal_time_epoch();
+    if (now - g_last_beacon >= (uint64_t)g_interval) {
+      aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", "Aurora auto-beacon");
+      push_marker(g_call, g_lat, g_lon, "blue", "Aurora auto-beacon");
+      g_last_beacon = now;
+      status("TX auto-beacon");
+    }
   }
 }
 
@@ -4856,76 +5003,13 @@ void module_tick(void) {
     }
   }
 
-  /* Auto-reconnect: keep retrying (5s backoff) while we want a link. Hard-
-   * gated on the APRS-IS switch: with it off there is never a connection. */
-  if (g_sock < 0) {
-    if (!g_want_connect || !g_aprsis_on) return;
-    uint64_t now = hal_time_epoch();
-    if (now - g_last_reconnect < 5) return;
-    g_last_reconnect = now;
-    g_logged = 0;
-    g_sock = aprs_connect(g_host, g_port);
-    if (g_sock >= 0) status("Reconnecting to APRS-IS...");
-    return;
-  }
-
-  if (!g_logged) {
-    int st = hal_socket_status(g_sock);
-    if (st == 1) {
-      /* Login with the user-verified APRS-IS passcode (licensed callsign is
-       * already the working g_call while the APRS panel switch is on). */
-      int pass = (g_aprsis_pass >= 0) ? g_aprsis_pass : aprs_passcode(g_call);
-      /* Include the heard stations in the server-side g/ filter so APRS-IS
-       * pushes messages addressed to them (store-and-forward iGate). */
-      build_gfilter(g_gfilter, sizeof(g_gfilter));
-      aprs_login_ex(g_sock, g_call, pass, g_lat, g_lon, g_radius, g_gfilter);
-      g_logged = 1;
-      char b[64] = "Connected. passcode "; char nb[16];
-      { int v = pass, j = 0; char t[12]; if (v == 0) t[j++]='0'; while (v>0){t[j++]=(char)('0'+v%10);v/=10;} int k=0; while(j>0)nb[k++]=t[--j]; nb[k]=0; }
-      s_cat(b, nb, sizeof(b)); status(b);
-      /* No toast on (re)connect — the APRS-IS indicator shows the state and a
-       * flapping link would otherwise flicker notifications. */
-      center_map();
-      push_radius();
-    } else if (st == 2) {
-      /* connect failed — drop and let the reconnect path retry */
-      aprs_disconnect(g_sock); g_sock = -1;
-      status("Connection failed - retrying...");
-    }
-    return;
-  }
-
-  /* logged in: detect a dropped connection and reconnect */
-  if (hal_socket_status(g_sock) == 2) {
-    aprs_disconnect(g_sock); g_sock = -1; g_logged = 0;
-    status("Connection lost - reconnecting...");
-    /* No toast — the APRS-IS indicator turns grey; reconnection is automatic. */
-    return;
-  }
-
-  /* drain inbound packets from APRS-IS */
-  char line[512];
-  for (int guard = 0; guard < 40; guard++) {
-    int n = aprs_poll_line(g_sock, line, sizeof(line));
-    if (n <= 0) break;
-    route_frame(line);
-  }
-  ra_flush();   /* deliver multi-line bulletins once their parts have arrived */
-  da_flush();   /* deliver multi-line direct messages (reassemble signed ones) */
-
-  /* timed beacon */
-  if (g_auto && g_logged) {
-    uint64_t now = hal_time_epoch();
-    if (now - g_last_beacon >= (uint64_t)g_interval) {
-      aprs_send_beacon(g_sock, g_call, g_lat, g_lon, g_symbol, "TCPIP*", "Aurora auto-beacon");
-      push_marker(g_call, g_lat, g_lon, "blue", "Aurora auto-beacon");
-      g_last_beacon = now;
-      status("TX auto-beacon");
-    }
-  }
+  /* Legacy APRS-IS connection management + drain. Runs LAST of the transports
+   * and never early-returns out of module_tick: the Reticulum/relay machinery
+   * below must run even with APRS-IS off (the default — no ham licence). */
+  aprs_tick();
 
   /* Public-key beacon: broadcast our pubkey on whatever transport is up. */
-  if (g_pubkey_beacon && g_pubkey[0] && (g_logged || g_ble_on)) {
+  if (g_pubkey_beacon && g_pubkey[0] && (g_logged || g_ble_on || rns_up())) {
     uint64_t now = hal_time_epoch();
     if (now - g_last_pkbeacon >= (uint64_t)PKBEACON_INTERVAL) pkbeacon_send();
   }
@@ -4956,7 +5040,7 @@ void module_tick(void) {
   resolve_drain();
 
   /* recurring group bulletins: re-broadcast every 5 min until the period ends */
-  if (g_logged || g_ble_on) {
+  if (g_logged || g_ble_on || rns_up()) {
     uint64_t now = hal_time_epoch();
     for (int i = 0; i < RECUR_MAX; i++) {
       recur_t *r = &g_recur[i];
