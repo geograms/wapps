@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.reticulum",
-  "version":         "1.0.5",
+  "version":         "1.0.6",
   "kind":            "app",
   "title":           "Reticulum",
   "description":     "Visualize and manage the Reticulum network.",
