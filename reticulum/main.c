@@ -6,12 +6,13 @@
  *   hal_rns_nodes   → the observed network as {nodes,edges} (filtered)
  *   hal_rns_hubs    → configured bootstrap hubs [{endpoint,connected}]
  *
- * The graph itself is drawn by an embedded webview (web/index.html + Cytoscape).
- * This module does NO graph math: each tick it fetches the (filtered) snapshot
- * and forwards it verbatim into the page via `ui.webview.send`, and forwards the
- * page's interactions (filter changes) back to the host. Bootstrap-hub
- * management and the passive toggle are emitted as host-action messages
- * (rns.hub.* / rns.passive.set) from the Hubs/Settings screens.
+ * The graph itself is rendered by the host's native `$type:"graph"` widget
+ * (a 3D view built on the graph3d engine). This module does NO graph math:
+ * each tick it fetches the (filtered) snapshot and forwards it verbatim via
+ * `ui.graph.set`, and forwards the widget's interactions (filter changes)
+ * back to the host. Bootstrap-hub management and the passive toggle are
+ * emitted as host-action messages (rns.hub.* / rns.passive.set) from the
+ * Hubs/Settings screens.
  *
  * Build: cd wapps/reticulum && make
  */
