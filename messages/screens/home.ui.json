@@ -1,0 +1,41 @@
+[
+  {
+    "$": "screen",
+    "name": "Messages",
+    "icon": "mail",
+    "tip": "Encrypted direct messages. Every message is a NOSTR note addressed to a person's key, carried over both the internet and the Reticulum mesh.",
+    "children": [
+      {
+        "$": "group",
+        "name": "conversations",
+        "$type": "conversations",
+        "label": "Messages",
+        "children": [
+          { "$": "action", "name": "new_message", "icon": "edit", "slot": "list",
+            "tip": "Start a conversation — npub, hex key, or a callsign to look up" }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "People",
+    "icon": "people",
+    "tip": "Everyone you can message. Tap a person to open the conversation.",
+    "children": [
+      { "$": "field", "name": "people_list", "$type": "people",
+        "tip": "Known keys — from your contacts and from anyone you have messaged." }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Status",
+    "icon": "info",
+    "menu": true,
+    "tip": "Where your messages are going, and what came back.",
+    "children": [
+      { "$": "field", "name": "status", "$type": "log", "label": "Delivery" },
+      { "$": "action", "name": "refresh_status", "label": "Refresh", "icon": "refresh" }
+    ]
+  }
+]
