@@ -68,7 +68,7 @@
   },
   {
     "$": "screen",
-    "name": "NOSTR servers",
+    "name": "Relay servers",
     "icon": "cloud",
     "menu": true,
     "tip": "Relays this device talks to — internet (wss://), Reticulum (rns://) or this device (local)",

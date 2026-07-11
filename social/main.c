@@ -1,16 +1,16 @@
 /*
- * nostr — a NOSTR client wapp, laid out like the Chat wapp.
+ * social — a social-feed wapp on the NOSTR protocol, laid out like the Chat wapp.
  *
  *   Activity  ($type:"chat")          kind-1 notes from the accounts you follow
  *   Messages  ($type:"conversations") kind-4 encrypted DMs, per-peer threads
  *   Follows   ($type:"people")        who you follow (+ add / tap-to-unfollow)
- *   NOSTR servers (menu panel)        relay list + reachability + add / remove
+ *   Relay servers (menu panel)        relay list + reachability + add / remove
  *
  * All relay/crypto/signing/decryption is host-side via hal.nostr; the transport
  * of each relay (wss:// internet, rns:// Reticulum, local device) is invisible
  * here. This module just drives the UI.
  *
- * Build: cd wapps/nostr && WASI_SDK_PATH=~/wasi-sdk make
+ * Build: cd wapps/social && WASI_SDK_PATH=~/wasi-sdk make
  */
 #include "../hal/geogram_wasm_hal.h"
 
@@ -558,7 +558,7 @@ static void push_profiles(void) {
 
 /* ── Module entry points ─────────────────────────────────────────────── */
 int32_t module_init(void) {
-    hal_log(6, "[nostr] up", 10);
+    hal_log(6, "[social] up", 11);
     subscribe_all();
     push_relays();
     push_follows();
