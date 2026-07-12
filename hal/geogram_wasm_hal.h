@@ -1033,12 +1033,25 @@ uint32_t hal_nostr_follows(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("nostr_wot")))
 uint32_t hal_nostr_wot(char *out, uint32_t out_cap);
 
-/* Discovery feed for users who follow nobody: writes a subscription id that
- * only yields kind-1 posts which have gathered more than 2 distinct reactions
- * (spam gets none, so it never appears). Drain it with hal_nostr_event_recv
- * like any other sub. Returns subId byte length, 0 if unavailable. */
+/* POPULAR feed: writes a subscription id that only yields kind-1 posts which
+ * have gathered more than 2 distinct reactions. Note what this means — a post
+ * cannot appear here until it is old enough to have COLLECTED those likes, so
+ * this feed is always behind. It is a "what is worth reading" feed, never a
+ * "what is happening" one. Drain with hal_nostr_event_recv like any other sub.
+ * Returns subId byte length, 0 if unavailable. */
 __attribute__((import_module("hal"), import_name("nostr_discovery")))
 uint32_t hal_nostr_discovery(char *out, uint32_t out_cap);
+
+/* LIVE firehose: kind-1 as the relays push it, within a second of being posted.
+ * This is the feed of STRANGERS — the way a user finds accounts worth following.
+ *
+ * The host applies a quality gate before anything reaches you (hashtag walls,
+ * link-only adverts, copy-paste bot rings, flooding authors, muted accounts, and
+ * authors with no profile at all). Your own posts and the people you follow are
+ * never filtered. Drain with hal_nostr_event_recv like any other sub.
+ * Returns subId byte length, 0 if unavailable. */
+__attribute__((import_module("hal"), import_name("nostr_firehose")))
+uint32_t hal_nostr_firehose(char *out, uint32_t out_cap);
 
 /* Engagement counts for a post: writes JSON {"likes":N,"replies":M,"mine":bool}
  * for event [id]. 0/0/false until the host has seen reactions/replies for it

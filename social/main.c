@@ -96,7 +96,8 @@ static void cat_time_fields(char *dst, const char *ts, unsigned m) {
 
 /* ── State ───────────────────────────────────────────────────────────── */
 static char g_self[80] = "";       /* our x-only pubkey (hex)              */
-static char g_sub_disc[64] = "";   /* discovery (popular >2-like) sub — "All" */
+static char g_sub_disc[64] = "";   /* popular (>2-like) sub — ranking, NOT "All" */
+static char g_sub_fire[64] = "";   /* LIVE firehose (spam-gated) — the "All" tab */
 static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
 static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
 static char g_sub_post[64] = "";   /* one publication + its replies — host
@@ -125,15 +126,29 @@ static void subscribe_all(void) {
         int sn = hal_nostr_self(g_self, sizeof(g_self) - 1);
         if (sn > 0) g_self[sn] = '\0';
     }
-    /* (a) Discovery — ALWAYS on: global kind-1 posts that have gathered at least
-     * 2 distinct likes (host-side reaction gate). This is the QUALITY breadth of
-     * the "All" tab — popular posts from people you don't follow, not the raw
-     * spam firehose. */
+    /* (a) LIVE firehose — this is the "All" tab. kind-1 as the relays push it,
+     * within a second of being posted, spam-gated by the host (hashtag walls,
+     * link-only adverts, copy-paste bot rings, flooding authors, and accounts
+     * with no profile are never delivered).
+     *
+     * The All tab used to be fed by discovery (below), which is a feed of
+     * REACTIONS: it can only surface a post once that post has already collected
+     * likes, so the newest thing on screen was routinely an hour or two old. A
+     * feed for discovering people you don't follow yet has to be live, or it is
+     * not doing the job. */
+    if (!g_sub_fire[0]) {
+        int n = hal_nostr_firehose(g_sub_fire, sizeof(g_sub_fire) - 1);
+        if (n > 0) g_sub_fire[n] = '\0';
+    }
+    /* (b) Popular — global kind-1 posts that gathered at least 2 distinct likes
+     * (host-side reaction gate). Still worth having: it is the "what is worth
+     * reading" signal, and posts arriving here are marked pop=1 so the UI can
+     * rank them. It is no longer pretending to be the live feed. */
     if (!g_sub_disc[0]) {
         int n = hal_nostr_discovery(g_sub_disc, sizeof(g_sub_disc) - 1);
         if (n > 0) g_sub_disc[n] = '\0';
     }
-    /* (b) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
+    /* (c) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
      * post/reply from someone you follow arrives (even ones that never clear
      * discovery's like gate). This drives the "Following" tab. Opens once the
      * trust set is non-empty; a brand-new user sees only discovery until then. */
@@ -234,10 +249,17 @@ static void search_profile(const char *evt) {
 
 
 static void drain(void) {
+    /* The live firehose feeds the "All" tab. Drained first and harder than the
+     * others — it is the only sub that carries what is happening RIGHT NOW. */
+    for (int i = 0; i < 40 && g_sub_fire[0]; i++) {
+        int n = hal_nostr_event_recv(g_sub_fire, str_len(g_sub_fire), g_evt, sizeof(g_evt) - 1);
+        if (n <= 0) break;
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* live, unranked */
+    }
     for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_disc, str_len(g_sub_disc), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_to(g_evt, 1, "activity"); /* discovery = popular */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 1, "activity"); /* pop=1: liked */
     }
     for (int i = 0; i < 20 && g_sub_follows[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
@@ -550,8 +572,12 @@ int32_t module_handle_event(void) {
         if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
             hal_nostr_post(1, text, str_len(text), "[]", 2);
     } else if (str_eq(cmd, "activity_refresh")) {
-        /* Pull-to-refresh / return-to-stream: drop BOTH feed subs and re-open
+        /* Pull-to-refresh / return-to-stream: drop every feed sub and re-open
          * them so the relays re-send the latest matching posts. */
+        if (g_sub_fire[0]) {
+            hal_nostr_unsubscribe(g_sub_fire, str_len(g_sub_fire));
+            g_sub_fire[0] = '\0';
+        }
         if (g_sub_disc[0]) {
             hal_nostr_unsubscribe(g_sub_disc, str_len(g_sub_disc));
             g_sub_disc[0] = '\0';
