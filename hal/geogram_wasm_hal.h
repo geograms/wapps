@@ -964,6 +964,27 @@ uint32_t hal_relay_resolve_recv(char *out, uint32_t out_cap);
  * drained one event at a time (inbox-pop). The host holds the profile key and
  * signs on hal_nostr_post — the nsec never enters the wasm sandbox. */
 
+/* ── LXMF (Reticulum's own messaging: NomadNet, Sideband, …) ──────────────
+ * A Geogram group rides NOSTR, but the Reticulum world already has its own
+ * chat, and those people are on the same mesh. These two calls let a wapp read
+ * what they send us and answer it, so a NomadNet user is a participant rather
+ * than a different app.
+ *
+ * Pop the next inbound LXMF message as JSON {from(hex), title, content, hash,
+ * ts}: `from` is the sender's delivery dest — the address you reply TO. Returns
+ * bytes written, 0 when drained. Poll each tick, like the other inboxes. The
+ * cursor is per-engine and advances only on a successful read, so nothing that
+ * arrived while the wapp was down is lost. */
+__attribute__((import_module("hal"), import_name("lxmf_recv")))
+uint32_t hal_lxmf_recv(char *out, uint32_t out_cap);
+
+/* Send an LXMF message to [dest_hex] (32-hex delivery dest). Fire-and-forget;
+ * 1 if queued, -1 on error. */
+__attribute__((import_module("hal"), import_name("lxmf_send")))
+int32_t hal_lxmf_send(const char *dest_hex, uint32_t dest_len,
+                      const char *title, uint32_t title_len,
+                      const char *content, uint32_t content_len);
+
 /* Relay list + live status as JSON [{"uri","scheme","status"}]. Returns bytes
  * written, or the negated required size if [out] is too small. */
 __attribute__((import_module("hal"), import_name("nostr_relays")))

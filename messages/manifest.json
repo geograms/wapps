@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.messages",
-  "version":         "0.1.5",
+  "version":         "0.1.6",
   "kind":            "app",
   "title":           "Messages",
   "description":     "Messages — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh.",
