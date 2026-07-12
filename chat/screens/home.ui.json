@@ -1,15 +1,31 @@
 [
   {
     "$": "screen",
-    "name": "Activity",
-    "icon": "home",
-    "tip": "Everything happening: incoming group and direct messages, plus stations spotted over Bluetooth. Tap an item to open its conversation.",
+    "name": "Groups",
+    "icon": "campaign",
+    "tip": "Public group chat. Messages are NOSTR notes tagged with the group, and messages from NomadNet (LXMF) land here too.",
     "children": [
       {
-        "$": "field",
-        "name": "activity",
-        "$type": "chat",
-        "hint": "Share an update…"
+        "$": "group",
+        "name": "conversations",
+        "$type": "conversations",
+        "label": "Groups",
+        "children": [
+          {
+            "$": "action",
+            "name": "add_group",
+            "icon": "add",
+            "slot": "list",
+            "tip": "Join a group"
+          },
+          {
+            "$": "action",
+            "name": "recur",
+            "icon": "repeat",
+            "slot": "room",
+            "tip": "Repeat this message periodically"
+          }
+        ]
       }
     ]
   },

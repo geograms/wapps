@@ -1043,6 +1043,8 @@ static void convo_forget(const char *id) {
     }
   }
 }
+static void groups_subscribe(void);   /* group set changed -> refresh the NOSTR filter */
+
 static int convo_known(const char *id) {
   for (int i = 0; i < g_convo_n; i++) if (s_eq(g_convo_ids[i], id)) return 1;
   return 0;
@@ -1073,11 +1075,18 @@ static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent
  * ("sent"); cleared immediately after so no other bubble picks them up. */
 static char g_send_rid[8] = "";
 static char g_send_status[12] = "";
+static int is_group(const char *id);   /* '#' prefix; defined below */
+
 static void convo_msg(const char *id, const char *dir, const char *from,
                       const char *text, const char *key, const char *meta,
                       double lat, double lon, const char *via,
                       const char *mid, const char *parent, const char *auth, int enc,
                       int priv) {
+  /* GROUPS ONLY. A 1:1 message still reaches this wapp over BLE/APRS (the radios
+   * do not know the difference), but rendering it here would rebuild the second
+   * inbox we just removed. The Messages wapp owns 1:1. Dropping the bubble does
+   * not drop the message: it arrives there as a NOSTR kind-4. */
+  if (!is_group(id)) return;
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -1430,7 +1439,15 @@ static void convo_title(const char *id, char *out, unsigned osz) {
   s_cat(out, global ? " (global)" : " (local)", osz);   /* ASCII-only tag */
 }
 /* Refresh a conversation row (title/preview/icon + distance badge). */
+/* Chat is a GROUP client now: 1:1 moved to the Messages wapp, which owns the
+ * NOSTR kind-4 inbox. A 1:1 row appearing here would be a second, worse inbox
+ * for the same message — the duplication the merge set out to end. Everything
+ * that would open a conversation goes through convo_touch/convo_ensure, so one
+ * guard in each is enough. */
+static int is_group(const char *id) { return id && id[0] == '#'; }
+
 static void convo_touch(const char *id, const char *preview, int select) {
+  if (!is_group(id)) return;
   convo_remember(id);
   int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
   const char *icon = (id[0] == '#') ? (global ? "public" : "campaign") : "person";
@@ -3093,6 +3110,7 @@ static void do_convo_close(const char *buf) {
     else { s_cpy(other, id, sizeof(other)); if (n < 38) { other[n] = '*'; other[n + 1] = 0; } }
     convo_forget(other);
     groups_save();
+    groups_subscribe();
   }
 }
 
@@ -3128,6 +3146,7 @@ static void do_prompt_result(const char *buf) {
       if (jbool(buf, "prompt_toggle")) s_cat(id, "*", sizeof(id));   /* global */
       convo_touch(id, "", 1);
       groups_save();
+      groups_subscribe();
     }
   } else if (s_eq(pid, "recur")) {
     char id[40] = ""; jstr(buf, "conversations_convo", id, sizeof(id));
@@ -3452,6 +3471,138 @@ static int any_global_group(void) {
   return 0;
 }
 
+static void convo_ensure(const char *id);   /* defined below */
+static void groups_subscribe(void);         /* defined below */
+
+/* ── Groups over NOSTR ──────────────────────────────────────────────────────
+ * A group message IS a NOSTR note: kind-1 tagged with the group name (the host
+ * publishes it that way already, see host_note_emit -> social.note). What was
+ * missing was the other half — LISTENING. We subscribe to kind-1 carrying a `t`
+ * tag for any group we are in, so a note posted from ANY NOSTR client (not just
+ * geogram) shows up in the group.
+ *
+ * Dedup on the event id: the same note reaches us as a NOSTR event AND as an
+ * APRS/BLE/Reticulum bulletin, and it must appear once.
+ */
+static char g_sub_groups[64] = "";
+static char g_gseen[64][20];      /* event ids already rendered */
+static int  g_gseen_n = 0, g_gseen_w = 0;
+
+static int gseen_has(const char *id) {
+  for (int i = 0; i < g_gseen_n; i++) if (s_eq(g_gseen[i], id)) return 1;
+  return 0;
+}
+static void gseen_add(const char *id) {
+  if (!id[0] || gseen_has(id)) return;
+  s_cpy(g_gseen[g_gseen_w], id, 20);
+  g_gseen_w = (g_gseen_w + 1) % 64;
+  if (g_gseen_n < 64) g_gseen_n++;
+}
+
+/* (Re)subscribe to the notes of every group we are in. Called whenever the group
+ * set changes; cheap, and a stale filter would silently miss a whole group. */
+static void groups_subscribe(void) {
+  if (g_sub_groups[0]) {
+    hal_nostr_unsubscribe(g_sub_groups, s_len(g_sub_groups));
+    g_sub_groups[0] = 0;
+  }
+  char f[700];
+  s_cpy(f, "{\"kinds\":[1],\"#t\":[", sizeof(f));
+  int any = 0;
+  for (int i = 0; i < g_convo_n; i++) {
+    const char *id = g_convo_ids[i];
+    if (!is_group(id)) continue;
+    char gname[8]; int gj = 0;
+    for (int k = 1; id[k] && id[k] != '*' && gj < 6; k++) gname[gj++] = id[k];
+    gname[gj] = 0;
+    if (!gname[0]) continue;
+    if (any) s_cat(f, ",", sizeof(f));
+    s_cat(f, "\"", sizeof(f)); s_cat(f, gname, sizeof(f)); s_cat(f, "\"", sizeof(f));
+    any = 1;
+  }
+  if (!any) return;                       /* no groups -> no subscription */
+  s_cat(f, "],\"limit\":100}", sizeof(f));
+  uint32_t n = hal_nostr_subscribe(f, s_len(f), g_sub_groups, sizeof(g_sub_groups) - 1);
+  if (n > 0 && n < sizeof(g_sub_groups)) g_sub_groups[n] = 0; else g_sub_groups[0] = 0;
+}
+
+/* Value of the first ["t","<topic>"] tag — which group a note belongs to. */
+static int find_t_tag(const char *evt, char *out, unsigned m) {
+  for (const char *p = evt; *p; p++) {
+    if (p[0] == '[' && p[1] == '"' && p[2] == 't' && p[3] == '"' && p[4] == ',') {
+      const char *q = p + 5;
+      while (*q == ' ') q++;
+      if (*q != '"') continue;
+      q++;
+      unsigned o = 0;
+      while (*q && *q != '"' && o < m - 1) out[o++] = *q++;
+      out[o] = 0;
+      return o > 0;
+    }
+  }
+  return 0;
+}
+
+/* One kind-1 note off the group subscription. */
+static void group_note_ingest(const char *evt) {
+  char id[80] = "", pub[80] = "", ts[24] = "", topic[16] = "";
+  static char content[900];
+  content[0] = 0;
+  jstr(evt, "id", id, sizeof(id));
+  jstr(evt, "pubkey", pub, sizeof(pub));
+  jstr(evt, "created_at", ts, sizeof(ts));
+  jstr(evt, "content", content, sizeof(content));
+  if (!id[0] || !content[0]) return;
+  if (!find_t_tag(evt, topic, sizeof(topic))) return;
+  if (gseen_has(id)) return;
+  gseen_add(id);
+  /* Our own note is already on screen from the local echo. */
+  if (pub[0] && g_pubkey[0] && s_eq_ci(pub, g_pubkey)) return;
+
+  char cid[12]; cid[0] = '#'; s_cpy(cid + 1, topic, sizeof(cid) - 1);
+  if (!convo_known(cid)) return;          /* a group we are not in */
+  char from[16]; s_cpy(from, pub, 13);    /* short pubkey until a profile lands */
+  convo_msg(cid, "in", from, content, "", "", 0, 0, "NOS", id, "", "verified", 0, 0);
+  convo_touch(cid, content, 0);
+  notify_msg(cid, from, content, content);
+}
+
+/* ── Groups from NomadNet (LXMF) ────────────────────────────────────────────
+ * Reticulum already has its own chat, and those people are on the same mesh. An
+ * inbound LXMF message whose title names a group (#NEWS) joins that group's
+ * conversation; anything else lands in #NOMADNET, so a NomadNet user is never
+ * silently dropped. Ingest only — we do not invent an outbound LXMF group
+ * protocol here (see the wapp README / commit message). */
+#define LXMF_GROUP "#NOMADNET"
+static void lxmf_drain(void) {
+  for (int guard = 0; guard < 10; guard++) {
+    char js[1400];
+    uint32_t n = hal_lxmf_recv(js, sizeof(js) - 1);
+    if (n == 0) break;
+    js[n] = 0;
+    char from[80] = "", title[64] = "", hash[80] = "";
+    static char content[900];
+    content[0] = 0;
+    jstr(js, "from", from, sizeof(from));
+    jstr(js, "title", title, sizeof(title));
+    jstr(js, "content", content, sizeof(content));
+    jstr(js, "hash", hash, sizeof(hash));
+    if (!content[0]) continue;
+    if (gseen_has(hash)) continue;
+    gseen_add(hash);
+
+    char cid[16];
+    if (title[0] == '#') s_cpy(cid, title, sizeof(cid));
+    else s_cpy(cid, LXMF_GROUP, sizeof(cid));
+    if (!convo_known(cid)) convo_ensure(cid);   /* auto-join, or nobody sees it */
+
+    char who[16]; s_cpy(who, from, 13);         /* LXMF dest prefix as the name */
+    convo_msg(cid, "in", who, content, "", "", 0, 0, "LXM", hash, "", "", 0, 0);
+    convo_touch(cid, content, 0);
+    notify_msg(cid, who, content, content);
+  }
+}
+
 /* Subscribed groups persist in KV "groups" (";"-joined ids) so the APRS-IS
  * filter is correct immediately after a restart, before any row is reopened. */
 static void groups_save(void) {
@@ -3490,9 +3641,33 @@ static void groups_seed_defaults(void) {
   for (unsigned i = 0; i < sizeof(DEFAULT_GROUPS) / sizeof(DEFAULT_GROUPS[0]); i++)
     convo_ensure(DEFAULT_GROUPS[i]);
   groups_save();
+  groups_subscribe();
   hal_kv_set("grpseed", 7, "1", 1);
 }
+/* One-time: drop the conversation rows this wapp used to own.
+ *
+ * Chat is groups-only now, but the 1:1 threads it created before that are
+ * already persisted in the host's ConversationStore, and a guard on new rows
+ * cannot rewrite them — they just sit there as a second, stale inbox. So clear
+ * the store once; groups_load() immediately re-creates every group row after.
+ *
+ * This discards Chat's old 1:1 history. That is the intent, not a side effect:
+ * those conversations live in the Messages wapp now, which holds them as NOSTR
+ * kind-4 and rehydrates them from the relays. Group history is lost with it,
+ * which is a real cost — the groups were near-empty broadcast channels, and
+ * carrying a split-brain inbox forward costs more. */
+static void convo_purge_legacy(void) {
+  char f[2];
+  if (hal_kv_get("grponly", 7, f, sizeof(f) - 1) > 0) return;
+  const char *clr = "{\"type\":\"ui.convo.clear\",\"field\":\"conversations\"}";
+  hal_msg_send(clr, s_len(clr));
+  hal_kv_set("grponly", 7, "1", 1);
+  const char *lg = "[chat] cleared legacy 1:1 rows (groups-only now)";
+  hal_log(1, lg, s_len(lg));
+}
+
 static void groups_load(void) {
+  convo_purge_legacy();
   char buf[600];
   uint32_t n = hal_kv_get("groups", 6, buf, sizeof(buf) - 1);
   if (n == 0) { groups_seed_defaults(); return; } /* fresh install -> defaults */
@@ -4961,6 +5136,18 @@ void module_tick(void) {
    * notification for it, and cost a relay round-trip every 60s for a UI that no
    * longer exists here. relay_tick() is gone with it.
    */
+  /* Group notes off the NOSTR subscription, and anything a NomadNet (LXMF) user
+   * sent us. Both funnel into the same group conversations. */
+  if (!g_sub_groups[0]) groups_subscribe();   /* the hub is not up at init */
+  for (int i = 0; i < 20 && g_sub_groups[0]; i++) {
+    static char evt[1600];
+    int n = hal_nostr_event_recv(g_sub_groups, s_len(g_sub_groups), evt, sizeof(evt) - 1);
+    if (n <= 0) break;
+    evt[n] = 0;
+    group_note_ingest(evt);
+  }
+  lxmf_drain();
+
   /* Cold-start 1:1: drain callsign→npub resolutions and flush queued public
    * sends as encrypted relay backups. */
   resolve_drain();
