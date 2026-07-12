@@ -16,6 +16,7 @@ OH   := vendor/openh264/codec
 FDK  := vendor/fdkaac
 VPX  := vendor/vpx
 NEG  := vendor/nestegg
+DE265 := vendor/de265
 
 OUTPUT := app.wasm
 
@@ -45,14 +46,21 @@ INCLUDES := \
 	-Ivendor/opuslib/silk/float \
 	-Ivendor/opuslib/ogg/include \
 	-I$(VPX) \
-	-I$(NEG)/include
+	-I$(NEG)/include \
+	-I$(DE265)
 
+# -msimd128: wasm SIMD via LLVM autovectorization only (the vendored codec
+# trees carry no SIMD sources) — measured ~1.2-2x, not native-asm speed. The
+# REAL fast paths are the native binaries in bin/ and Android's MediaCodec;
+# this narrows the gap for the wasm fallback.
 CXXFLAGS := \
 	--target=wasm32-wasi \
 	-O2 \
+	-msimd128 \
 	-fno-exceptions -fno-rtti \
 	-ffunction-sections -fdata-sections \
 	-DNDEBUG -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PTHREAD \
+	-DHAVE_POSIX_MEMALIGN \
 	$(INCLUDES)
 
 # C flags for the vendored decoder libraries (dr_libs, stb_vorbis): plain C,
@@ -84,11 +92,14 @@ LDFLAGS := \
 	-Wl,--strip-all
 
 # C++ sources: main + openh264 (video) + fdk-aac (AAC audio) + aac wrapper +
-# webm backend (drives libvpx + libnestegg + libopus).
+# webm backend (drives libvpx + libnestegg + libopus) + hevc backend
+# (libde265; .cc sources listed separately below).
 CXX_SRCS := \
 	main.cpp \
 	vendor/aac_dec.cpp \
 	vendor/webm_dec.cpp \
+	vendor/hevc_dec.cpp \
+	vendor/av1_dec.cpp \
 	$(wildcard $(OH)/common/src/*.cpp) \
 	$(wildcard $(OH)/decoder/core/src/*.cpp) \
 	$(wildcard $(OH)/decoder/plus/src/*.cpp) \
@@ -132,7 +143,11 @@ C_SRCS := \
 	$(wildcard $(VPX)/vp9/common/*.c) \
 	$(wildcard $(VPX)/vp9/decoder/*.c)
 
-OBJS := $(CXX_SRCS:.cpp=.o) $(C_SRCS:.c=.o)
+# libde265 (HEVC) — upstream uses .cc; runs single-threaded via its wasi_st.h
+# shim (see vendor/de265/libde265/wasi_st.h).
+CC_SRCS := $(wildcard $(DE265)/libde265/*.cc)
+
+OBJS := $(CXX_SRCS:.cpp=.o) $(CC_SRCS:.cc=.o) $(C_SRCS:.c=.o)
 
 .PHONY: all clean
 all: $(OUTPUT)
@@ -140,11 +155,18 @@ all: $(OUTPUT)
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+%.o: %.cc
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OUTPUT): $(OBJS)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS)
+# dav1d (AV1) links as a prebuilt wasm32-wasi static lib — meson-only build,
+# see vendor/dav1d/README.md for how to regenerate it.
+DAV1D_LIB := vendor/dav1d/lib/libdav1d.a
+
+$(OUTPUT): $(OBJS) $(DAV1D_LIB)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(DAV1D_LIB)
 	@echo "Built $(OUTPUT) ($$(wc -c < $(OUTPUT)) bytes)"
 
 clean:

@@ -1,5 +1,6 @@
 // WebM backend implementation — see webm_dec.h.
 #include "webm_dec.h"
+#include "av1_dec.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -21,9 +22,11 @@ struct WebmDec {
   // video
   int v_track;     // -1 if none
   int v_is_vp9;    // 0 = VP8, 1 = VP9
+  int v_is_av1;    // AV1 track → decoded by dav1d (av1), not libvpx
   int vw, vh;
   vpx_codec_ctx_t vpx;
   int vpx_ready;
+  Av1Dec *av1;     // non-null when the AV1 decoder opened
 
   // audio (Opus)
   int a_track;     // -1 if none
@@ -84,11 +87,13 @@ WebmDec *webm_open(const uint8_t *data, int len) {
     int type = nestegg_track_type(d->ne, i);
     int codec = nestegg_track_codec_id(d->ne, i);
     if (type == NESTEGG_TRACK_VIDEO && d->v_track < 0 &&
-        (codec == NESTEGG_CODEC_VP8 || codec == NESTEGG_CODEC_VP9)) {
+        (codec == NESTEGG_CODEC_VP8 || codec == NESTEGG_CODEC_VP9 ||
+         codec == NESTEGG_CODEC_AV1)) {
       nestegg_video_params vp; memset(&vp, 0, sizeof(vp));
       if (nestegg_track_video_params(d->ne, i, &vp) == 0) {
         d->v_track = (int)i;
         d->v_is_vp9 = (codec == NESTEGG_CODEC_VP9);
+        d->v_is_av1 = (codec == NESTEGG_CODEC_AV1);
         d->vw = (int)vp.width;
         d->vh = (int)vp.height;
       }
@@ -107,13 +112,19 @@ WebmDec *webm_open(const uint8_t *data, int len) {
 
   if (d->v_track < 0 && d->a_track < 0) { nestegg_destroy(d->ne); free(d); return NULL; }
 
-  // Init VP8/VP9 decoder.
+  // Init the video decoder: dav1d for AV1, libvpx for VP8/VP9. Failure →
+  // video unplayable, fall back to audio-only if present.
   if (d->v_track >= 0) {
-    vpx_codec_iface_t *iface = d->v_is_vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx();
-    if (vpx_codec_dec_init(&d->vpx, iface, NULL, 0) == VPX_CODEC_OK) {
-      d->vpx_ready = 1;
+    if (d->v_is_av1) {
+      d->av1 = av1_open(NULL, 0);
+      if (!d->av1) d->v_track = -1;
     } else {
-      d->v_track = -1; // video unplayable → fall back to audio-only if present
+      vpx_codec_iface_t *iface = d->v_is_vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx();
+      if (vpx_codec_dec_init(&d->vpx, iface, NULL, 0) == VPX_CODEC_OK) {
+        d->vpx_ready = 1;
+      } else {
+        d->v_track = -1;
+      }
     }
   }
 
@@ -181,7 +192,27 @@ int webm_consume(WebmDec *d, WebmUnit *out, int16_t *apcm, int apcm_max_frames) 
   unsigned int nchunks = 0;
   nestegg_packet_count(pkt, &nchunks);
 
-  if ((int)track == d->v_track && d->vpx_ready) {
+  if ((int)track == d->v_track && d->av1) {
+    // AV1 → dav1d. Feed each chunk (a raw OBU temporal unit), emit the first
+    // decoded picture.
+    for (unsigned int c = 0; c < nchunks; c++) {
+      unsigned char *cd = NULL; size_t cl = 0;
+      if (nestegg_packet_data(pkt, c, &cd, &cl) != 0) continue;
+      av1_push(d->av1, cd, (int)cl, ptsMs);
+    }
+    Av1Frame fr;
+    if (av1_pull(d->av1, &fr)) {
+      out->type = 1;
+      out->planes[0] = fr.planes[0];
+      out->planes[1] = fr.planes[1];
+      out->planes[2] = fr.planes[2];
+      out->strides[0] = fr.strides[0];
+      out->strides[1] = fr.strides[1];
+      out->strides[2] = fr.strides[2];
+      out->vw = fr.w;
+      out->vh = fr.h;
+    }
+  } else if ((int)track == d->v_track && d->vpx_ready) {
     // Feed each chunk to vpx; emit the first decoded frame.
     for (unsigned int c = 0; c < nchunks; c++) {
       unsigned char *cd = NULL; size_t cl = 0;
@@ -234,6 +265,7 @@ void webm_close(WebmDec *d) {
   if (!d) return;
   if (d->pending) nestegg_free_packet(d->pending);
   if (d->vpx_ready) vpx_codec_destroy(&d->vpx);
+  if (d->av1) av1_close(d->av1);
   if (d->opus) opus_decoder_destroy(d->opus);
   if (d->ne) nestegg_destroy(d->ne);
   free(d);

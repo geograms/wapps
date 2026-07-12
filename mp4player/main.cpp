@@ -2,11 +2,13 @@
  * tools.geogram.mp4player — platform-agnostic MP4 video player wapp.
  *
  * Unlike the old "movies" wapp (which handed bytes to a host-compiled
- * codec), this wapp CONTAINS the decoder: minimp4 demuxes the file and
- * openh264 decodes H.264 — both compiled to WebAssembly. The host holds
- * NO codec; it only receives decoded RGBA frames through the generic
- * hal_video_* sink and uploads them to a texture. The decoder therefore
- * travels inside this .wapp and runs the same on every platform.
+ * codec), this wapp CONTAINS the decoders: minimp4 demuxes mp4/mov and
+ * openh264 (H.264), libde265 (HEVC/H.265) or dav1d (AV1) decodes the video
+ * track; nestegg demuxes WebM/mkv for libvpx (VP8/VP9) and dav1d — all
+ * compiled to WebAssembly. The host holds NO codec; it only receives
+ * decoded RGBA frames through the generic hal_video_* sink and uploads
+ * them to a texture. The decoders therefore travel inside this .wapp and
+ * run the same on every platform.
  *
  * Flow:
  *   file.open / video.load  -> slurp file, demux, init decoder, tell the
@@ -37,6 +39,8 @@ extern "C" {
 #include "aac_dec.h"     // AAC (in mp4/m4a) → s16 PCM (fdk-aac)
 #include "opus_dec.h"    // ogg-opus → s16 PCM (libopus + libogg)
 #include "webm_dec.h"    // WebM (VP8/VP9 video + Opus audio) — libnestegg + libvpx
+#include "hevc_dec.h"    // HEVC/H.265 (in mp4/mov) — libde265
+#include "av1_dec.h"     // AV1 (in mp4 and WebM/mkv) — dav1d
 #include "draudio/dr_mp3.h"  // drmp3dec: low-level streaming MP3 frame decoder (radio)
 
 #include <stdint.h>
@@ -97,11 +101,13 @@ static int64_t        g_fileSize = 0;
 static MP4D_demux_t   g_mp4;
 static bool           g_mp4open = false;
 static int            g_vt = -1;
-static const int      g_lenSize = 4;        // AVCC NAL length prefix
+static int            g_lenSize = 4;        // NAL length prefix (avcC/hvcC)
 static unsigned       g_sample = 0;
 static unsigned       g_sampleCount = 0;
 static uint32_t       g_timescale = 1;
-static ISVCDecoder*   g_dec = nullptr;
+static ISVCDecoder*   g_dec = nullptr;      // H.264 (openh264)
+static HevcDec*       g_hevc = nullptr;     // H.265 (libde265)
+static Av1Dec*        g_av1 = nullptr;      // AV1 (dav1d)
 
 static uint8_t*       g_hdr = nullptr;       // SPS+PPS as annex-b
 static int            g_hdrLen = 0;
@@ -273,6 +279,9 @@ static void ensure_cap(uint8_t** buf, int* cap, int need) {
 
 static void teardown() {
   if (g_dec) { g_dec->Uninitialize(); WelsDestroyDecoder(g_dec); g_dec = nullptr; }
+  if (g_hevc) { hevc_close(g_hevc); g_hevc = nullptr; }
+  if (g_av1) { av1_close(g_av1); g_av1 = nullptr; }
+  g_lenSize = 4;
   if (g_mp4open) { MP4D_close(&g_mp4); g_mp4open = false; }
   if (g_file) { free(g_file); g_file = nullptr; }
   g_fileSize = 0; g_vt = -1; g_sample = 0; g_sampleCount = 0; g_timescale = 1;
@@ -356,19 +365,33 @@ static bool open_video_loaded(void) {
     else if (ht == MP4D_HANDLER_TYPE_SOUN && g_at < 0) g_at = (int)i;
   }
 
-  // Video track → H.264 decoder (existing path).
+  // Video track → H.264 (openh264) or H.265 (libde265) decoder.
   if (g_vt >= 0) {
     MP4D_track_t* tr = &g_mp4.track[g_vt];
     g_sampleCount = tr->sample_count;
     g_timescale = tr->timescale ? tr->timescale : 1;
     g_outW = (int)tr->SampleDescription.video.width;
     g_outH = (int)tr->SampleDescription.video.height;
-    build_header();
-    if (WelsCreateDecoder(&g_dec) != 0 || !g_dec) { logmsg("[mp4player] decoder create failed"); return false; }
-    SDecodingParam dp; memset(&dp, 0, sizeof(dp));
-    dp.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_AVC;
-    dp.eEcActiveIdc = ERROR_CON_DISABLE;
-    if (g_dec->Initialize(&dp) != 0) { logmsg("[mp4player] decoder init failed"); return false; }
+    if (tr->object_type_indication == MP4_OBJECT_TYPE_HEVC) {
+      if (!tr->dsi || tr->dsi_bytes == 0) { logmsg("[mp4player] hevc: no hvcC record"); return false; }
+      int ls = 4;
+      g_hevc = hevc_open(tr->dsi, (int)tr->dsi_bytes, &ls);
+      if (!g_hevc) { logmsg("[mp4player] hevc decoder open failed"); return false; }
+      g_lenSize = ls;
+      logmsg("[mp4player] hevc track (libde265)");
+    } else if (tr->object_type_indication == MP4_OBJECT_TYPE_AV1) {
+      g_av1 = av1_open(tr->dsi, (int)tr->dsi_bytes);
+      if (!g_av1) { logmsg("[mp4player] av1 decoder open failed"); return false; }
+      logmsg("[mp4player] av1 track (dav1d)");
+    } else {
+      g_lenSize = 4;
+      build_header();
+      if (WelsCreateDecoder(&g_dec) != 0 || !g_dec) { logmsg("[mp4player] decoder create failed"); return false; }
+      SDecodingParam dp; memset(&dp, 0, sizeof(dp));
+      dp.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_AVC;
+      dp.eEcActiveIdc = ERROR_CON_DISABLE;
+      if (g_dec->Initialize(&dp) != 0) { logmsg("[mp4player] decoder init failed"); return false; }
+    }
   }
 
   // Audio track → AAC decoder (so videos get sound; m4a plays).
@@ -444,11 +467,41 @@ static void emit_frame(uint8_t* pd[3], SBufferInfo& bi, double ptsMs) {
   emit_yuv420(pd[0], pd[1], pd[2], sy, sc, w, h, ptsMs);
 }
 
+// Pull every picture the HEVC decoder has ready and push them to the sink.
+static void hevc_drain() {
+  HevcFrame fr;
+  while (hevc_pull(g_hevc, &fr)) {
+    emit_yuv420(fr.planes[0], fr.planes[1], fr.planes[2],
+                fr.strides[0], fr.strides[1], fr.w, fr.h, fr.ptsMs);
+  }
+}
+
 // Decode one sample (the next one) and emit its frame if ready.
 static bool decode_one() {
   if (g_sample >= g_sampleCount) return false;
   unsigned bytes = 0, ts = 0, dur = 0;
   MP4D_file_offset_t ofs = MP4D_frame_offset(&g_mp4, (unsigned)g_vt, g_sample, &bytes, &ts, &dur);
+  if (g_hevc) {
+    double thisPts = g_nextPtsMs;
+    g_nextPtsMs += (double)dur * 1000.0 / (double)g_timescale;
+    g_sample++;
+    hevc_push_sample(g_hevc, g_file + ofs, (int)bytes, thisPts);
+    hevc_drain();
+    return true;
+  }
+  if (g_av1) {
+    double thisPts = g_nextPtsMs;
+    g_nextPtsMs += (double)dur * 1000.0 / (double)g_timescale;
+    g_sample++;
+    // mp4 av01 samples are raw OBU temporal units — feed as-is.
+    av1_push(g_av1, g_file + ofs, (int)bytes, thisPts);
+    Av1Frame fr;
+    while (av1_pull(g_av1, &fr)) {
+      emit_yuv420(fr.planes[0], fr.planes[1], fr.planes[2],
+                  fr.strides[0], fr.strides[1], fr.w, fr.h, fr.ptsMs);
+    }
+    return true;
+  }
   int len = 0;
   if (g_sample == 0 && g_hdrLen > 0) {
     ensure_cap(&g_au, &g_auCap, g_hdrLen);
@@ -476,6 +529,19 @@ static bool decode_one() {
 }
 
 static void flush_tail() {
+  if (g_hevc) {
+    hevc_flush(g_hevc); // end-of-stream → reordered pictures drain
+    hevc_drain();
+    return;
+  }
+  if (g_av1) {
+    Av1Frame fr; // drain whatever dav1d still holds (max_frame_delay = 1)
+    while (av1_pull(g_av1, &fr)) {
+      emit_yuv420(fr.planes[0], fr.planes[1], fr.planes[2],
+                  fr.strides[0], fr.strides[1], fr.w, fr.h, fr.ptsMs);
+    }
+    return;
+  }
   for (int k = 0; k < 8; k++) {
     uint8_t* pd[3] = {nullptr, nullptr, nullptr};
     SBufferInfo bi; memset(&bi, 0, sizeof(bi));
@@ -484,9 +550,14 @@ static void flush_tail() {
   }
 }
 
-// True if sample s is an IDR (decodable standalone) — its first slice NAL is
-// type 5. Reads only NAL headers, no decode.
+// True if sample s is a random-access point (decodable standalone).
+// H.264: first slice NAL is type 5 (IDR). HEVC: NAL type 16..21 (IRAP:
+// BLA/IDR/CRA). Reads only NAL headers, no decode.
 static bool sample_is_keyframe(unsigned s) {
+  // AV1: keyframe detection needs a frame-header bitstream parse — skip it so
+  // build_keyframes() finds none and video.scan uses the sequential fallback
+  // (every AV1 sample decodes in order, so the first frames scan works).
+  if (g_av1) return false;
   unsigned bytes = 0, ts = 0, dur = 0;
   MP4D_file_offset_t ofs =
       MP4D_frame_offset(&g_mp4, (unsigned)g_vt, s, &bytes, &ts, &dur);
@@ -497,10 +568,16 @@ static bool sample_is_keyframe(unsigned s) {
     for (int b = 0; b < g_lenSize; b++) nl = (nl << 8) | sp[i + b];
     i += g_lenSize;
     if (nl == 0 || i + nl > bytes) break;
-    uint8_t t = sp[i] & 0x1F;
-    if (t == 5) return true;  // IDR slice
-    if (t == 1) return false; // non-IDR slice — not a keyframe
-    i += nl;                  // SPS/PPS/SEI/AUD — keep looking
+    if (g_hevc) {
+      uint8_t t = (sp[i] >> 1) & 0x3F;
+      if (t >= 16 && t <= 21) return true; // IRAP (BLA/IDR/CRA)
+      if (t <= 9) return false;            // non-IRAP slice
+    } else {
+      uint8_t t = sp[i] & 0x1F;
+      if (t == 5) return true;  // IDR slice
+      if (t == 1) return false; // non-IDR slice — not a keyframe
+    }
+    i += nl;                  // VPS/SPS/PPS/SEI/AUD — keep looking
   }
   return false;
 }
@@ -524,6 +601,14 @@ static void decode_keyframe(unsigned s) {
   unsigned bytes = 0, ts = 0, dur = 0;
   MP4D_file_offset_t ofs =
       MP4D_frame_offset(&g_mp4, (unsigned)g_vt, s, &bytes, &ts, &dur);
+  if (g_hevc) {
+    // IRAPs decode standalone; output may lag one push — the tick's next
+    // keyframe (or the end-of-scan flush) drains it.
+    hevc_push_sample(g_hevc, g_file + ofs,
+                     (int)bytes, (double)ts * 1000.0 / (double)g_timescale);
+    hevc_drain();
+    return;
+  }
   int len = 0;
   ensure_cap(&g_au, &g_auCap, g_hdrLen);
   if (g_hdrLen > 0) { memcpy(g_au, g_hdr, g_hdrLen); len = g_hdrLen; }
@@ -1668,23 +1753,30 @@ extern "C" void module_tick(void) {
   // WebM path (VP8/VP9 video + Opus audio).
   if (g_webmMode) { webm_tick(); return; }
   // Poster scan (keyframes across the whole clip).
-  if (g_scanKf && g_dec) {
+  if (g_scanKf && (g_dec || g_hevc || g_av1)) {
     int batch = 4;
     while (batch-- > 0 && g_kfCursor < g_kfCount) {
       decode_keyframe(g_kf[(unsigned)g_kfCursor]);
       g_kfCursor += g_kfStep;
     }
-    if (g_kfCursor >= g_kfCount) { g_scanKf = false; hal_video_end(); }
+    if (g_kfCursor >= g_kfCount) {
+      if (g_hevc) { hevc_flush(g_hevc); hevc_drain(); } // emit lagged pictures
+      g_scanKf = false;
+      hal_video_end();
+    }
     return;
   }
   // Thumbnail scan path (sequential fallback): decode-ahead ignoring clock.
-  if (g_scan > 0 && g_dec) {
+  if (g_scan > 0 && (g_dec || g_hevc || g_av1)) {
     int batch = 8;
     while (batch-- > 0 && g_scan > 0) {
       if (!decode_one()) { g_scan = 0; break; } // end of stream
       g_scan--;
     }
-    if (g_scan == 0) hal_video_end();
+    if (g_scan == 0) {
+      if (g_hevc) { hevc_flush(g_hevc); hevc_drain(); }
+      hal_video_end();
+    }
     return;
   }
   // mp4/m4a playback (video and/or AAC audio).
@@ -1697,7 +1789,7 @@ extern "C" void module_tick(void) {
   g_lastTickMs = now;
 
   // Video frames (paced to the play clock).
-  if (g_vt >= 0 && g_dec && !g_vDone) {
+  if (g_vt >= 0 && (g_dec || g_hevc || g_av1) && !g_vDone) {
     int budget = MAX_BATCH;
     while (budget-- > 0 && g_nextPtsMs <= g_playClockMs + LEAD_MS) {
       if (!decode_one()) {

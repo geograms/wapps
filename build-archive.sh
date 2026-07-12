@@ -104,6 +104,7 @@ build_wapp() {
             $([ -d media ] && echo media) \
             $([ -d web ] && echo web) \
             $([ -d lang ] && echo lang) \
+            $([ -d bin ] && echo bin) \
             $([ -f tests.wasm ] && echo tests.wasm) \
             $([ -d tests ] && echo tests)
     )

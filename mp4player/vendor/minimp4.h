@@ -71,6 +71,9 @@ extern "C" {
 #define MP4_OBJECT_TYPE_AVC                                    0x21
 // H.265 (HEVC) video
 #define MP4_OBJECT_TYPE_HEVC                                   0x23
+// AV1 video (local patch: av01 sample entries have no esds object type —
+// this private sentinel marks demuxed AV1 tracks; dsi holds the raw av1C)
+#define MP4_OBJECT_TYPE_AV1                                    0xFF
 // http://www.mp4ra.org/object.html 0xC0-E0  && 0xE2 - 0xFE are specified as "user private"
 #define MP4_OBJECT_TYPE_USER_PRIVATE                           0xC0
 
@@ -568,6 +571,9 @@ enum
     BOX_hev1    = FOUR_CHAR_INT( 'h', 'e', 'v', '1' ),
     BOX_hvc1    = FOUR_CHAR_INT( 'h', 'v', 'c', '1' ),
     BOX_hvcC    = FOUR_CHAR_INT( 'h', 'v', 'c', 'C' ),
+    // AV1 (local patch)
+    BOX_av01    = FOUR_CHAR_INT( 'a', 'v', '0', '1' ),
+    BOX_av1C    = FOUR_CHAR_INT( 'a', 'v', '1', 'C' ),
 
     //3GPP atoms
     BOX_samr    = FOUR_CHAR_INT( 's', 'a', 'm', 'r' ),//AMRSampleEntryAtomType
@@ -2649,7 +2655,9 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
 #endif
 #if MP4D_HEVC_SUPPORTED
             {BOX_hvc1, BOX_ATOM},
+            {BOX_hev1, BOX_ATOM},
 #endif
+            {BOX_av01, BOX_ATOM},
             {BOX_udta, BOX_ATOM},
             {BOX_meta, BOX_ATOM},
             {BOX_ilst, BOX_ATOM}
@@ -3069,6 +3077,83 @@ broken_android_meta_hack:
             }
             break;
 #endif  // MP4D_AVC_SUPPORTED
+
+#if MP4D_HEVC_SUPPORTED
+        // local patch: demux-side HEVC. Upstream minimp4 only writes
+        // hvc1/hvcC (muxer); the demuxer ignored them, leaving the track
+        // without dsi. Parse the VisualSampleEntry like avc1 and keep the
+        // RAW HVCCDecoderConfigurationRecord in dsi (the decoder wrapper
+        // parses VPS/SPS/PPS + lengthSizeMinusOne from it).
+        case BOX_hvc1:  // HEVCSampleEntry extends VisualSampleEntry
+        case BOX_hev1:
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+#if MP4D_INFO_SUPPORTED
+            SKIP(6*1 + 2/*Base SampleEntry*/ + 2 + 2 + 4*3);
+            tr->SampleDescription.video.width  = READ(2);
+            tr->SampleDescription.video.height = READ(2);
+            SKIP(4 + 4 + 4 + 2/*frame_count*/ + 32/*compressorname*/ + 2 + 2);
+#else
+            SKIP(78);
+#endif
+            // BOX_hvcC follows as a child box
+            break;
+
+        case BOX_hvcC:  // HEVCDecoderConfigurationRecord() — stored raw
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+            tr->object_type_indication = MP4_OBJECT_TYPE_HEVC;
+            tr->dsi = (unsigned char*)malloc((size_t)box_bytes);
+            tr->dsi_bytes = (unsigned)box_bytes;
+            {
+                unsigned k;
+                for (k = 0; k < tr->dsi_bytes && payload_bytes; k++)
+                {
+                    tr->dsi[k] = (unsigned char)READ(1);
+                }
+                tr->dsi_bytes = k;
+            }
+            break;
+#endif  // MP4D_HEVC_SUPPORTED
+
+        // local patch: demux-side AV1 (AV1SampleEntry + AV1CodecConfigurationBox)
+        case BOX_av01:
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+#if MP4D_INFO_SUPPORTED
+            SKIP(6*1 + 2/*Base SampleEntry*/ + 2 + 2 + 4*3);
+            tr->SampleDescription.video.width  = READ(2);
+            tr->SampleDescription.video.height = READ(2);
+            SKIP(4 + 4 + 4 + 2/*frame_count*/ + 32/*compressorname*/ + 2 + 2);
+#else
+            SKIP(78);
+#endif
+            // BOX_av1C follows as a child box
+            break;
+
+        case BOX_av1C:  // AV1CodecConfigurationRecord() — stored raw
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+            tr->object_type_indication = MP4_OBJECT_TYPE_AV1;
+            tr->dsi = (unsigned char*)malloc((size_t)box_bytes);
+            tr->dsi_bytes = (unsigned)box_bytes;
+            {
+                unsigned k;
+                for (k = 0; k < tr->dsi_bytes && payload_bytes; k++)
+                {
+                    tr->dsi[k] = (unsigned char)READ(1);
+                }
+                tr->dsi_bytes = k;
+            }
+            break;
 
         case OD_ESD:
             {
