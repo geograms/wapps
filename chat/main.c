@@ -1044,6 +1044,8 @@ static void convo_forget(const char *id) {
   }
 }
 static void groups_subscribe(void);   /* group set changed -> refresh the NOSTR filter */
+static void group_tag(const char *gname, char *out, unsigned cap);
+static void group_convo_id(const char *gname, char *out, unsigned cap);
 
 static int convo_known(const char *id) {
   for (int i = 0; i < g_convo_n; i++) if (s_eq(g_convo_ids[i], id)) return 1;
@@ -2651,7 +2653,10 @@ static void do_convo_send(const char *buf) {
     if (net) aprs_send_bulletin_multi(g_sock, g_call, gname, wire, APRS_MAX_MSG_LEN);
     /* Public group post → also store as our own NOSTR note (peers can request
      * it later). Not for 1:1 DMs, which are private. */
-    host_note_emit(text, gname, "");
+    {
+      char tag[24]; group_tag(gname, tag, sizeof(tag));
+      host_note_emit(text, tag, "");
+    }
   } else if (priv) {
     /* Private: Reticulum ONLY — never touch APRS-IS or BLE. */
     int sent = rns_tx_msg(id, wire);
@@ -3484,19 +3489,89 @@ static void groups_subscribe(void);         /* defined below */
  * Dedup on the event id: the same note reaches us as a NOSTR event AND as an
  * APRS/BLE/Reticulum bulletin, and it must appear once.
  */
+/* The NOSTR tag a group's notes carry.
+ *
+ * NOT the bare group name. "NEWS", "DEV" and "HELP" are among the most-used
+ * hashtags on the public relays, so subscribing to t:NEWS subscribed this phone
+ * to the WORLD'S #news firehose — the #NEWS group filled with strangers' spam
+ * within minutes of shipping it (observed on-device: 22 messages, none of them
+ * ours). A group is a geogram room, not a global hashtag, so it gets its own
+ * namespace. Notes are still ordinary kind-1 events any NOSTR client can read;
+ * they just carry #geogram-NEWS rather than #NEWS. */
+#define GROUP_TAG_PREFIX "geogram-"
+static void group_tag(const char *gname, char *out, unsigned cap) {
+  s_cpy(out, GROUP_TAG_PREFIX, cap);
+  s_cat(out, gname, cap);
+}
+
+/* The conversation id for a group NAME, preferring the row we already have.
+ *
+ * A group is seeded as "#NEWS*" (global scope) but the name on the wire is bare
+ * "NEWS". Building "#NEWS" from it created a SECOND, local row alongside the
+ * subscribed global one — two groups with the same name, one of them a ghost. */
+static void group_convo_id(const char *gname, char *out, unsigned cap) {
+  for (int i = 0; i < g_convo_n; i++) {
+    const char *id = g_convo_ids[i];
+    if (!is_group(id)) continue;
+    int k = 1;
+    while (gname[k - 1] && id[k] && id[k] != '*' && id[k] == gname[k - 1]) k++;
+    if (!gname[k - 1] && (id[k] == 0 || id[k] == '*')) {
+      s_cpy(out, id, cap);   /* the existing row, scope marker and all */
+      return;
+    }
+  }
+  s_cpy(out, "#", cap);
+  s_cat(out, gname, cap);
+}
+
 static char g_sub_groups[64] = "";
 static char g_gseen[64][20];      /* event ids already rendered */
 static int  g_gseen_n = 0, g_gseen_w = 0;
 
+/* PERSISTENT, and it has to be.
+ *
+ * hal_lxmf_recv is a cursor over the HOST's durable inbox, and the cursor is
+ * per-engine: it starts at 0 every time an engine starts. Opening the wapp's
+ * page starts a fresh engine, so it re-reads the entire inbox and re-emits every
+ * message that was ever delivered — the same LXMF message appeared five and six
+ * times over (observed on-device). An in-memory seen-ring cannot stop that,
+ * because it dies with the engine that held it. */
 static int gseen_has(const char *id) {
   for (int i = 0; i < g_gseen_n; i++) if (s_eq(g_gseen[i], id)) return 1;
   return 0;
+}
+static void gseen_save(void) {
+  static char buf[64 * 21];
+  buf[0] = 0;
+  for (int i = 0; i < g_gseen_n; i++) {
+    s_cat(buf, g_gseen[i], sizeof(buf));
+    s_cat(buf, ";", sizeof(buf));
+  }
+  hal_kv_set("gseen", 5, buf, s_len(buf));
 }
 static void gseen_add(const char *id) {
   if (!id[0] || gseen_has(id)) return;
   s_cpy(g_gseen[g_gseen_w], id, 20);
   g_gseen_w = (g_gseen_w + 1) % 64;
   if (g_gseen_n < 64) g_gseen_n++;
+  gseen_save();
+}
+static void gseen_load(void) {
+  static char buf[64 * 21];
+  uint32_t n = hal_kv_get("gseen", 5, buf, sizeof(buf) - 1);
+  if (n == 0 || n >= sizeof(buf)) return;
+  buf[n] = 0;
+  char cur[20]; unsigned c = 0;
+  for (uint32_t i = 0; buf[i]; i++) {
+    if (buf[i] == ';') {
+      cur[c] = 0;
+      if (c > 0 && g_gseen_n < 64) { s_cpy(g_gseen[g_gseen_n], cur, 20); g_gseen_n++; }
+      c = 0;
+    } else if (c < sizeof(cur) - 1) {
+      cur[c++] = buf[i];
+    }
+  }
+  g_gseen_w = g_gseen_n % 64;
 }
 
 /* (Re)subscribe to the notes of every group we are in. Called whenever the group
@@ -3516,8 +3591,9 @@ static void groups_subscribe(void) {
     for (int k = 1; id[k] && id[k] != '*' && gj < 6; k++) gname[gj++] = id[k];
     gname[gj] = 0;
     if (!gname[0]) continue;
+    char tag[24]; group_tag(gname, tag, sizeof(tag));
     if (any) s_cat(f, ",", sizeof(f));
-    s_cat(f, "\"", sizeof(f)); s_cat(f, gname, sizeof(f)); s_cat(f, "\"", sizeof(f));
+    s_cat(f, "\"", sizeof(f)); s_cat(f, tag, sizeof(f)); s_cat(f, "\"", sizeof(f));
     any = 1;
   }
   if (!any) return;                       /* no groups -> no subscription */
@@ -3559,7 +3635,12 @@ static void group_note_ingest(const char *evt) {
   /* Our own note is already on screen from the local echo. */
   if (pub[0] && g_pubkey[0] && s_eq_ci(pub, g_pubkey)) return;
 
-  char cid[12]; cid[0] = '#'; s_cpy(cid + 1, topic, sizeof(cid) - 1);
+  /* topic is "geogram-NEWS" on the wire; the group is "NEWS". */
+  const char *pfx = GROUP_TAG_PREFIX;
+  unsigned pl = s_len(pfx);
+  if (s_len(topic) <= pl) return;
+  for (unsigned i = 0; i < pl; i++) if (topic[i] != pfx[i]) return;
+  char cid[16]; group_convo_id(topic + pl, cid, sizeof(cid));
   if (!convo_known(cid)) return;          /* a group we are not in */
   char from[16]; s_cpy(from, pub, 13);    /* short pubkey until a profile lands */
   convo_msg(cid, "in", from, content, "", "", 0, 0, "NOS", id, "", "verified", 0, 0);
@@ -3592,7 +3673,7 @@ static void lxmf_drain(void) {
     gseen_add(hash);
 
     char cid[16];
-    if (title[0] == '#') s_cpy(cid, title, sizeof(cid));
+    if (title[0] == '#') group_convo_id(title + 1, cid, sizeof(cid));
     else s_cpy(cid, LXMF_GROUP, sizeof(cid));
     if (!convo_known(cid)) convo_ensure(cid);   /* auto-join, or nobody sees it */
 
@@ -3658,10 +3739,13 @@ static void groups_seed_defaults(void) {
  * carrying a split-brain inbox forward costs more. */
 static void convo_purge_legacy(void) {
   char f[2];
-  if (hal_kv_get("grponly", 7, f, sizeof(f) - 1) > 0) return;
+  /* Token "2": the first purge ran, but the group subscription then filled
+   * #NEWS with the public hashtag firehose. Those rows are on disk and a code
+   * fix cannot rewrite them, so clear once more. */
+  if (hal_kv_get("grponly", 7, f, sizeof(f) - 1) > 0 && f[0] == '3') return;
   const char *clr = "{\"type\":\"ui.convo.clear\",\"field\":\"conversations\"}";
   hal_msg_send(clr, s_len(clr));
-  hal_kv_set("grponly", 7, "1", 1);
+  hal_kv_set("grponly", 7, "3", 1);
   const char *lg = "[chat] cleared legacy 1:1 rows (groups-only now)";
   hal_log(1, lg, s_len(lg));
 }
@@ -4879,6 +4963,7 @@ void module_init(void) {
     if (id[0]) { s_cpy(g_call, id, sizeof(g_call)); s_cpy(g_idcall, id, sizeof(g_idcall)); }
   }
   sdev_load();     /* restore the seen-devices registry (store-and-forward) */
+  gseen_load();    /* before groups_load: the LXMF cursor restarts at 0 per engine */
   groups_load();   /* restore subscribed groups so the g/ filter is correct now */
   /* Cache our public key (base64url) and the persisted pubkey-beacon pref. */
   { uint32_t pn = hal_identity_pubkey(g_pubkey, sizeof(g_pubkey) - 1);
