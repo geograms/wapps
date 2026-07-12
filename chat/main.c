@@ -926,14 +926,15 @@ static int geo_dup(const char *from, const char *text) {
  * user is alerted with the screen off / app closed) and an in-app card when the
  * page is open. Content-deduped (own ring) so the same message arriving via both
  * APRS-IS and BLE — or a repeated bulletin — pops only once. */
-static int notif_dup(const char *from, const char *text) {
-  unsigned h = sig_hash("ntf", from, text);
-  if (fseen_has(h)) return 1;
-  fseen_add(h);
-  return 0;
-}
 static void notify_msg(const char *title, const char *from, const char *text,
                        const char *body) {
+  /* Chat is no longer the messenger: the Messages wapp raises the notification
+   * for a direct message. Notifying here too gave the user TWO notifications for
+   * one message (observed on-device), and tapping this one would open a wapp
+   * with no conversation screen to show it in. */
+  (void)title; (void)from; (void)text; (void)body;
+  return;
+#if 0
   if (notif_dup(from, text)) return;
   char m[480] = "{\"type\":\"notify\",\"level\":\"info\",\"title\":\"";
   jesc(m, sizeof(m), title);
@@ -941,6 +942,7 @@ static void notify_msg(const char *title, const char *from, const char *text,
   jesc(m, sizeof(m), body);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
+#endif
 }
 
 /* BLE mesh repeater: rebroadcast each received frame once, suppressing any
@@ -2258,7 +2260,6 @@ static void add_infohash(char *text, unsigned sz) {
 static char g_myrelay[RELAY_MAX][72]; static int g_myrelay_n = 0;       /* our backup relays */
 static char g_pollrelay[POLLRELAY_MAX][72]; static int g_pollrelay_n = 0; /* relays peers told us to poll */
 static char g_rly_told[CPRIV_MAX][16]; static int g_rly_told_n = 0;     /* callsigns told our ?RLY (session) */
-static uint64_t g_last_relaypoll = 0;
 
 /* Cold-start 1:1: when sending to a callsign whose key we don't know yet, the
  * message goes out as PUBLIC APRS and we ask the relays to resolve callsign→npub
@@ -2288,11 +2289,6 @@ static void relays_json(char arr[][72], int n, char *out, unsigned cap) {
 }
 
 /* Reverse pubkey lookup: the callsign whose stored npub == [npub], or NULL. */
-static const char *pk_rev(const char *npub) {
-  if (!npub[0]) return 0;
-  for (int i = 0; i < g_pk_n; i++) if (s_eq(g_pk_key[i], npub)) return g_pk_call[i];
-  return 0;
-}
 
 /* Refresh our backup relays from the currently-reachable set (≤RELAY_MAX). */
 static void relay_pick(void) {
@@ -2317,7 +2313,6 @@ static void relay_pick(void) {
  * publishes to the RECIPIENT's set and the receiver polls its OWN set, so the
  * two meet without the one-shot ?RLY announce (which an offline receiver —
  * the whole point of the relay backup — never hears). */
-static char g_rdvrelay[RELAY_MAX][72]; static int g_rdvrelay_n = 0; /* ours */
 
 static int relay_rendezvous(const char *np, char dst[][72], int max) {
   if (!np || !np[0]) return 0;
@@ -2397,80 +2392,8 @@ static int rly_intercept(const char *from, const char *text) {
  * ones we ourselves can reach. A sender that reached us as a relay published to
  * OUR relay, so our own reachable set (+ the local store, always queried by the
  * host) catches a message even before any ?RLY arrives. */
-static void relay_pollset_json(char *out, unsigned cap) {
-  out[0] = '['; out[1] = 0;
-  int first = 1;
-  for (int i = 0; i < g_pollrelay_n; i++) {
-    if (!first) s_cat(out, ",", cap);
-    s_cat(out, "\"", cap); s_cat(out, g_pollrelay[i], cap); s_cat(out, "\"", cap);
-    first = 0;
-  }
-  for (int i = 0; i < g_myrelay_n; i++) {
-    int dup = 0;
-    for (int j = 0; j < g_pollrelay_n; j++) if (s_eq(g_myrelay[i], g_pollrelay[j])) { dup = 1; break; }
-    if (dup) continue;
-    if (!first) s_cat(out, ",", cap);
-    s_cat(out, "\"", cap); s_cat(out, g_myrelay[i], cap); s_cat(out, "\"", cap);
-    first = 0;
-  }
-  /* Our rendezvous set — where peers that know our npub publish for us. */
-  for (int i = 0; i < g_rdvrelay_n; i++) {
-    int dup = 0;
-    for (int j = 0; j < g_pollrelay_n && !dup; j++) if (s_eq(g_rdvrelay[i], g_pollrelay[j])) dup = 1;
-    for (int j = 0; j < g_myrelay_n && !dup; j++) if (s_eq(g_rdvrelay[i], g_myrelay[j])) dup = 1;
-    if (dup) continue;
-    if (!first) s_cat(out, ",", cap);
-    s_cat(out, "\"", cap); s_cat(out, g_rdvrelay[i], cap); s_cat(out, "\"", cap);
-    first = 0;
-  }
-  s_cat(out, "]", cap);
-}
 
-static void relay_drain(void) {
-  static char buf[1200];
-  static char ids[3000];   /* JSON array of up to ~40 event ids per drain pass */
-  int idn = 0; ids[0] = '['; ids[1] = 0;
-  for (int guard = 0; guard < 40; guard++) {
-    uint32_t n = hal_relay_dm_recv(buf, sizeof(buf) - 1);
-    if (n == 0) break;
-    buf[n] = 0;
-    char id[80] = "", from[48] = "", text[700] = "", cs[24] = "";
-    if (!jstr(buf, "id", id, sizeof(id))) continue;
-    jstr(buf, "from", from, sizeof(from));
-    jstr(buf, "text", text, sizeof(text));
-    jstr(buf, "callsign", cs, sizeof(cs));
-    /* Prefer a known callsign for this npub; otherwise fall back to the derived
-     * one the host supplied, and remember the key — so a relay-delivered message
-     * still arrives (and decrypts) from a sender we've never heard, e.g. when
-     * APRS-IS was down and no public copy taught us their callsign. */
-    const char *call = pk_rev(from);
-    if ((!call || !call[0]) && cs[0]) { pk_store(cs, from); call = pk_rev(from); }
-    if (call && call[0]) convo_deliver(call, "in", call, text, text, "RLY");
-    if (idn) s_cat(ids, ",", sizeof(ids));
-    s_cat(ids, "\"", sizeof(ids)); s_cat(ids, id, sizeof(ids)); s_cat(ids, "\"", sizeof(ids));
-    idn++;
-  }
-  s_cat(ids, "]", sizeof(ids));
-  if (idn > 0) {
-    char rj[(POLLRELAY_MAX + 2 * RELAY_MAX) * 80 + 16];
-    relay_pollset_json(rj, sizeof(rj));
-    hal_relay_dm_drop(ids, s_len(ids), rj, s_len(rj)); /* + local store drop, host-side */
-  }
-}
 
-/* Per-tick relay work: drain fetched results every tick (they arrive async after
- * a fetch), and trigger a fresh fetch every RELAY_POLL_INTERVAL. */
-static void relay_tick(void) {
-  relay_drain();
-  uint64_t now = hal_time_epoch();
-  if (now - g_last_relaypoll < RELAY_POLL_INTERVAL) return;
-  g_last_relaypoll = now;
-  if (g_myrelay_n == 0) relay_pick();
-  g_rdvrelay_n = relay_rendezvous(g_pubkey, g_rdvrelay, RELAY_MAX);
-  char rj[(POLLRELAY_MAX + 2 * RELAY_MAX) * 80 + 16];
-  relay_pollset_json(rj, sizeof(rj));
-  hal_relay_dm_fetch(0, rj, s_len(rj)); /* since=0: DROP + rmid-dedup bound the set */
-}
 
 /* A muted, centered status line shown inside conversation [id] (not a real
  * message). Used to tell the user e.g. that a send went out public-only. */
@@ -5032,9 +4955,12 @@ void module_tick(void) {
     }
   }
 
-  /* NOSTR-relay DM backup: poll the pre-agreed relays for messages addressed to
-   * us (store-and-forward) and deliver/dedup/delete them. Drains every tick. */
-  relay_tick();
+  /* 1:1 messaging moved to the Messages wapp (tools.geogram.messages), which
+   * owns the NOSTR kind-4 inbox. This wapp no longer polls the relays for DMs:
+   * doing so delivered a SECOND copy of every message and raised a SECOND
+   * notification for it, and cost a relay round-trip every 60s for a UI that no
+   * longer exists here. relay_tick() is gone with it.
+   */
   /* Cold-start 1:1: drain callsign→npub resolutions and flush queued public
    * sends as encrypted relay backups. */
   resolve_drain();

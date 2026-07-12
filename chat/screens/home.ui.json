@@ -15,60 +15,6 @@
   },
   {
     "$": "screen",
-    "name": "Messages",
-    "icon": "mail",
-    "tip": "Direct messages and group bulletins, organised as conversations.",
-    "children": [
-      {
-        "$": "group",
-        "name": "conversations",
-        "$type": "conversations",
-        "label": "Messages",
-        "children": [
-          {
-            "$": "action",
-            "name": "add_group",
-            "icon": "add",
-            "slot": "list",
-            "tip": "Add a group"
-          },
-          {
-            "$": "action",
-            "name": "new_chat",
-            "icon": "edit",
-            "slot": "list",
-            "tip": "New message"
-          },
-          {
-            "$": "action",
-            "name": "recur",
-            "icon": "repeat",
-            "slot": "room",
-            "tip": "Recurring bulletin"
-          },
-          {
-            "$": "action",
-            "name": "conversations_private",
-            "label": "Private (only internet)",
-            "icon": "lock",
-            "slot": "room",
-            "tip": "Toggle a private conversation — messages go over Reticulum only, encrypted to this contact"
-          },
-          {
-            "$": "field",
-            "name": "include_location",
-            "$type": "bool",
-            "label": "Include my location",
-            "default": false,
-            "localOnly": true,
-            "slot": "menu"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "$": "screen",
     "name": "Geochat",
     "icon": "chat",
     "children": [

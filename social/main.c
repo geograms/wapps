@@ -49,22 +49,6 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
     return 0;
 }
 
-/* Grab the value of the first ["p","<value>"] tag in an event's tags array. */
-static int find_p_tag(const char *evt, char *out, unsigned m) {
-    for (const char *p = evt; *p; p++) {
-        if (p[0] == '[' && p[1] == '"' && p[2] == 'p' && p[3] == '"' && p[4] == ',') {
-            const char *q = p + 5;
-            while (*q == ' ') q++;
-            if (*q != '"') continue;
-            q++;
-            unsigned o = 0;
-            while (*q && *q != '"' && o < m - 1) out[o++] = *q++;
-            out[o] = '\0';
-            return o > 0;
-        }
-    }
-    return 0;
-}
 
 /* Append raw string as JSON string body (escaped). */
 static void json_escape_cat(char *dst, const char *s, unsigned m) {
@@ -114,7 +98,6 @@ static void cat_time_fields(char *dst, const char *ts, unsigned m) {
 static char g_self[80] = "";       /* our x-only pubkey (hex)              */
 static char g_sub_disc[64] = "";   /* discovery (popular >2-like) sub — "All" */
 static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
-static char g_sub_dm[64] = "";     /* kind-4 subscription id               */
 static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
 static char g_sub_post[64] = "";   /* one publication + its replies — host
                                     * deep-link (launcher hero card tap)   */
@@ -124,7 +107,6 @@ static char g_msg[16384];          /* outbound UI message                  */
 static char g_follows[4096];       /* followed pubkeys JSON array          */
 static char g_wot[48128];          /* web-of-trust author set JSON         */
 static char g_feedfilter[52224];   /* built kind-1 WoT filter              */
-static char g_plain[6000];         /* decrypted DM plaintext               */
 static char g_pids[96][66];        /* recent post ids (ring) for stats     */
 static int  g_npids = 0;
 static char g_track[7168];         /* built ids JSON array for tracking    */
@@ -166,17 +148,6 @@ static void subscribe_all(void) {
                                         g_sub_follows, sizeof(g_sub_follows) - 1);
             if (n > 0) g_sub_follows[n] = '\0';
         }
-    }
-    if (!g_sub_dm[0] && g_self[0]) {
-        /* DMs to us (#p=self) AND our own sent DMs (authors=self). */
-        char filter[256];
-        str_copy(filter, "[{\"kinds\":[4],\"#p\":[\"", sizeof(filter));
-        str_cat(filter, g_self, sizeof(filter));
-        str_cat(filter, "\"]},{\"kinds\":[4],\"authors\":[\"", sizeof(filter));
-        str_cat(filter, g_self, sizeof(filter));
-        str_cat(filter, "\"]}]", sizeof(filter));
-        int n = hal_nostr_subscribe(filter, str_len(filter), g_sub_dm, sizeof(g_sub_dm) - 1);
-        if (n > 0) g_sub_dm[n] = '\0';
     }
 }
 
@@ -259,55 +230,8 @@ static void search_profile(const char *evt) {
 }
 
 /* ── Direct messages (kind-4) ────────────────────────────────────────── */
-static void convo_upsert(const char *peer, const char *title, const char *preview) {
-    str_copy(g_msg, "{\"type\":\"ui.convo.upsert\",\"id\":\"", sizeof(g_msg));
-    json_escape_cat(g_msg, peer, sizeof(g_msg));
-    str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
-    json_escape_cat(g_msg, title, sizeof(g_msg));
-    str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
-    json_escape_cat(g_msg, preview, sizeof(g_msg));
-    str_cat(g_msg, "\",\"icon\":\"person\",\"bump\":true}", sizeof(g_msg));
-    send_msg(g_msg);
-}
 
-static void convo_msg(const char *peer, const char *dir, const char *from,
-                      const char *text, const char *mid, const char *ts) {
-    str_copy(g_msg, "{\"type\":\"ui.convo.msg\",\"id\":\"", sizeof(g_msg));
-    json_escape_cat(g_msg, peer, sizeof(g_msg));
-    str_cat(g_msg, "\",\"dir\":\"", sizeof(g_msg)); str_cat(g_msg, dir, sizeof(g_msg));
-    str_cat(g_msg, "\",\"from\":\"", sizeof(g_msg)); json_escape_cat(g_msg, from, sizeof(g_msg));
-    str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg)); json_escape_cat(g_msg, text, sizeof(g_msg));
-    str_cat(g_msg, "\",\"key\":\"\",\"meta\":\"\",\"mid\":\"", sizeof(g_msg));
-    str_cat(g_msg, mid, sizeof(g_msg));
-    str_cat(g_msg, "\",", sizeof(g_msg));
-    cat_time_fields(g_msg, ts, sizeof(g_msg));
-    str_cat(g_msg, "}", sizeof(g_msg));
-    send_msg(g_msg);
-}
 
-static void dm_ingest(const char *evt) {
-    char sender[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
-    json_raw(evt, "pubkey", sender, sizeof(sender));
-    json_raw(evt, "content", content, sizeof(content)); /* NOTE: escaped */
-    json_raw(evt, "created_at", ts, sizeof(ts));
-    json_raw(evt, "id", id, sizeof(id));
-    if (!sender[0] || !content[0]) return;
-
-    int mine = str_eq(sender, g_self);
-    char peer[80];
-    if (mine) { if (!find_p_tag(evt, peer, sizeof(peer))) return; } /* recipient */
-    else str_copy(peer, sender, sizeof(peer));
-
-    /* Decrypt with the OTHER party's pubkey (host uses our profile key). */
-    int pn = hal_nostr_dm_decrypt(peer, str_len(peer), content, str_len(content),
-                                  g_plain, sizeof(g_plain) - 1);
-    if (pn <= 0) return;
-    g_plain[pn] = '\0';
-
-    char title[16]; short12(peer, title);
-    convo_upsert(peer, title, g_plain);
-    convo_msg(peer, mine ? "out" : "in", mine ? "me" : title, g_plain, id, ts);
-}
 
 static void drain(void) {
     for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
@@ -319,11 +243,6 @@ static void drain(void) {
         int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
         g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* a follow's post */
-    }
-    for (int i = 0; i < 20 && g_sub_dm[0]; i++) {
-        int n = hal_nostr_event_recv(g_sub_dm, str_len(g_sub_dm), g_evt, sizeof(g_evt) - 1);
-        if (n <= 0) break;
-        g_evt[n] = '\0'; dm_ingest(g_evt);
     }
     /* Deep-linked publication (host view.open): the post and its replies go
      * into the activity feed like a follow's post — the host is polling the
@@ -685,15 +604,6 @@ int32_t module_handle_event(void) {
             reply_append(target, "", g_self, esc, now);   /* local echo */
             push_one_stat(target); /* bump the parent's reply count now */
         }
-    } else if (str_eq(cmd, "conversations_send")) {
-        char peer[80] = "", text[6000] = "";
-        json_raw(buf, "conversations_convo", peer, sizeof(peer));
-        json_raw(buf, "conversations_input", text, sizeof(text));
-        if (peer[0] && text[0]) {
-            hal_nostr_dm_send(peer, str_len(peer), text, str_len(text));
-            char title[16]; short12(peer, title);
-            convo_msg(peer, "out", "me", text, "", "0"); /* local echo */
-        }
     } else if (str_eq(cmd, "follow_add")) {
         char key[128] = "";
         if (json_raw(buf, "follow_input", key, sizeof(key)) && key[0]) {
@@ -713,16 +623,6 @@ int32_t module_handle_event(void) {
                 g_sub_follows[0] = '\0';
             }
             subscribe_all(); push_follows();
-        }
-    } else if (str_eq(cmd, "dm_send")) {
-        char to[128] = "", text[6000] = "";
-        json_raw(buf, "dm_to", to, sizeof(to));
-        json_raw(buf, "dm_text", text, sizeof(text));
-        if (to[0] && text[0]) {
-            hal_nostr_dm_send(to, str_len(to), text, str_len(text));
-            char title[16]; short12(to, title);   /* local echo → Messages */
-            convo_upsert(to, title, text);
-            convo_msg(to, "out", "me", text, "", "0");
         }
     } else if (str_eq(cmd, "relay_add")) {
         char uri[256] = "";

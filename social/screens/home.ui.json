@@ -5,25 +5,19 @@
     "icon": "home",
     "tip": "Notes from the accounts you follow. Share an update below.",
     "children": [
-      { "$": "field", "name": "activity", "$type": "chat", "hint": "What's happening?" },
-      { "$": "action", "name": "clear_feed", "label": "Clear feed", "icon": "delete",
-        "slot": "menu", "tip": "Remove all posts currently in the feed" }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "Messages",
-    "icon": "mail",
-    "tip": "Encrypted direct messages (kind-4), organised as conversations.",
-    "children": [
       {
-        "$": "group",
-        "name": "conversations",
-        "$type": "conversations",
-        "label": "Messages",
-        "children": [
-          { "$": "action", "name": "new_dm", "icon": "edit", "slot": "list", "tip": "New direct message" }
-        ]
+        "$": "field",
+        "name": "activity",
+        "$type": "chat",
+        "hint": "What's happening?"
+      },
+      {
+        "$": "action",
+        "name": "clear_feed",
+        "label": "Clear feed",
+        "icon": "delete",
+        "slot": "menu",
+        "tip": "Remove all posts currently in the feed"
       }
     ]
   },
@@ -33,24 +27,28 @@
     "icon": "people",
     "tip": "Accounts you follow appear in your Activity feed.",
     "children": [
-      { "$": "action", "name": "follow_add", "label": "Follow an npub", "icon": "person_add", "style": "primary",
-        "tip": "Paste an npub or hex pubkey to follow — their notes appear in Activity." },
-      { "$": "field", "name": "follow_input", "$type": "string", "label": "npub / hex pubkey", "hint": "npub1…", "slot": "menu" },
-      { "$": "field", "name": "follows_list", "$type": "people", "tip": "Who you follow; tap a row to unfollow." }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "New DM",
-    "icon": "edit",
-    "menu": true,
-    "tip": "Start an encrypted direct message (NIP-04).",
-    "children": [
-      { "$": "field", "name": "dm_to", "$type": "string", "label": "To",
-        "hint": "npub1…  or  hex pubkey" },
-      { "$": "field", "name": "dm_text", "$type": "string", "label": "Message",
-        "hint": "Type a message" },
-      { "$": "action", "name": "dm_send", "label": "Send DM", "icon": "send", "style": "primary" }
+      {
+        "$": "action",
+        "name": "follow_add",
+        "label": "Follow an npub",
+        "icon": "person_add",
+        "style": "primary",
+        "tip": "Paste an npub or hex pubkey to follow — their notes appear in Activity."
+      },
+      {
+        "$": "field",
+        "name": "follow_input",
+        "$type": "string",
+        "label": "npub / hex pubkey",
+        "hint": "npub1…",
+        "slot": "menu"
+      },
+      {
+        "$": "field",
+        "name": "follows_list",
+        "$type": "people",
+        "tip": "Who you follow; tap a row to unfollow."
+      }
     ]
   },
   {
@@ -60,10 +58,25 @@
     "menu": true,
     "tip": "Find posts and people across your feed and the connected relays.",
     "children": [
-      { "$": "field", "name": "search_input", "$type": "string", "label": "Search",
-        "hint": "Words, #topic, or a name" },
-      { "$": "action", "name": "search_go", "label": "Search", "icon": "search", "style": "primary" },
-      { "$": "field", "name": "search_results", "$type": "chat" }
+      {
+        "$": "field",
+        "name": "search_input",
+        "$type": "string",
+        "label": "Search",
+        "hint": "Words, #topic, or a name"
+      },
+      {
+        "$": "action",
+        "name": "search_go",
+        "label": "Search",
+        "icon": "search",
+        "style": "primary"
+      },
+      {
+        "$": "field",
+        "name": "search_results",
+        "$type": "chat"
+      }
     ]
   },
   {
@@ -73,13 +86,26 @@
     "menu": true,
     "tip": "Relays this device talks to — internet (wss://), Reticulum (rns://) or this device (local)",
     "children": [
-      { "$": "field", "name": "relays", "$type": "people",
-        "tip": "Tap a relay to remove it. Status shows reachability." },
-      { "$": "field", "name": "new_relay", "$type": "string",
+      {
+        "$": "field",
+        "name": "relays",
+        "$type": "people",
+        "tip": "Tap a relay to remove it. Status shows reachability."
+      },
+      {
+        "$": "field",
+        "name": "new_relay",
+        "$type": "string",
         "label": "Add a relay",
-        "hint": "wss://relay.example.com  |  rns://<id>  |  local" },
-      { "$": "action", "name": "relay_add", "label": "Add relay",
-        "icon": "add", "style": "primary" }
+        "hint": "wss://relay.example.com  |  rns://<id>  |  local"
+      },
+      {
+        "$": "action",
+        "name": "relay_add",
+        "label": "Add relay",
+        "icon": "add",
+        "style": "primary"
+      }
     ]
   }
 ]
