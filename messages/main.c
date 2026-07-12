@@ -11,9 +11,12 @@
  * is not an address — it is a nickname that RESOLVES to a key. That inversion is
  * the whole point of the merge: identity first, transport second.
  *
+ * ONE screen — the conversation list. No tabs: a messenger's job is the thread
+ * you are in, and a second tab listing the same people you can already see is
+ * noise. (Status lives in the overflow menu, not as a tab.)
+ *
  *   Messages  ($type:"conversations")  per-peer encrypted threads
- *   People    ($type:"people")         everyone you can write to
- *   Status    ($type:"log")            where messages went, and what came back
+ *   Status    ($type:"log", menu)      where messages went, and what came back
  *
  * TWO LANES, ONE MESSAGE
  * ----------------------
@@ -336,6 +339,7 @@ static int key_to_hex(const char *in, char *out, unsigned m) {
 #define SEEN_MAX 192          /* dedup ring (rmid / event id)             */
 #define PEER_MAX 64           /* known peers                              */
 #define RELAY_POLL_SEC 60     /* store-and-forward pull cadence           */
+#define NAME_REFRESH_SEC 60   /* kind-0 name lookups: cosmetic, so throttle */
 
 static char g_self[80]      = "";   /* our x-only pubkey (hex)            */
 static char g_sub_dm[64]    = "";   /* kind-4 subscription id             */
@@ -352,6 +356,7 @@ static int  g_peer_unread[PEER_MAX];
 static int  g_peer_n = 0;
 
 static unsigned long long g_last_fetch = 0;
+static unsigned long long g_last_names = 0;
 static int g_sent = 0, g_recv = 0, g_dupes = 0;
 
 static char g_evt[8192];
@@ -535,22 +540,34 @@ static void status_line(const char *s) {
     send_msg(g_msg);
 }
 
-static void push_people(void) {
-    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"people_list\",\"people\":[", sizeof(g_msg));
-    for (int i = 0; i < g_peer_n; i++) {
-        char title[40];
-        peer_title(i, title, sizeof(title));
-        if (i) str_cat(g_msg, ",", sizeof(g_msg));
-        str_cat(g_msg, "{\"key\":\"", sizeof(g_msg));
-        json_escape_cat(g_msg, g_peer[i], sizeof(g_msg));
-        str_cat(g_msg, "\",\"name\":\"", sizeof(g_msg));
-        json_escape_cat(g_msg, title, sizeof(g_msg));
-        str_cat(g_msg, "\",\"sub\":\"", sizeof(g_msg));
-        json_escape_cat(g_msg, g_pcall[i][0] ? g_pcall[i] : g_peer[i], sizeof(g_msg));
-        str_cat(g_msg, "\"}", sizeof(g_msg));
+/* One-time purge of history written by the pre-0.1.2 builds.
+ *
+ * Those builds could not see the dedup envelope on the relay lane (the host
+ * JSON-escapes it), so they stored bubbles with a literal "…" prefix
+ * in front of the text, and stored the same message more than once. That text is
+ * already persisted in the host's ConversationStore and no amount of fixing the
+ * wapp will rewrite it — the only way it leaves the screen is to drop it.
+ *
+ * So: on first run of the fixed build, clear the store once and record that we
+ * did. This throws away conversation history, which is normally a thing you must
+ * never do silently — it is acceptable here ONLY because that history is at most
+ * a few hours of garbled dev-build test messages that never left these devices.
+ * If this wapp ever ships to real users with real history, this migration must
+ * be deleted, not re-run. */
+static void purge_pre_envelope_history(void) {
+    /* Token "3", not "2": the first attempt recorded that it had migrated, but
+     * the headless host silently ignored ui.convo.clear (it only handled it in
+     * the foreground page), so nothing was actually cleared. Devices that stored
+     * "2" therefore still hold the garbled history and must run it again. */
+    char v[8];
+    unsigned n = hal_kv_get("fmt", 3, v, sizeof(v) - 1);
+    if (n > 0 && n < sizeof(v)) {
+        v[n] = '\0';
+        if (str_eq(v, "3")) return; /* already migrated */
     }
-    str_cat(g_msg, "]}", sizeof(g_msg));
-    send_msg(g_msg);
+    send_msg("{\"type\":\"ui.convo.clear\",\"field\":\"conversations\"}");
+    hal_kv_set("fmt", 3, "3", 1);
+    hal_log(1, "[messages] cleared pre-envelope history (one-time)", 48);
 }
 
 /* ── The dedup envelope ──────────────────────────────────────────────────
@@ -776,7 +793,6 @@ static void open_target(const char *raw) {
         json_escape_cat(g_msg, title, sizeof(g_msg));
         str_cat(g_msg, "\",\"icon\":\"person\",\"select\":true}", sizeof(g_msg));
         send_msg(g_msg);
-        push_people();
         return;
     }
     /* Not a key — treat it as a callsign and ask the relay directory. */
@@ -820,7 +836,6 @@ static void resolve_drain(void) {
         str_copy(line, "found ", sizeof(line));
         str_cat(line, call[0] ? call : "key", sizeof(line));
         status_line(line);
-        push_people();
     }
 }
 
@@ -828,6 +843,18 @@ static void resolve_drain(void) {
  * hal_nostr_profile also SUBSCRIBES to the kind-0, so an empty answer now
  * usually becomes a name a few ticks later. */
 static void refresh_names(void) {
+    /* THROTTLED, and deliberately so. hal_nostr_profile does not just read a
+     * cache: calling it also SUBSCRIBES to the peer's kind-0, so calling it every
+     * tick for every peer whose name we lack asks the host to re-fetch a profile
+     * that is not coming, ~40 times a minute, forever. That work lands in the
+     * NOSTR engine isolate (relay + sqlite), where it is invisible to this wapp's
+     * own CPU accounting — the tick looks free while the host burns.
+     *
+     * A name is cosmetic. Once a minute is plenty. */
+    unsigned long long now = hal_time_epoch();
+    if (now - g_last_names < NAME_REFRESH_SEC) return;
+    g_last_names = now;
+
     for (int i = 0; i < g_peer_n; i++) {
         if (g_pname[i][0]) continue;
         char js[512], name[40] = "";
@@ -840,7 +867,6 @@ static void refresh_names(void) {
         char title[40];
         peer_title(i, title, sizeof(title));
         convo_upsert(g_peer[i], title, "", 0); /* retitle the row, don't bump it */
-        push_people();
     }
 }
 
@@ -905,8 +931,8 @@ void module_init(void) {
     hal_log(1, "[messages] init", 15);
     seen_load();
     peers_load();
+    purge_pre_envelope_history();
     lane1_ready(); /* usually too early; module_tick keeps trying */
-    push_people();
     unread_emit();
     status_refresh();
 }
@@ -987,13 +1013,6 @@ void module_handle_event(void) {
         return;
     }
 
-    /* A person tapped in the People list opens their thread. */
-    if (str_eq(cmd, "people_list")) {
-        char key[80] = "";
-        json_raw(buf, "people_list", key, sizeof(key));
-        if (key[0]) open_target(key);
-        return;
-    }
 }
 
 void module_destroy(void) { }

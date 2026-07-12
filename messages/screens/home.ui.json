@@ -19,16 +19,6 @@
   },
   {
     "$": "screen",
-    "name": "People",
-    "icon": "people",
-    "tip": "Everyone you can message. Tap a person to open the conversation.",
-    "children": [
-      { "$": "field", "name": "people_list", "$type": "people",
-        "tip": "Known keys — from your contacts and from anyone you have messaged." }
-    ]
-  },
-  {
-    "$": "screen",
     "name": "Status",
     "icon": "info",
     "menu": true,
