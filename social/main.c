@@ -573,7 +573,8 @@ static void push_profiles(void) {
 int32_t module_init(void) {
     hal_log(6, "[social] up", 11);
     subscribe_all();
-    push_relays();
+    /* The relay list is host-managed now (the "NOSTR on Internet" panel);
+     * pushing our own view of it would fight with the host's. */
     push_follows();
     return 0;
 }

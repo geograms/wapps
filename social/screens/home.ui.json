@@ -155,30 +155,18 @@
   },
   {
     "$": "screen",
-    "name": "Relay servers",
+    "name": "NOSTR on Internet",
     "icon": "cloud",
     "menu": true,
-    "tip": "Relays this device talks to — internet (wss://), Reticulum (rns://) or this device (local)",
+    "tip": "Relays this device talks to, and the Blossom servers its media comes from.",
     "children": [
       {
         "$": "field",
-        "name": "relays",
-        "$type": "people",
-        "tip": "Tap a relay to remove it. Status shows reachability."
-      },
-      {
-        "$": "field",
-        "name": "new_relay",
+        "name": "nostr_internet",
         "$type": "string",
-        "label": "Add a relay",
-        "hint": "wss://relay.example.com  |  rns://<id>  |  local"
-      },
-      {
-        "$": "action",
-        "name": "relay_add",
-        "label": "Add relay",
-        "icon": "add",
-        "style": "primary"
+        "label": "Internet",
+        "readonly": true,
+        "tip": "Managed by the host: relays + Blossom media servers."
       }
     ]
   }
