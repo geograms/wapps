@@ -1,21 +1,56 @@
 {
-  "id":              "tools.geogram.social",
-  "version":         "0.2.25",
-  "kind":            "app",
-  "title":           "Social",
-  "description":     "Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol).",
-  "summary":         "A social feed on the NOSTR protocol: follow people, read and post notes over internet and Reticulum relays; manage your relay list from the top-right menu.",
-  "icon":            "media/icons/social.svg",
-  "color":           "#7B2FF7",
-  "tags":            ["social", "nostr", "relay", "reticulum", "feed"],
-  "entry_ui":        "screens/home.ui.json",
+  "id": "tools.geogram.social",
+  "version": "0.2.28",
+  "kind": "app",
+  "title": "Social",
+  "description": "Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol).",
+  "summary": "A social feed on the NOSTR protocol: read and post notes over internet and Reticulum relays, search posts and people with filters, manage follows and relays from the top-right menu.",
+  "icon": "media/icons/social.svg",
+  "color": "#7B2FF7",
+  "tags": [
+    "social",
+    "nostr",
+    "relay",
+    "reticulum",
+    "feed"
+  ],
+  "entry_ui": "screens/home.ui.json",
   "tick_interval_ms": 1500,
-  "permissions":     ["network"],
-  "platforms":       ["linux", "windows", "macos", "android"],
-  "hardware":        ["N/A", "intel", "arm"],
-  "provides": { "functions": [], "events": [], "variables": [], "functionalities": [], "intents": ["social"] },
+  "permissions": [
+    "network"
+  ],
+  "platforms": [
+    "linux",
+    "windows",
+    "macos",
+    "android"
+  ],
+  "hardware": [
+    "N/A",
+    "intel",
+    "arm"
+  ],
+  "provides": {
+    "functions": [],
+    "events": [],
+    "variables": [],
+    "functionalities": [],
+    "intents": [
+      "social"
+    ]
+  },
   "requires": {
-    "hal":       ["log", "msg", "kv", "time", "crypto", "nostr", "contacts"],
-    "events":    [], "libraries": [], "variables": []
+    "hal": [
+      "log",
+      "msg",
+      "kv",
+      "time",
+      "crypto",
+      "nostr",
+      "contacts"
+    ],
+    "events": [],
+    "libraries": [],
+    "variables": []
   }
 }

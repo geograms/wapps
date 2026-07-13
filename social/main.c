@@ -100,6 +100,11 @@ static char g_sub_disc[64] = "";   /* popular (>2-like) sub — ranking, NOT "Al
 static char g_sub_fire[64] = "";   /* LIVE firehose (spam-gated) — the "All" tab */
 static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
 static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
+static int  g_search_media = 0;    /* "Only posts with media" filter is on   */
+static char g_query[128] = "";     /* what the user typed — results are checked
+                                    * against it here, because a relay that does
+                                    * not speak NIP-50 happily ignores "search"
+                                    * and streams us its whole feed instead.    */
 static char g_sub_post[64] = "";   /* one publication + its replies — host
                                     * deep-link (launcher hero card tap)   */
 static char g_evt[8192];           /* one drained event JSON               */
@@ -225,6 +230,51 @@ static void feed_append_to(const char *evt, int pop, const char *field) {
     send_msg(g_msg);
 }
 
+/* Lowercase ASCII compare: does haystack contain needle, ignoring case? */
+static char lc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+static int contains_ci(const char *hay, const char *needle) {
+    if (!needle[0]) return 1;
+    for (const char *h = hay; *h; h++) {
+        unsigned i = 0;
+        while (needle[i] && h[i] && lc(h[i]) == lc(needle[i])) i++;
+        if (!needle[i]) return 1;
+    }
+    return 0;
+}
+
+/* Does the result actually match what the user typed? A NIP-50 relay answers
+ * with matches; a relay that does not support it answers with EVERYTHING, and
+ * the user then watched a feed of strangers scroll past under their query. */
+static int matches_query(const char *evt) {
+    if (!g_query[0]) return 0;
+    char content[6000] = "";
+    json_raw(evt, "content", content, sizeof(content));
+    return contains_ci(content, g_query);
+}
+
+/* Does the note carry a picture or a video? NOSTR has no media flag — the
+ * media IS the body: an http(s) link ending in an image/video extension, or a
+ * host `file:<sha>.<ext>` token. Used by the search panel's "only with media"
+ * filter. */
+static int has_media(const char *evt) {
+    char content[6000] = "";
+    json_raw(evt, "content", content, sizeof(content));
+    for (const char *p = content; *p; p++) {
+        if (p[0]=='f'&&p[1]=='i'&&p[2]=='l'&&p[3]=='e'&&p[4]==':') return 1;
+        if (p[0]=='.') {
+            const char *e = p + 1;
+            if ((e[0]=='j'&&e[1]=='p'&&e[2]=='g') ||
+                (e[0]=='j'&&e[1]=='p'&&e[2]=='e'&&e[3]=='g') ||
+                (e[0]=='p'&&e[1]=='n'&&e[2]=='g') ||
+                (e[0]=='g'&&e[1]=='i'&&e[2]=='f') ||
+                (e[0]=='w'&&e[1]=='e'&&e[2]=='b'&&e[3]=='p') ||
+                (e[0]=='m'&&e[1]=='p'&&e[2]=='4') ||
+                (e[0]=='w'&&e[1]=='e'&&e[2]=='b'&&e[3]=='m')) return 1;
+        }
+    }
+    return 0;
+}
+
 /* A kind-0 profile hit in search → a "person" result card. The header name +
  * avatar are resolved host-side from the stored profile (by short12 pubkey);
  * tapping the author opens the full profile. */
@@ -281,8 +331,12 @@ static void drain(void) {
         if (n <= 0) break;
         g_evt[n] = '\0';
         char k[8] = ""; json_raw(g_evt, "kind", k, sizeof(k));
+        /* kind-0 content IS the profile JSON (name, about…), so the same
+         * substring test finds people by name. */
+        if (!matches_query(g_evt)) continue;
         if (str_eq(k, "0")) search_profile(g_evt);
-        else feed_append_to(g_evt, 0, "search_results");
+        else if (!g_search_media || has_media(g_evt))
+            feed_append_to(g_evt, 0, "search_results");
     }
 }
 
@@ -589,21 +643,58 @@ int32_t module_handle_event(void) {
         subscribe_all();
     } else if (str_eq(cmd, "clear_feed")) {
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
-    } else if (str_eq(cmd, "search_go")) {
-        /* NIP-50 search: one subscribe fans out to the local FTS index AND every
-         * connected relay. kinds:[0,1] = profiles + notes. */
+    } else if (str_eq(cmd, "search_go") || str_eq(cmd, "search_input_changed") ||
+               str_eq(cmd, "search_kind_changed") ||
+               str_eq(cmd, "search_when_changed") ||
+               str_eq(cmd, "search_media_changed")) {
+        /* Search, run on every keystroke (the host debounces "live" fields) and
+         * shaped by the panel's filters:
+         *
+         *   Find  — Everything (kinds 0+1) / Posts (1) / People (0)
+         *   When  — a "since" bound in epoch seconds
+         *   Media — kept, but applied to the RESULTS (a NIP-50 relay has no
+         *           media flag; g_search_media makes the drain drop posts with
+         *           no image/url in them)
+         *
+         * One subscribe fans out to the local FTS index AND every connected
+         * relay, internet and Reticulum alike. */
         char q[256] = "";
         json_raw(buf, "search_input", q, sizeof(q));
+        char kind[24] = "", when[24] = "", media[8] = "";
+        json_raw(buf, "search_kind", kind, sizeof(kind));
+        json_raw(buf, "search_when", when, sizeof(when));
+        json_raw(buf, "search_media", media, sizeof(media));
+        g_search_media = str_eq(media, "true") || str_eq(media, "1");
+        str_copy(g_query, q, sizeof(g_query));
+
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"search_results\"}");
         if (g_sub_search[0]) {
             hal_nostr_unsubscribe(g_sub_search, str_len(g_sub_search));
             g_sub_search[0] = '\0';
         }
-        if (q[0]) {
-            char filter[400];
-            str_copy(filter, "{\"kinds\":[0,1],\"search\":\"", sizeof(filter));
+        /* One letter is not a search — it is every post on every relay. */
+        if (str_len(q) >= 2) {
+            char filter[480];
+            str_copy(filter, "{\"kinds\":", sizeof(filter));
+            if (str_eq(kind, "posts"))       str_cat(filter, "[1]", sizeof(filter));
+            else if (str_eq(kind, "people")) str_cat(filter, "[0]", sizeof(filter));
+            else                             str_cat(filter, "[0,1]", sizeof(filter));
+            str_cat(filter, ",\"search\":\"", sizeof(filter));
             json_escape_cat(filter, q, sizeof(filter));
-            str_cat(filter, "\",\"limit\":40}", sizeof(filter));
+            str_cat(filter, "\"", sizeof(filter));
+
+            unsigned long long span = 0;
+            if (str_eq(when, "day")) span = 86400ULL;
+            else if (str_eq(when, "week")) span = 7ULL * 86400ULL;
+            else if (str_eq(when, "month")) span = 30ULL * 86400ULL;
+            if (span) {
+                unsigned long long now = hal_time_epoch();
+                unsigned long long since = now > span ? now - span : 0;
+                char sbuf[24]; u64_str(since, sbuf);
+                str_cat(filter, ",\"since\":", sizeof(filter));
+                str_cat(filter, sbuf, sizeof(filter));
+            }
+            str_cat(filter, ",\"limit\":40}", sizeof(filter));
             int m = hal_nostr_subscribe(filter, str_len(filter),
                                         g_sub_search, sizeof(g_sub_search) - 1);
             if (m > 0) g_sub_search[m] = '\0';
