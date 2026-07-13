@@ -1,0 +1,40 @@
+[
+  {
+    "$": "screen",
+    "name": "Indexer",
+    "icon": "hub",
+    "tip": "An indexer answers 'where can I find npub X'. It holds addresses, never other people's posts — a phone book, not a library.",
+    "children": [
+      {
+        "$": "field",
+        "name": "live",
+        "$type": "people",
+        "tip": "Tap 'Volunteer' to cycle: off, only when plugged in, always."
+      },
+      {
+        "$": "action",
+        "name": "volunteer",
+        "label": "Volunteer this device",
+        "icon": "power",
+        "style": "primary",
+        "slot": "toolbar",
+        "tip": "Off, when plugged in, or always. Revoking is as easy as granting."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "The network",
+    "icon": "people",
+    "menu": true,
+    "tip": "Other indexers this device knows — and the leaves it deliberately leaves alone.",
+    "children": [
+      {
+        "$": "field",
+        "name": "network",
+        "$type": "people",
+        "tip": "Leaves announce, get indexed, and are never woken. That asymmetry is why the role exists."
+      }
+    ]
+  }
+]

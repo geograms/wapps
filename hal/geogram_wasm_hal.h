@@ -1153,6 +1153,36 @@ int32_t hal_rns_nodes(const char *filter, uint32_t filter_len,
  * multi-hop, plus this node's own status. Overflow protocol: when the JSON
  * doesn't fit, the NEGATED required size is returned and nothing is written. */
 
+/* ── hal.node — the Indexer role (docs/NOSTR.md) ───────────────────────────
+ * A role a person GRANTS, INSPECTS and REVOKES. An indexer answers "where can I
+ * find npub X"; it holds pointers, never other people's posts.
+ */
+__attribute__((import_module("hal"), import_name("node_status")))
+int32_t hal_node_status(char *out, uint32_t out_cap);
+
+__attribute__((import_module("hal"), import_name("node_peers")))
+int32_t hal_node_peers(char *out, uint32_t out_cap);
+
+__attribute__((import_module("hal"), import_name("node_set_pref")))
+int32_t hal_node_set_pref(const char *kv, uint32_t kv_len);
+
+/* ── hal.archive — the Archiver role ──────────────────────────────────────
+ * Storage volunteered for other people, with a quota the owner chose and a
+ * visible, deletable list of what is being held.
+ */
+__attribute__((import_module("hal"), import_name("archive_status")))
+int32_t hal_archive_status(char *out, uint32_t out_cap);
+
+__attribute__((import_module("hal"), import_name("archive_items")))
+int32_t hal_archive_items(char *out, uint32_t out_cap);
+
+__attribute__((import_module("hal"), import_name("archive_drop")))
+int32_t hal_archive_drop(const char *sha, uint32_t sha_len);
+
+__attribute__((import_module("hal"), import_name("archive_set_pref")))
+int32_t hal_archive_set_pref(const char *kv, uint32_t kv_len);
+
+
 /* Mesh node status JSON
  * ({running,callsign,advertising,class,powered,uptime,neighbors,routes,
  *   beaconsSent,beaconsHeard,revision}). */

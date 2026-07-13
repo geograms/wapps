@@ -1,0 +1,31 @@
+[
+  {
+    "$": "screen",
+    "name": "Archiver",
+    "icon": "archive",
+    "tip": "Storage you volunteered for other people. A quota is a ceiling, not a target — and nothing of yours is ever evicted to make room.",
+    "children": [
+      {
+        "$": "field",
+        "name": "quota",
+        "$type": "people",
+        "tip": "Tap the quota to raise it in 5 GB steps; past 50 GB it returns to zero — revoking must be as easy as granting."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "What's on my disk",
+    "icon": "folder",
+    "menu": true,
+    "tip": "Everything being held for other people. Tap a row to drop it — a person who cannot delete it has not consented to anything.",
+    "children": [
+      {
+        "$": "field",
+        "name": "held",
+        "$type": "people",
+        "tip": "Size, whose it is, and how long we have kept it. Tap to drop."
+      }
+    ]
+  }
+]
