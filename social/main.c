@@ -340,6 +340,24 @@ static void drain(void) {
     }
 }
 
+/* The host identifies a post's author by the first 12 hex chars of the pubkey
+ * (that is what a card's `from` carries). Following someone needs the WHOLE
+ * key, so look it up in the ring of authors we have actually seen. Without
+ * this, tapping Follow did nothing at all: the wapp had no key to follow with,
+ * so no kind-3 was ever published, and the Follows list stayed empty. */
+static int author_for_short(const char *shortkey, char *out, unsigned cap) {
+    out[0] = '\0';
+    if (!shortkey[0]) return 0;
+    for (int i = 0; i < 96; i++) {
+        const char *a = g_authors[i];
+        if (!a[0]) continue;
+        unsigned n = 0;
+        while (shortkey[n] && a[n] && lc(a[n]) == lc(shortkey[n])) n++;
+        if (!shortkey[n]) { str_copy(out, a, cap); return 1; }
+    }
+    return 0;
+}
+
 /* ── Follows list ────────────────────────────────────────────────────── */
 static void push_follows(void) {
     int fn = hal_nostr_follows(g_follows, sizeof(g_follows) - 1);
@@ -720,6 +738,23 @@ int32_t module_handle_event(void) {
             char now[24]; u64_str(hal_time_epoch(), now); /* real ts, not epoch 0 */
             reply_append(target, "", g_self, esc, now);   /* local echo */
             push_one_stat(target); /* bump the parent's reply count now */
+        }
+    } else if (str_eq(cmd, "profile_follow") || str_eq(cmd, "profile_unfollow")) {
+        /* The Follow button on a profile / a post's author. The host sends the
+         * author's 12-char prefix; we follow the full key. */
+        char target[80] = "", full[80] = "";
+        json_raw(buf, "profile_target", target, sizeof(target));
+        if (target[0]) {
+            if (!author_for_short(target, full, sizeof(full)))
+                str_copy(full, target, sizeof(full)); /* already a full key/npub */
+            if (str_eq(cmd, "profile_follow")) hal_nostr_follow(full, str_len(full));
+            else hal_nostr_unfollow(full, str_len(full));
+            if (g_sub_follows[0]) {   /* re-open the follows feed with the new set */
+                hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+                g_sub_follows[0] = '\0';
+            }
+            subscribe_all();
+            push_follows();
         }
     } else if (str_eq(cmd, "follow_add")) {
         char key[128] = "";

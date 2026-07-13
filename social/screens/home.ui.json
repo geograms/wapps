@@ -23,6 +23,21 @@
   },
   {
     "$": "screen",
+    "name": "Notifications",
+    "icon": "bell",
+    "menu": true,
+    "appbar": true,
+    "tip": "Likes, upvotes, replies and reposts of your posts.",
+    "children": [
+      {
+        "$": "field",
+        "name": "notifications",
+        "$type": "chat"
+      }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Search",
     "icon": "search",
     "menu": true,
