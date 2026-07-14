@@ -3,8 +3,16 @@
     "$": "screen",
     "name": "Indexer",
     "icon": "hub",
-    "tip": "An indexer answers 'where can I find npub X'. It hands out addresses and stores no one else's posts — a phone book, not a library.",
+    "tip": "An indexer tells the network which devices hold the posts and files of each npub. It stores addresses, never the content.",
     "children": [
+      {
+        "$": "field",
+        "name": "enabled",
+        "$type": "bool",
+        "label": "Enable",
+        "default": false,
+        "apply": "enabled_changed"
+      },
       {
         "$": "field",
         "name": "dashboard",
@@ -12,44 +20,11 @@
       },
       {
         "$": "field",
-        "name": "volunteer",
-        "$type": "enum",
-        "label": "Volunteer this device",
-        "default": "auto",
-        "apply": "volunteer_changed",
-        "tip": "Off = hold nothing. Plugged in = serve while on a charger and a real uplink. Always = serve regardless. Revoking is exactly as easy as granting.",
-        "children": [
-          {
-            "$": "option",
-            "name": "off",
-            "label": "Off"
-          },
-          {
-            "$": "option",
-            "name": "auto",
-            "label": "Plugged in"
-          },
-          {
-            "$": "option",
-            "name": "always",
-            "label": "Always"
-          }
-        ]
-      },
-      {
-        "$": "field",
-        "name": "topics",
-        "$type": "string",
-        "label": "Topics I index (comma separated)",
-        "hint": "empty = index everything heard",
-        "live": true,
-        "tip": "What you are comfortable indexing. Leave empty to index everything this device hears (wide); name topics to serve only those."
-      },
-      {
-        "$": "field",
-        "name": "maint",
-        "$type": "stats",
-        "tip": "Maintenance. Every tile says exactly what it would remove; tapping it runs exactly that."
+        "name": "plugged",
+        "$type": "bool",
+        "label": "Only when plugged in",
+        "default": true,
+        "apply": "plugged_changed"
       }
     ]
   }

@@ -2,11 +2,10 @@
  * indexer — volunteer this device as an Indexer, and watch what the network
  * does with the offer.
  *
- * An Indexer answers ONE question: "where can I find notes from npub X?". It
- * hands out addresses — signed pointers, ~176 bytes — and never holds other
- * people's posts. A phone book, not a library: one that vanishes costs the
- * network a directory, not an archive, which is exactly what keeps this from
- * sliding back into a few big servers with everything on them.
+ * An Indexer tells the network which devices hold the posts and files of each
+ * npub: signed pointers (~176 bytes) from data hash / author key to the devices
+ * that have them. Addresses, never the content — one that vanishes costs the
+ * network a directory, not an archive.
  *
  * The screen is a DASHBOARD first, because a role nobody can inspect is a role
  * nobody trusts: pointers held, queries answered per hour (with the 48-hour
@@ -67,18 +66,19 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
 
 /* ── Buffers ─────────────────────────────────────────────────────────── */
 static char g_status[4096];
-static char g_maint[4096];
 static char g_msg[24576];
 static char g_spark[1024];
 
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 
-static void set_field(const char *name, const char *value) {
-    str_copy(g_msg, "{\"type\":\"ui.set_field\",\"name\":\"", sizeof(g_msg));
+/* Set a field to a RAW JSON value (true/false/number) — bool switches need a
+ * real bool, not the string "true". */
+static void set_field_raw(const char *name, const char *raw) {
+    str_copy(g_msg, "{\"type\":\"ui.field.set\",\"field\":\"", sizeof(g_msg));
     str_cat(g_msg, name, sizeof(g_msg));
-    str_cat(g_msg, "\",\"value\":\"", sizeof(g_msg));
-    str_cat(g_msg, value, sizeof(g_msg));
-    str_cat(g_msg, "\"}", sizeof(g_msg));
+    str_cat(g_msg, "\",\"value\":", sizeof(g_msg));
+    str_cat(g_msg, raw, sizeof(g_msg));
+    str_cat(g_msg, "}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
@@ -143,23 +143,12 @@ static void push_dashboard(void) {
 
     str_copy(g_msg, "{\"type\":\"ui.stats.set\",\"field\":\"dashboard\",\"tiles\":[", sizeof(g_msg));
 
-    tile("serving", "Serving", on ? "Yes" : "No", "",
-         on ? "Answering 'where can I find npub X' for the network."
-            : "Not serving. Nobody is being sent here.",
-         !on);
-    str_cat(g_msg, ",", sizeof(g_msg));
-    tile("pointers", "Pointers held", pointers, "",
-         "Addresses, never other people's posts.", 0);
-    str_cat(g_msg, ",", sizeof(g_msg));
-    tile("authors", "Authors covered", authors, "",
-         "Published as who-has records: people are sent to you, not a server.", 0);
-    str_cat(g_msg, ",", sizeof(g_msg));
-
-    /* The rate tile carries the 48h sparkline — the shape, not just the size. */
+    /* Queries per hour first: the one number that says whether the offer is
+     * being used. Wide tile, 48h sparkline. */
     {
-        char hint[96];
+        char hint[64];
         str_copy(hint, qLast, sizeof(hint));
-        str_cat(hint, " in the last hour - 48h shape below.", sizeof(hint));
+        str_cat(hint, " in the last hour", sizeof(hint));
         str_cat(g_msg, "{\"id\":\"rate\",\"label\":\"Queries per hour\",\"value\":\"", sizeof(g_msg));
         str_cat(g_msg, qAvg, sizeof(g_msg));
         str_cat(g_msg, "\",\"unit\":\"avg\",\"hint\":\"", sizeof(g_msg));
@@ -169,76 +158,29 @@ static void push_dashboard(void) {
         str_cat(g_msg, "}", sizeof(g_msg));
     }
     str_cat(g_msg, ",", sizeof(g_msg));
-
-    {
-        char v[64];
-        str_copy(v, peers, sizeof(v));
-        char hint[128];
-        str_copy(hint, "+", sizeof(hint));
-        str_cat(hint, applied, sizeof(hint));
-        str_cat(hint, " / -", sizeof(hint));
-        str_cat(hint, removed, sizeof(hint));
-        str_cat(hint, " pointers over ", sizeof(hint));
-        str_cat(hint, exch, sizeof(hint));
-        str_cat(hint, " exchanges. Indexers spread the map so phones never have to.", sizeof(hint));
-        tile("sync", "Synced with", v, "indexers", hint, 0);
-    }
+    tile("pointers", "Pointers", pointers, "", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));
-    {
-        char v[48];
-        str_copy(v, demoted, sizeof(v));
-        char hint[96];
-        str_copy(hint, rejected, sizeof(hint));
-        str_cat(hint, " stores refused. A provider that will not serve stops being handed out.", sizeof(hint));
-        tile("hygiene", "Dead pointers pruned", v, "", hint, 0);
-    }
+    tile("authors", "Authors", authors, "", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));
-    {
-        char hint[128];
-        str_copy(hint, peersKnown, sizeof(hint));
-        str_cat(hint, " peers heard in the last hour. Counts, never lists - "
-                      "there could be millions.", sizeof(hint));
-        tile("network", "Indexers known", ixKnown, "", hint, 0);
-    }
+    tile("sync", "Synced with", peers, "indexers", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));
-    tile("indexing", "Indexing",
-         topics[0] ? "Topics" : "Everything",
-         "",
-         topics[0]
-             ? "Only the topics named below."
-             : "No topics named: this device indexes everything it hears.",
-         0);
-    (void)wide;
+    tile("hygiene", "Pruned", demoted, "", "", 0);
+    str_cat(g_msg, ",", sizeof(g_msg));
+    tile("network", "Indexers", ixKnown, "", "", 0);
 
     str_cat(g_msg, "]}", sizeof(g_msg));
     send_msg(g_msg);
 
-    set_field("volunteer", vol);
-    /* topics is a LIVE text field: pushing it on every tick would stomp the
-     * user's typing mid-word. Seed it once, then leave it alone — the host is
-     * the source of truth only until the person starts editing. */
-    static int topics_seeded = 0;
-    if (!topics_seeded) {
-        topics_seeded = 1;
-        if (topics[0]) set_field("topics", topics);
-    }
-}
-
-/* Maintenance tiles come pre-previewed from the host — what you see is what
- * runs. Forwarded verbatim. */
-static void push_maint(void) {
-    int n = hal_node_maint(g_maint, sizeof(g_maint) - 1);
-    if (n <= 0) return;
-    g_maint[n] = '\0';
-    str_copy(g_msg, "{\"type\":\"ui.stats.set\",\"field\":\"maint\",\"tiles\":", sizeof(g_msg));
-    str_cat(g_msg, g_maint, sizeof(g_msg));
-    str_cat(g_msg, "}", sizeof(g_msg));
-    send_msg(g_msg);
+    /* The two switches reflect the real state: enabled = not off;
+     * plugged-only = the auto mode. */
+    set_field_raw("enabled", str_eq(vol, "off") ? "false" : "true");
+    set_field_raw("plugged", str_eq(vol, "always") ? "false" : "true");
+    (void)on; (void)wide; (void)topics; (void)applied; (void)removed;
+    (void)exch; (void)rejected; (void)peersKnown;
 }
 
 static void refresh(void) {
     push_dashboard();
-    push_maint();
 }
 
 /* ── Module entry points ─────────────────────────────────────────────── */
@@ -264,33 +206,20 @@ int32_t module_handle_event(void) {
 
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
         refresh();
-    } else if (str_eq(cmd, "volunteer_changed")) {
-        /* The person picked a state; set exactly that. No cycling: a control
-         * you cannot predict before you touch it is a trap. */
-        char vol[16] = "";
-        if (json_raw(buf, "volunteer", vol, sizeof(vol)) && vol[0]) {
-            char kv[32];
-            str_copy(kv, "volunteer=", sizeof(kv));
-            str_cat(kv, vol, sizeof(kv));
-            hal_node_set_pref(kv, str_len(kv));
-            refresh();
-        }
-    } else if (str_eq(cmd, "topics_changed")) {
-        char t[256] = "";
-        json_raw(buf, "topics", t, sizeof(t)); /* empty = wide, and that's valid */
-        char kv[300];
-        str_copy(kv, "topics=", sizeof(kv));
-        str_cat(kv, t, sizeof(kv));
+    } else if (str_eq(cmd, "enabled_changed") || str_eq(cmd, "plugged_changed")) {
+        /* Two switches map onto the three states: off / auto (plugged-only) /
+         * always. Read both, set exactly what they mean. */
+        char en[8] = "", pl[8] = "";
+        json_raw(buf, "enabled", en, sizeof(en));
+        json_raw(buf, "plugged", pl, sizeof(pl));
+        const char *state = str_eq(en, "true")
+                                ? (str_eq(pl, "false") ? "always" : "auto")
+                                : "off";
+        char kv[32];
+        str_copy(kv, "volunteer=", sizeof(kv));
+        str_cat(kv, state, sizeof(kv));
         hal_node_set_pref(kv, str_len(kv));
         refresh();
-    } else if (str_eq(cmd, "maint_tap")) {
-        /* A previewed sweep. Ids starting with '#' are statistics — information,
-         * not buttons. */
-        char id[96] = "";
-        if (json_raw(buf, "maint_id", id, sizeof(id)) && id[0] && id[0] != '#') {
-            hal_node_sweep(id, str_len(id));
-            refresh();
-        }
     }
     return 0;
 }
