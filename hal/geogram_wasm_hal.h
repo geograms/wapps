@@ -262,6 +262,53 @@ uint32_t hal_folder_swarm(const char *folder_id, uint32_t id_len,
 __attribute__((import_module("hal"), import_name("folder_pin")))
 uint32_t hal_folder_pin(const char *folder_id, uint32_t id_len, int32_t on);
 
+/* ── The listing: data/meta.json (aurora/docs/torrents.md) ──────────────────
+ * A shared folder describes itself with ordinary files inside it:
+ *   data/meta.json     title, desc, cat, tags, adult, + the media names
+ *   data/cover.jpg     poster        data/banner.jpg   wide header
+ *   data/trailer.webm  clip          data/media1..10.{png,jpg,webm}  gallery
+ * It TRAVELS with the content (data/ is published like any other file) and a
+ * human can write it with a text editor. The signed op-log mirrors the fields,
+ * so a stranger reads the title and filters by category WITHOUT downloading.
+ */
+
+/* The listing of a folder we own → the meta.json shape:
+ * {"title","desc","cat","tags":[..],"adult",cover,banner,trailer,gallery:[..]}
+ * Empty object when the folder has no listing (the normal case). */
+__attribute__((import_module("hal"), import_name("folder_meta_get")))
+uint32_t hal_folder_meta_get(const char *folder_id, uint32_t id_len,
+                             char *out_buf, uint32_t out_len);
+
+/* Write the listing (same JSON). Rewrites data/meta.json and rescans, which
+ * publishes it and mirrors title/desc/cat/tags/adult into the signed op-log.
+ * Every limit (title 50, desc 200, 10 tags, the fixed category set) is enforced
+ * host-side, so a wapp cannot publish a listing that other clients will refuse.
+ * Returns 1 when accepted. */
+__attribute__((import_module("hal"), import_name("folder_meta_set")))
+uint32_t hal_folder_meta_set(const char *folder_id, uint32_t id_len,
+                             const char *json, uint32_t json_len);
+
+/* Copy a picked file into data/ under its FIXED name (cover.jpg, trailer.webm,
+ * media3.png …) — the name is what tells a client what the file is, and the
+ * extension whether a gallery item is a still or a clip.
+ * arg = "slot\tpath", slot = cover | banner | trailer | gallery.
+ * Each media file is capped at 30MB: data/ is what a browsing client pulls
+ * BEFORE deciding to download the torrent, so it has to stay cheap.
+ * Asynchronous; 1 = started (a refusal is reported in the host log). */
+__attribute__((import_module("hal"), import_name("folder_set_media")))
+uint32_t hal_folder_set_media(const char *folder_id, uint32_t id_len,
+                              const char *arg, uint32_t arg_len);
+
+/* The listing's artwork as media TOKENS the host can render:
+ *   {"cover":{"token":"file:<sha>.jpg","have":true,"size":n}, "banner":{..},
+ *    "trailer":{..}, "gallery":[{..},..]}
+ * Bytes we do not hold are fetched in the background — data/ is small, so the
+ * cover of a torrent you have NOT downloaded still fills in. Feed the whole JSON
+ * to a `$type:"gallery"` field with ui.field.set and the host draws it. */
+__attribute__((import_module("hal"), import_name("folder_media")))
+uint32_t hal_folder_media(const char *folder_id, uint32_t id_len,
+                          char *out_buf, uint32_t out_len);
+
 /* Open ONE file of a folder with whatever the system uses to view that type —
  * the gallery for a photo, a reader for a PDF, the installer for an APK.
  * arg = "<sha256hex>\t<name>" (the name carries the extension the OS routes on).

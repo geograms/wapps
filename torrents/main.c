@@ -157,6 +157,37 @@ static void log_line(const char *field, const char *text) {
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
+/* Prefill a host scalar field (the Edit-listing inputs). */
+static void field_set(const char *field, const char *value) {
+  char m[500] = "{\"type\":\"ui.field.set\",\"field\":\"";
+  s_cat(m, field, sizeof(m));
+  s_cat(m, "\",\"value\":\"", sizeof(m));
+  jesc(m, sizeof(m), value);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Copy the raw `"key":[ ... ]` array out of a JSON object, brackets included
+ * ("[]" when absent). Used to carry the gallery through a save untouched: the
+ * Edit screen changes WORDS, and it must not silently drop the artwork. */
+static void copy_array(const char *json, const char *key, char *out, unsigned m) {
+  s_cpy(out, "[]", m);
+  char pat[32]; pat[0] = '"'; pat[1] = 0;
+  s_cat(pat, key, sizeof(pat));
+  s_cat(pat, "\":[", sizeof(pat));
+  const char *p = json;
+  while (*p && !s_pre(p, pat)) p++;
+  if (!*p) return;
+  p += s_len(pat) - 1;             /* land on '[' */
+  unsigned i = 0;
+  while (*p && i < m - 1) {
+    out[i++] = *p;
+    if (*p == ']') break;
+    p++;
+  }
+  out[i] = 0;
+}
+
 static void prompt_copy(const char *title, const char *body, const char *copyval) {
   char m[900] = "{\"type\":\"ui.prompt\",\"id\":\"noop\",\"title\":\"";
   jesc(m, sizeof(m), title);
@@ -645,6 +676,241 @@ static void render_swarm(void) {
   }
 }
 
+/* ── the listing: data/meta.json ─────────────────────────────────────────────
+ *
+ * What a torrent SAYS IT IS — a title, one category, a description, tags and its
+ * artwork. It lives as ordinary files inside the shared folder (data/meta.json +
+ * data/cover.jpg …), so it travels with the content and can be written by hand.
+ * The signed op-log mirrors the fields, which is why the panel below can be
+ * filled in for a torrent nobody on this device has downloaded.
+ */
+
+/* Which media slot a picker result is for (0 = none in flight). */
+static char g_pick_slot[16] = "";
+
+static void render_listing(void) {
+  log_clear("listing_log");
+  if (!g_cur[0]) {
+    log_line("listing_log", "Open a torrent first.");
+    return;
+  }
+
+  /* The artwork: hand the tokens straight to the host's gallery field. The wapp
+   * never touches the bytes — it cannot, and it does not need to. */
+  uint32_t n = hal_folder_media(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+  {
+    char m[8192] = "{\"type\":\"ui.field.set\",\"field\":\"listing_media\",\"value\":\"";
+    jesc(m, sizeof(m), g_json);
+    s_cat(m, "\"}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+  }
+
+  /* The words: from the signed op-log (folder_stats), so they are here even for
+   * a torrent we have not downloaded. */
+  char st[4096];
+  n = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
+  st[n] = 0;
+
+  char title[80], cat[32], tags[200], desc[260];
+  jstr(st, "title", title, sizeof(title));
+  jstr(st, "cat", cat, sizeof(cat));
+  jstr(st, "tags", tags, sizeof(tags));
+  jstr(st, "desc", desc, sizeof(desc));
+  int adult = jbool_def(st, "adult", 0);
+
+  if (!title[0] && !cat[0] && !desc[0]) {
+    log_line("listing_log", "This torrent carries no listing.");
+    log_line("listing_log",
+             "A publisher describes it with data/meta.json inside the folder - "
+             "a title, one category, a description and artwork.");
+    if (jbool_def(st, "owned", 0))
+      log_line("listing_log", "It is yours: tap \"Edit the listing\".");
+    return;
+  }
+
+  if (title[0]) log_line("listing_log", title);
+  if (cat[0]) {
+    char l[80] = "Category: ";
+    s_cat(l, cat, sizeof(l));
+    if (adult) s_cat(l, "  (+18)", sizeof(l));
+    log_line("listing_log", l);
+  } else if (adult) {
+    log_line("listing_log", "+18");
+  }
+  if (tags[0]) {
+    char l[240] = "Tags: ";
+    s_cat(l, tags, sizeof(l));
+    log_line("listing_log", l);
+  }
+  if (desc[0]) log_line("listing_log", desc);
+}
+
+/* Load data/meta.json into the Edit screen and open it. */
+static void open_listing_edit(void) {
+  if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+
+  char st[4096];
+  uint32_t n = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
+  st[n] = 0;
+  if (!jbool_def(st, "owned", 0)) {
+    notify("info", "Only the publisher can edit this listing");
+    return;
+  }
+
+  n = hal_folder_meta_get(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+
+  char title[80], desc[260], cat[32];
+  jstr(g_json, "title", title, sizeof(title));
+  jstr(g_json, "desc", desc, sizeof(desc));
+  jstr(g_json, "cat", cat, sizeof(cat));
+  field_set("m_title", title);
+  field_set("m_desc", desc);
+  field_set("m_cat", cat[0] ? cat : "other");
+
+  /* tags arrive as a JSON array; the field is a comma-separated line. */
+  {
+    char flat[200] = "";
+    const char *p = g_json;
+    while (*p && !s_pre(p, "\"tags\":[")) p++;
+    if (*p) {
+      p += 8;
+      int first = 1;
+      while (*p && *p != ']') {
+        if (*p == '"') {
+          char t[32]; unsigned i = 0;
+          p++;
+          while (*p && *p != '"' && i < sizeof(t) - 1) t[i++] = *p++;
+          t[i] = 0;
+          if (t[0]) {
+            if (!first) s_cat(flat, ", ", sizeof(flat));
+            s_cat(flat, t, sizeof(flat));
+            first = 0;
+          }
+        }
+        if (*p) p++;
+      }
+    }
+    field_set("m_tags", flat);
+  }
+  { const char *m = jbool_def(g_json, "adult", 0)
+        ? "{\"type\":\"ui.field.set\",\"field\":\"m_adult\",\"value\":true}"
+        : "{\"type\":\"ui.field.set\",\"field\":\"m_adult\",\"value\":false}";
+    hal_msg_send(m, s_len(m)); }
+
+  /* What artwork is already there. */
+  log_clear("m_log");
+  {
+    char cover[64], banner[64], trailer[64];
+    jstr(g_json, "cover", cover, sizeof(cover));
+    jstr(g_json, "banner", banner, sizeof(banner));
+    jstr(g_json, "trailer", trailer, sizeof(trailer));
+    char l[200];
+    s_cpy(l, "Cover: ", sizeof(l));
+    s_cat(l, cover[0] ? cover : "none", sizeof(l));
+    log_line("m_log", l);
+    s_cpy(l, "Banner: ", sizeof(l));
+    s_cat(l, banner[0] ? banner : "none", sizeof(l));
+    log_line("m_log", l);
+    s_cpy(l, "Trailer: ", sizeof(l));
+    s_cat(l, trailer[0] ? trailer : "none", sizeof(l));
+    log_line("m_log", l);
+    /* count the gallery entries */
+    int g = 0;
+    const char *p = g_json;
+    while (*p && !s_pre(p, "\"gallery\":[")) p++;
+    if (*p) {
+      p += 11;
+      while (*p && *p != ']') { if (*p == '"') { g++; while (*p && *(++p) != '"') {} } if (*p) p++; }
+      g = (g + 1) / 2; /* a quoted name has two quotes */
+    }
+    char nb[12]; u_itoa((unsigned)g, nb);
+    s_cpy(l, "Gallery: ", sizeof(l));
+    s_cat(l, nb, sizeof(l));
+    s_cat(l, " of 10", sizeof(l));
+    log_line("m_log", l);
+    log_line("m_log",
+             "Each item up to 30MB. The listing is what people look at before "
+             "they download, so it has to stay cheap to fetch.");
+  }
+
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Edit listing\"}";
+  hal_msg_send(m, s_len(m));
+}
+
+/* Save the Edit screen back into data/meta.json (the host clamps every limit and
+ * republishes the signed listing). */
+static void save_listing(const char *buf) {
+  if (!g_cur[0]) return;
+  char title[120], desc[400], cat[32], tags[240];
+  jstr(buf, "m_title", title, sizeof(title));
+  jstr(buf, "m_desc", desc, sizeof(desc));
+  jstr(buf, "m_cat", cat, sizeof(cat));
+  jstr(buf, "m_tags", tags, sizeof(tags));
+  int adult = jbool_def(buf, "m_adult", 0);
+
+  /* Keep the artwork the listing already names — this screen edits words only. */
+  uint32_t n = hal_folder_meta_get(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+  char cover[64], banner[64], trailer[64];
+  jstr(g_json, "cover", cover, sizeof(cover));
+  jstr(g_json, "banner", banner, sizeof(banner));
+  jstr(g_json, "trailer", trailer, sizeof(trailer));
+
+  char j[2048] = "{\"title\":\"";
+  jesc(j, sizeof(j), title);
+  s_cat(j, "\",\"desc\":\"", sizeof(j));
+  jesc(j, sizeof(j), desc);
+  s_cat(j, "\",\"cat\":\"", sizeof(j));
+  jesc(j, sizeof(j), cat[0] ? cat : "other");
+  s_cat(j, "\",\"adult\":", sizeof(j));
+  s_cat(j, adult ? "true" : "false", sizeof(j));
+  s_cat(j, ",\"tags\":[", sizeof(j));
+  {
+    /* split the comma/space separated line into a JSON array */
+    int first = 1;
+    const char *p = tags;
+    while (*p) {
+      while (*p == ' ' || *p == ',') p++;
+      if (!*p) break;
+      char t[32]; unsigned i = 0;
+      while (*p && *p != ',' && i < sizeof(t) - 1) t[i++] = *p++;
+      while (i > 0 && t[i - 1] == ' ') i--;   /* trim */
+      t[i] = 0;
+      if (t[0]) {
+        if (!first) s_cat(j, ",", sizeof(j));
+        s_cat(j, "\"", sizeof(j));
+        jesc(j, sizeof(j), t);
+        s_cat(j, "\"", sizeof(j));
+        first = 0;
+      }
+    }
+  }
+  s_cat(j, "]", sizeof(j));
+  if (cover[0])   { s_cat(j, ",\"cover\":\"", sizeof(j));   jesc(j, sizeof(j), cover);   s_cat(j, "\"", sizeof(j)); }
+  if (banner[0])  { s_cat(j, ",\"banner\":\"", sizeof(j));  jesc(j, sizeof(j), banner);  s_cat(j, "\"", sizeof(j)); }
+  if (trailer[0]) { s_cat(j, ",\"trailer\":\"", sizeof(j)); jesc(j, sizeof(j), trailer); s_cat(j, "\"", sizeof(j)); }
+  /* Carry the gallery through UNTOUCHED. The host writes exactly the JSON it is
+   * given, so omitting it here would quietly delete every screenshot the moment
+   * somebody fixed a typo in the title. */
+  {
+    char gal[600];
+    copy_array(g_json, "gallery", gal, sizeof(gal));
+    if (!s_eq(gal, "[]")) {
+      s_cat(j, ",\"gallery\":", sizeof(j));
+      s_cat(j, gal, sizeof(j));
+    }
+  }
+  s_cat(j, "}", sizeof(j));
+
+  hal_folder_meta_set(g_cur, s_len(g_cur), j, s_len(j));
+  stats_cache_clear();
+  notify("info", "Listing published");
+  const char *m = "{\"type\":\"ui.screen.close\"}";
+  hal_msg_send(m, s_len(m));
+}
+
 /* ── info + settings panels ──────────────────────────────────────────────── */
 static void render_info(void) {
   log_clear("info_log");
@@ -828,11 +1094,31 @@ void module_handle_event(void) {
   jstr(buf, "command", cmd, sizeof(cmd));
   jstr(buf, "type", typ, sizeof(typ));
 
-  /* The picker came back: a directory becomes a torrent. */
+  /* The picker came back: a directory becomes a torrent — unless we asked for a
+   * piece of artwork, in which case it is a FILE for a listing slot. */
   if (s_eq(typ, "fs.picked")) {
     char path[400] = "";
     jstr(buf, "path", path, sizeof(path));
     if (!path[0]) return;
+
+    if (g_pick_slot[0]) {
+      char slot[16];
+      s_cpy(slot, g_pick_slot, sizeof(slot));
+      g_pick_slot[0] = 0;
+      if (jbool_def(buf, "dir", 0)) {
+        notify("info", "Pick a file, not a folder");
+        return;
+      }
+      char a[440] = "";
+      s_cat(a, slot, sizeof(a));
+      s_cat(a, "\t", sizeof(a));
+      s_cat(a, path, sizeof(a));
+      hal_folder_set_media(g_cur, s_len(g_cur), a, s_len(a));
+      stats_cache_clear();
+      notify("info", "Added to the listing");
+      return;
+    }
+
     if (!jbool_def(buf, "dir", 0)) {
       notify("info", "Pick a folder: a torrent is a folder, not a single file");
       return;
@@ -950,6 +1236,20 @@ void module_handle_event(void) {
     else notify("info", "Open a torrent first");
   } else if (s_eq(cmd, "swarm_refresh")) {
     render_swarm();
+  } else if (s_eq(cmd, "listing_edit")) {
+    open_listing_edit();
+  } else if (s_eq(cmd, "m_save")) {
+    save_listing(buf);
+    render_listing();
+  } else if (s_eq(cmd, "m_cover") || s_eq(cmd, "m_banner") ||
+             s_eq(cmd, "m_trailer") || s_eq(cmd, "m_gallery")) {
+    if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+    /* the action name minus the "m_" prefix IS the slot, except the gallery */
+    s_cpy(g_pick_slot, s_eq(cmd, "m_gallery") ? "gallery" : cmd + 2,
+          sizeof(g_pick_slot));
+    const char *m = "{\"type\":\"fs.pick\",\"mode\":\"file\","
+                    "\"title\":\"Pick an image or a short clip (max 30MB)\"}";
+    hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "copy_link")) {
     do_copy_link();
   } else if (s_eq(cmd, "copy_id")) {
@@ -980,6 +1280,7 @@ void module_handle_event(void) {
       render_open();
       render_swarm();   /* the swarm panel is about the torrent that is open */
       render_info();
+      render_listing(); /* title, category, artwork — even if we hold no bytes */
     } else if (s_pre(id, "cd:")) {
       s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
       s_cat(g_cur_path, "/", sizeof(g_cur_path));

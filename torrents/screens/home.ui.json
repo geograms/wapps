@@ -24,6 +24,61 @@
   },
   {
     "$": "screen",
+    "name": "Listing",
+    "menu": true,
+    "appbar": true,
+    "icon": "info",
+    "tip": "What this torrent says it is: a title, a category, a description and its artwork. It is read from data/meta.json inside the shared folder, so it travels with the content - and the signed listing is fetched BEFORE any bytes, which is why you can read a torrent without downloading it.",
+    "children": [
+      { "$": "action", "name": "listing_edit", "label": "Edit the listing", "icon": "edit", "style": "primary", "tip": "Only the publisher (you, if you hold the folder key) can change this." },
+      { "$": "field", "name": "listing_media", "$type": "gallery", "tip": "Cover, banner, trailer and screenshots. Tap one to open it full-screen; a clip plays where it sits." },
+      { "$": "field", "name": "listing_log", "$type": "log", "label": "About", "tip": "Title, category, tags and description." }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Edit listing",
+    "menu": true,
+    "icon": "edit",
+    "tip": "Describe what you are sharing. This writes data/meta.json inside the folder - an ordinary file that travels with the content and that you can also edit by hand with a text editor.",
+    "children": [
+      { "$": "field", "name": "m_title", "$type": "string", "label": "Title", "max": 50, "hint": "what the content is called", "tip": "Up to 50 characters. This is the name of the CONTENT; the folder keeps its own directory name." },
+      { "$": "field", "name": "m_desc", "$type": "string", "label": "Description", "max": 200, "multiline": true, "lines": 4, "hint": "what is in here", "tip": "Up to 200 characters." },
+      {
+        "$": "field", "name": "m_cat", "$type": "enum", "label": "Category", "default": "other",
+        "tip": "One category, and it is mandatory - it is what makes a torrent findable. An adult film is still a film: use the +18 switch for that, not a category.",
+        "children": [
+          { "$": "option", "name": "film", "label": "Film" },
+          { "$": "option", "name": "series", "label": "Series / TV" },
+          { "$": "option", "name": "anime", "label": "Anime" },
+          { "$": "option", "name": "documentary", "label": "Documentary" },
+          { "$": "option", "name": "music", "label": "Music" },
+          { "$": "option", "name": "audiobook", "label": "Audiobook" },
+          { "$": "option", "name": "book", "label": "Book" },
+          { "$": "option", "name": "comic", "label": "Comic" },
+          { "$": "option", "name": "manga", "label": "Manga" },
+          { "$": "option", "name": "magazine", "label": "Magazine" },
+          { "$": "option", "name": "game", "label": "Game" },
+          { "$": "option", "name": "software", "label": "Software" },
+          { "$": "option", "name": "course", "label": "Course" },
+          { "$": "option", "name": "podcast", "label": "Podcast" },
+          { "$": "option", "name": "photo", "label": "Photos" },
+          { "$": "option", "name": "dataset", "label": "Dataset" },
+          { "$": "option", "name": "other", "label": "Other" }
+        ]
+      },
+      { "$": "field", "name": "m_tags", "$type": "string", "label": "Tags", "max": 120, "hint": "e.g. 1080p, scifi, open", "tip": "Up to 10, comma separated." },
+      { "$": "field", "name": "m_adult", "$type": "bool", "label": "+18 (adult)", "default": false, "tip": "A flag, not a category - so a client can hide adult content across every category, and an adult film is still found under 'film'." },
+      { "$": "action", "name": "m_save", "label": "Save the listing", "icon": "save", "style": "primary", "tip": "Writes data/meta.json and publishes the signed listing." },
+      { "$": "action", "name": "m_cover", "label": "Cover image", "icon": "image", "style": "secondary", "tip": "Poster / box art. Up to 30MB - the listing is what people look at BEFORE downloading, so it must stay cheap to fetch." },
+      { "$": "action", "name": "m_banner", "label": "Banner image", "icon": "image", "style": "secondary", "tip": "A wide header image. Up to 30MB." },
+      { "$": "action", "name": "m_trailer", "label": "Trailer (webm)", "icon": "movie", "style": "secondary", "tip": "A short clip. Up to 30MB." },
+      { "$": "action", "name": "m_gallery", "label": "Add a screenshot / clip", "icon": "add", "style": "secondary", "tip": "Up to 10 items, images or short clips, each up to 30MB. They are stored as media1, media2, ... in order." },
+      { "$": "field", "name": "m_log", "$type": "log", "label": "Artwork", "tip": "What the listing currently carries." }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Swarm",
     "menu": true,
     "icon": "hub",
