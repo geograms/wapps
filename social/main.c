@@ -107,7 +107,11 @@ static char g_query[128] = "";     /* what the user typed — results are checke
                                     * and streams us its whole feed instead.    */
 static char g_sub_post[64] = "";   /* one publication + its replies — host
                                     * deep-link (launcher hero card tap)   */
-static char g_evt[8192];           /* one drained event JSON               */
+static char g_evt[65536];          /* one drained event JSON (see below)   */
+/* 8192 was too small: the host pops an event off the queue, finds it does not
+ * fit, and drops it — silently and permanently. A NOSTR note with tags, an imeta
+ * and a signature routinely runs past 8 KB, so most of the firehose died right
+ * here while the gate reported it as "kept". */
 static char g_relays[8192];        /* hal_nostr_relays output              */
 static char g_msg[16384];          /* outbound UI message                  */
 static char g_follows[4096];       /* followed pubkeys JSON array          */
@@ -141,7 +145,11 @@ static void subscribe_all(void) {
      * likes, so the newest thing on screen was routinely an hour or two old. A
      * feed for discovering people you don't follow yet has to be live, or it is
      * not doing the job. */
-    if (!g_sub_fire[0]) {
+    /* ONLY WITH A UI. A firehose has no reason to exist when nobody is looking:
+     * with the screen off we want the people you follow, your replies and your
+     * messages — not the public feed of strangers. The host refuses it to a
+     * headless engine anyway; this just saves the call. */
+    if (!g_sub_fire[0] && hal_ui_attached()) {
         int n = hal_nostr_firehose(g_sub_fire, sizeof(g_sub_fire) - 1);
         if (n > 0) g_sub_fire[n] = '\0';
     }
@@ -149,7 +157,7 @@ static void subscribe_all(void) {
      * (host-side reaction gate). Still worth having: it is the "what is worth
      * reading" signal, and posts arriving here are marked pop=1 so the UI can
      * rank them. It is no longer pretending to be the live feed. */
-    if (!g_sub_disc[0]) {
+    if (!g_sub_disc[0] && hal_ui_attached()) {
         int n = hal_nostr_discovery(g_sub_disc, sizeof(g_sub_disc) - 1);
         if (n > 0) g_sub_disc[n] = '\0';
     }
@@ -301,7 +309,10 @@ static void search_profile(const char *evt) {
 static void drain(void) {
     /* The live firehose feeds the "All" tab. Drained first and harder than the
      * others — it is the only sub that carries what is happening RIGHT NOW. */
-    for (int i = 0; i < 40 && g_sub_fire[0]; i++) {
+    /* 40 per tick (≈26/s) could not keep up with what the host hands us (up to
+     * 150/s), so the wapp was permanently draining a backlog and the newest post
+     * on screen was minutes old. Drain hard: the feed is the point. */
+    for (int i = 0; i < 300 && g_sub_fire[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_fire, str_len(g_sub_fire), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
         g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* live, unranked */
@@ -791,6 +802,6 @@ int32_t module_handle_event(void) {
     return 0;
 }
 
-int32_t module_tick_interval_ms(void) { return 1500; }
+int32_t module_tick_interval_ms(void) { return 700; }
 
 void module_destroy(void) {}
