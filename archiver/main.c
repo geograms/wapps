@@ -142,7 +142,7 @@ static void push_dashboard(void) {
     str_cat(g_msg, ",", sizeof(g_msg));
     tile("served", "Ever fetched", served, "", "", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));
-    tile("freeable", "Can be freed", freeable, "", "held for strangers", "", 0);
+    tile("freeable", "Can be freed", freeable, "", "held for others", "", 0);
 
     str_cat(g_msg, "]}", sizeof(g_msg));
     send_msg(g_msg);
@@ -220,9 +220,12 @@ int32_t module_handle_event(void) {
     } else if (str_eq(cmd, "mirror_changed")) {
         toggle_from(buf, "mirror", "mirrorSmall");
     } else if (str_eq(cmd, "free_space")) {
-        /* Strangers only. What people you follow gave you, and anything you
-         * chose to keep, is not the archive's to delete. */
-        const char *id = "sweep:strangers";
+        /* Give back everything held for OTHER people — strangers and followed
+         * authors alike. The owner's own files, and anything they pinned, are
+         * not the archive's to delete. The host raises a notification saying
+         * how much came back (including "nothing", which is a real outcome and
+         * must not look like a dead button). */
+        const char *id = "sweep:all";
         hal_archive_drop(id, str_len(id));
         push_dashboard();
     }

@@ -78,8 +78,9 @@
         "label": "Free space",
         "icon": "delete",
         "style": "danger",
-        "confirm": "Delete everything kept for strangers? Files from people you follow, and anything you chose to keep, are untouched.",
-        "confirm-label": "Free space"
+        "confirm": true,
+        "confirm-label": "Delete archived storage?",
+        "confirm-text": "Everything this device is keeping for other people will be deleted. Your own files, and anything you chose to keep, are not touched."
       }
     ]
   }

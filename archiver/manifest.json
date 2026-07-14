@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.archiver",
-  "version":         "0.4.1",
+  "version":         "0.4.3",
   "kind":            "app",
   "title":           "Archiver",
   "description":     "Archiver - keep copies of other people's posts and files, so they survive when the device that made them is offline.",
