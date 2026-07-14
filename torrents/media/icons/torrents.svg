@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-  <!-- A folder pulled down from many peers: the swarm feeds one directory. -->
-  <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z" opacity="0.35"/>
-  <path d="M12 9v5.2l-1.8-1.8-1.1 1.1L12.75 17l3.65-3.5-1.1-1.1L13.5 14.2V9h-1.5z"/>
-  <circle cx="6.5" cy="11.5" r="1.1"/>
-  <circle cx="19" cy="11.5" r="1.1"/>
-  <path d="M7.6 12.1 11 15.2M18 12.1 14.5 15.2" stroke="currentColor" stroke-width="0.9" fill="none" opacity="0.6"/>
+  <!-- The torrent glyph everyone already knows: a bold download arrow landing on
+       a base line, drawn edge-to-edge so it stays legible at launcher size. -->
+  <path d="M12 1.2a10.8 10.8 0 1 0 0 21.6 10.8 10.8 0 0 0 0-21.6zm0 2.1a8.7 8.7 0 1 1 0 17.4 8.7 8.7 0 0 1 0-17.4z" opacity="0.45"/>
+  <path d="M13.55 5.6h-3.1v5.75H6.9L12 17.2l5.1-5.85h-3.55V5.6z"/>
+  <rect x="6.9" y="18.05" width="10.2" height="1.9" rx="0.95"/>
 </svg>

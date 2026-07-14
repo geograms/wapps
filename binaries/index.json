@@ -239,5 +239,7 @@
   {"file":"torrents/torrents-0.1.0.wapp","id":"tools.geogram.torrents","version":"0.1.0","size":26808,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.1.1.wapp","id":"tools.geogram.torrents","version":"0.1.1","size":28095,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.1.2.wapp","id":"tools.geogram.torrents","version":"0.1.2","size":28284,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.2.0.wapp","id":"tools.geogram.torrents","version":"0.2.0","size":29231,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.2.1.wapp","id":"tools.geogram.torrents","version":"0.2.1","size":29158,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."}
 ]

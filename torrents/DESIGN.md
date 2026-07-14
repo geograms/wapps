@@ -35,9 +35,21 @@ stays free of any app's vocabulary.
 
 ## Screens
 
-- **Torrents** — what we publish ("Mine": we hold the key, so only we can change
-  it) and what we follow, with file count, size and pin state. Tap to go inside;
-  the same list then shows that torrent's directories and files.
+- **Torrents** — **Downloaded (n)** first, because that is what a torrent client
+  is for and what the user came to look at; **Mine (n)** — the ones we publish and
+  hold the key to — underneath. Tap to go inside.
+- **Browsing inside a torrent.** No new file explorer was written: the host
+  already browses ONE directory level at a time (`hal_folder_browse` with
+  `"folderId\tpath"`, the same call the Files wapp uses), which keeps the payload
+  and the wapp's work proportional to one level rather than to the whole folder.
+  Tap a directory to descend, `..` to go up, a file to **Open** it.
+- **Opening a file** hands it to whatever this device uses for that type — the
+  gallery for a photo, a reader for a PDF, the installer for an APK. A file we
+  serve from disk is opened in place; a downloaded one lives content-addressed in
+  the archive, so the host exports it to a real path **on a worker isolate**
+  first (a 300 MB video must never be read through the isolate that draws the
+  UI). A file we never downloaded, or a type no app here can open, says so — it
+  does not fail silently.
 - **Swarm** — who else has the open torrent, best holder first. Each row is a
   device and what it is *made of*: mains or battery, WiFi or cellular, hop count,
   how recently it was heard, and **whether we heard it ourselves or an Indexer
@@ -48,7 +60,12 @@ stays free of any app's vocabulary.
   (an unsigned name in a shareable string is a phishing surface — the real,
   signed name arrives with the op-log a second later).
 - **Settings** — pin what I download (default on), and how often a disk-backed
-  torrent is rescanned.
+  torrent is rescanned. Reached by the gear in the app bar.
+- **The "+" in the app bar** — a popup with the only two ways a torrent enters
+  this device: *Open a link* or *Share a folder*. It uses a generic GeoUI
+  mechanism added with this wapp: a menu screen flagged `"appbar": true,
+  "popup": true` renders as a popup menu whose actions fire directly, instead of
+  opening a panel to do it. One tap, not two.
 
 ## Pinning is the whole point
 

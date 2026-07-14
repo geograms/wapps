@@ -262,6 +262,17 @@ uint32_t hal_folder_swarm(const char *folder_id, uint32_t id_len,
 __attribute__((import_module("hal"), import_name("folder_pin")))
 uint32_t hal_folder_pin(const char *folder_id, uint32_t id_len, int32_t on);
 
+/* Open ONE file of a folder with whatever the system uses to view that type —
+ * the gallery for a photo, a reader for a PDF, the installer for an APK.
+ * arg = "<sha256hex>\t<name>" (the name carries the extension the OS routes on).
+ * Asynchronous: returns 1 when started. A file we never downloaded, or a type no
+ * app here can open, fails honestly and is reported in the host log. Files served
+ * from a disk folder are opened in place; downloaded ones are exported out of the
+ * content-addressed archive on a WORKER isolate first. */
+__attribute__((import_module("hal"), import_name("folder_open_file")))
+uint32_t hal_folder_open_file(const char *folder_id, uint32_t id_len,
+                              const char *arg, uint32_t arg_len);
+
 /* List a real directory for an in-app folder browser → JSON array of
  * {"name","path","dir"} (directories first). Empty/0 if not accessible. */
 __attribute__((import_module("hal"), import_name("fs_listdir")))

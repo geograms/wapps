@@ -1,7 +1,7 @@
 {
   "id":              "tools.geogram.torrents",
-  "version":         "0.1.2",
-  "kind":            "system",
+  "version":         "0.2.1",
+  "kind":            "app",
   "title":           "Torrents",
   "description":     "Folder torrents over Reticulum - create, share, download and seed.",
   "summary":         "A torrent client whose unit of sharing is a folder, not a file. A torrent's address is a key (nfolder1...), so its contents can change without the link ever changing. Create one from a folder on disk, share the link, and let others download it. Pin a torrent to keep a full copy and advertise yourself to the Indexers as a holder - the swarm then stops waking the publisher's phone. Seeds in the background, so a pinned folder keeps serving while the app is suspended.",

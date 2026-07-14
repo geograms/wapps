@@ -53,12 +53,21 @@ static int to_int(const char *s) {
   while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
   return v;
 }
+/* JSON string escaping. The TAB matters: row ids carry "sha\tname", and a raw
+ * control character inside a JSON string makes the WHOLE message unparseable —
+ * the host drops it, the list never updates, and the wapp looks dead while
+ * being perfectly alive. (That is exactly what happened: tapping a torrent did
+ * nothing, and the log said "dropped unparseable message: Control character in
+ * string".) jstr() already decodes \t; this is the missing other half. */
 static void jesc(char *dst, unsigned m, const char *src) {
   unsigned l = s_len(dst);
   for (const char *p = src; *p && l < m - 3; p++) {
     char c = *p;
     if (c == '"' || c == '\\') { dst[l++] = '\\'; dst[l++] = c; }
     else if (c == '\n') { dst[l++] = '\\'; dst[l++] = 'n'; }
+    else if (c == '\t') { dst[l++] = '\\'; dst[l++] = 't'; }
+    else if (c == '\r') { dst[l++] = '\\'; dst[l++] = 'r'; }
+    else if ((unsigned char)c < 0x20) { dst[l++] = ' '; }  /* never raw */
     else dst[l++] = c;
   }
   dst[l] = 0;
@@ -363,48 +372,50 @@ static void torrent_row(const char *fid, int owned, int pinned,
   g_sc_at[slot] = g_tick;
 }
 
-/* The list: what we publish, and what we follow. */
+/* The list. Downloaded first — that is what a torrent client is FOR, and it is
+ * the list the user came to look at; what this device publishes is the smaller,
+ * rarer case and sits underneath.
+ *
+ * The section title carries NO count: the host's tab renders "<title> (n)" from
+ * the number of rows, so a count written in here would be said twice. And no
+ * placeholder rows — an "add your first torrent" row is an item, so it would
+ * make an empty section report (1). An empty tab reports (0), honestly. */
 static void render_list(void) {
-  row_open();
+  char slice[1024];
 
-  /* Owned (we hold the master key: only we can change what's in it). */
-  uint32_t n = hal_folder_list(g_json, sizeof(g_json) - 1);
+  /* Downloaded (someone else's key; we hold a copy of the contents). */
+  uint32_t n = hal_folder_subs(g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+
+  row_open();
+  section_open("Downloaded");
+
+  const char *p = next_obj(g_json, slice, sizeof(slice));
+  while (p) {
+    char fid[80];
+    jstr(slice, "folderId", fid, sizeof(fid));
+    int pinned = jbool_def(slice, "autoSync", 0);
+    if (fid[0]) {
+      char title[160], sub[200], rid[90] = "t:";
+      torrent_row(fid, 0, pinned, title, sizeof(title), sub, sizeof(sub));
+      s_cat(rid, fid, sizeof(rid));
+      row(rid, title, sub);
+    }
+    p = next_obj(p, slice, sizeof(slice));
+  }
+
+  /* Mine (we hold the master key: only we can change what is in it). */
+  n = hal_folder_list(g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
   section_open("Mine");
-  int any_owned = 0;
-  char slice[1024];
-  const char *p = next_obj(g_json, slice, sizeof(slice));
+
+  p = next_obj(g_json, slice, sizeof(slice));
   while (p) {
     char fid[80];
     jstr(slice, "folderId", fid, sizeof(fid));
     if (fid[0]) {
       char title[160], sub[200], rid[90] = "t:";
       torrent_row(fid, 1, 0, title, sizeof(title), sub, sizeof(sub));
-      s_cat(rid, fid, sizeof(rid));
-      row(rid, title, sub);
-      any_owned = 1;
-    }
-    p = next_obj(p, slice, sizeof(slice));
-  }
-  if (!any_owned) {
-    row("none", "No torrents yet",
-        "Share a folder from disk to publish one - you keep its key, so only "
-        "you can change it");
-  }
-
-  /* Followed (someone else's key; pinned = we keep a full copy and seed it). */
-  n = hal_folder_subs(g_json, sizeof(g_json) - 1);
-  g_json[n] = 0;
-  int any_sub = 0;
-  p = next_obj(g_json, slice, sizeof(slice));
-  while (p) {
-    char fid[80];
-    jstr(slice, "folderId", fid, sizeof(fid));
-    int pinned = jbool_def(slice, "autoSync", 0);
-    if (fid[0]) {
-      if (!any_sub) { section_open("Following"); any_sub = 1; }
-      char title[160], sub[200], rid[90] = "t:";
-      torrent_row(fid, 0, pinned, title, sizeof(title), sub, sizeof(sub));
       s_cat(rid, fid, sizeof(rid));
       row(rid, title, sub);
     }
@@ -824,7 +835,18 @@ void module_handle_event(void) {
       i = 0;
       while (*r && i < sizeof(name) - 1) name[i++] = *r++;
       name[i] = 0;
-      if (s_eq(val, "dl") && sha[0] && g_cur[0]) {
+      if (!sha[0] || !g_cur[0]) return;
+      if (s_eq(val, "open")) {
+        /* "sha\tname": the name carries the extension, which is what the OS
+         * routes on. The host opens a disk-backed file in place and exports a
+         * downloaded one off the UI isolate first. */
+        char a[500] = "";
+        s_cat(a, sha, sizeof(a));
+        s_cat(a, "\t", sizeof(a));
+        s_cat(a, name[0] ? name : sha, sizeof(a));
+        hal_folder_open_file(g_cur, s_len(g_cur), a, s_len(a));
+        notify("info", "Opening...");
+      } else if (s_eq(val, "dl")) {
         char j[420] = "{\"sha\":\"";
         jesc(j, sizeof(j), sha);
         s_cat(j, "\",\"name\":\"", sizeof(j));
@@ -923,12 +945,14 @@ void module_handle_event(void) {
       jesc(m, sizeof(m), name);
       s_cat(m, "\",\"title\":\"", sizeof(m));
       jesc(m, sizeof(m), name[0] ? name : "File");
-      s_cat(m, "\",\"body\":\"Fetched from any holder and checked against this "
-               "hash:\\n", sizeof(m));
+      s_cat(m, "\",\"body\":\"Opens with whatever this device uses for that "
+               "type. Every byte is checked against this hash before it is "
+               "kept:\\n", sizeof(m));
       jesc(m, sizeof(m), sha);
       s_cat(m, "\",\"copy\":\"", sizeof(m));
       jesc(m, sizeof(m), sha);
-      s_cat(m, "\",\"chips\":[{\"label\":\"Download\",\"value\":\"dl\"}],"
+      s_cat(m, "\",\"chips\":[{\"label\":\"Open\",\"value\":\"open\"},"
+               "{\"label\":\"Download\",\"value\":\"dl\"}],"
                "\"confirm\":\"Close\"}", sizeof(m));
       hal_msg_send(m, s_len(m));
     }
