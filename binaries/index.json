@@ -233,6 +233,8 @@
   {"file":"social/social-0.2.28.wapp","id":"tools.geogram.social","version":"0.2.28","size":23613,"title":"Social","description":"Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol)."},
   {"file":"social/social-0.2.29.wapp","id":"tools.geogram.social","version":"0.2.29","size":24496,"title":"Social","description":"Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol)."},
   {"file":"social/social-0.2.30.wapp","id":"tools.geogram.social","version":"0.2.30","size":24518,"title":"Social","description":"Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol)."},
+  {"file":"social/social-0.2.31.wapp","id":"tools.geogram.social","version":"0.2.31","size":24673,"title":"Social","description":"Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol)."},
+  {"file":"social/social-0.2.32.wapp","id":"tools.geogram.social","version":"0.2.32","size":24768,"title":"Social","description":"Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol)."},
   {"file":"tasks/tasks-1.0.1.wapp","id":"tools.geogram.tasks","version":"1.0.1","size":6397,"title":"Task Monitor","description":"Live view of background tasks; pause, resume, stop."},
   {"file":"terminal/terminal-1.0.1.wapp","id":"tools.geogram.terminal","version":"1.0.1","size":17691,"title":"Terminal","description":"Sandboxed terminal with built-in commands."},
   {"file":"tester/tester-1.0.1.wapp","id":"tools.geogram.tester","version":"1.0.1","size":16530,"title":"Tester","description":"Notification test harness for the host services."},
@@ -241,5 +243,6 @@
   {"file":"torrents/torrents-0.1.2.wapp","id":"tools.geogram.torrents","version":"0.1.2","size":28284,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.2.0.wapp","id":"tools.geogram.torrents","version":"0.2.0","size":29231,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.2.1.wapp","id":"tools.geogram.torrents","version":"0.2.1","size":29158,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.3.0.wapp","id":"tools.geogram.torrents","version":"0.3.0","size":31205,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."}
 ]

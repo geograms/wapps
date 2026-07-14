@@ -5,7 +5,6 @@
     "icon": "download_for_offline",
     "tip": "Folder torrents. A torrent's address is a key (nfolder1...), not a hash of its contents, so the publisher can add or remove files without the link ever changing. Tap one to see what's inside.",
     "children": [
-      { "$": "action", "name": "t_back", "label": "All torrents", "icon": "list", "style": "secondary", "tip": "Back to the list of torrents." },
       { "$": "action", "name": "t_manage", "label": "Manage", "icon": "tune", "style": "secondary", "tip": "Download everything, pin, copy the link, rescan or remove the open torrent." },
       { "$": "field", "name": "torrents", "$type": "people", "empty": "Nothing here yet - tap + to open a link or share a folder.", "tip": "Torrents you downloaded and torrents you publish. Tap one to open it; inside, tap a folder to go in, \"..\" to go up, or a file to open it." }
     ]

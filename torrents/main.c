@@ -274,13 +274,72 @@ static void section_open(const char *title) {
   s_cat(g_out, "\",\"items\":[", sizeof(g_out));
   g_first_row = 1;
 }
-static void row(const char *id, const char *title, const char *subtitle) {
+/* A row, optionally with an icon. Pass icon=0 for a torrent (it keeps the
+ * generated avatar, which makes one key distinguishable from another at a
+ * glance); pass a name for a folder or a file, where a random coloured sigil
+ * says nothing and the TYPE is the whole point. */
+static void row_icon(const char *id, const char *title, const char *subtitle,
+                     const char *icon) {
   if (!g_first_row) s_cat(g_out, ",", sizeof(g_out));
   g_first_row = 0;
   s_cat(g_out, "{\"id\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), id);
   s_cat(g_out, "\",\"title\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), title);
   s_cat(g_out, "\",\"subtitle\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), subtitle);
+  if (icon && icon[0]) {
+    s_cat(g_out, "\",\"icon\":\"", sizeof(g_out));
+    jesc(g_out, sizeof(g_out), icon);
+  }
   s_cat(g_out, "\"}", sizeof(g_out));
+}
+static void row(const char *id, const char *title, const char *subtitle) {
+  row_icon(id, title, subtitle, 0);
+}
+
+/* The icon a file's NAME earns it. The extension is all we have (the bytes may
+ * not even be here yet), and it is what the OS routes on anyway. */
+static const char *icon_for(const char *name) {
+  const char *dot = 0;
+  for (const char *p = name; *p; p++) {
+    if (*p == '.') dot = p;
+  }
+  if (!dot || !dot[1]) return "insert_drive_file";
+  char e[8];
+  unsigned i = 0;
+  for (const char *p = dot + 1; *p && i < sizeof(e) - 1; p++) {
+    char c = *p;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    e[i++] = c;
+  }
+  e[i] = 0;
+  if (s_eq(e, "jpg") || s_eq(e, "jpeg") || s_eq(e, "png") || s_eq(e, "gif") ||
+      s_eq(e, "webp") || s_eq(e, "bmp") || s_eq(e, "svg"))
+    return "image";
+  if (s_eq(e, "mp4") || s_eq(e, "mkv") || s_eq(e, "webm") || s_eq(e, "avi") ||
+      s_eq(e, "mov"))
+    return "movie";
+  if (s_eq(e, "mp3") || s_eq(e, "ogg") || s_eq(e, "wav") || s_eq(e, "flac") ||
+      s_eq(e, "opus") || s_eq(e, "m4a"))
+    return "audiotrack";
+  if (s_eq(e, "pdf")) return "picture_as_pdf";
+  if (s_eq(e, "apk")) return "android";
+  if (s_eq(e, "zip") || s_eq(e, "gz") || s_eq(e, "xz") || s_eq(e, "tar") ||
+      s_eq(e, "7z") || s_eq(e, "rar"))
+    return "archive";
+  if (s_eq(e, "txt") || s_eq(e, "md") || s_eq(e, "log") || s_eq(e, "json"))
+    return "description";
+  return "insert_drive_file";
+}
+
+/* Tell the host we are INSIDE something, so the back arrow and the system-back
+ * gesture come to us as `nav_back` (up one level) instead of leaving the wapp.
+ * Clearing it at the root is what makes the next back exit, as it should. */
+static void nav_set(int inside, const char *title) {
+  char m[300] = "{\"type\":\"ui.nav\",\"back\":";
+  s_cat(m, inside ? "true" : "false", sizeof(m));
+  s_cat(m, ",\"title\":\"", sizeof(m));
+  jesc(m, sizeof(m), title ? title : "");
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 static void row_close(void) {
   s_cat(g_out, "]}]}", sizeof(g_out));
@@ -447,10 +506,14 @@ static void render_open(void) {
     s_cat(title, g_cur_path, sizeof(title));
   }
 
+  /* Inside a torrent: the ONE back control (the AppBar arrow / the system-back
+   * gesture) comes to us as `nav_back` and goes up a level. No ".." row — a
+   * second back affordance on the same panel is clutter, and the user already
+   * has one that works everywhere else in the app. */
+  nav_set(1, g_cur_name[0] ? g_cur_name : "Torrent");
+
   row_open();
   section_open(title);
-
-  if (g_cur_path[0]) row("up:", "..", "up one level");
 
   char slice[1200];
 
@@ -468,7 +531,7 @@ static void render_open(void) {
       if (dn[0]) {
         char rid[240] = "cd:";
         s_cat(rid, dn, sizeof(rid));
-        row(rid, dn, "folder");
+        row_icon(rid, dn, "folder", "folder");
       }
       p = next_obj(p, slice, sizeof(slice));
     }
@@ -492,7 +555,7 @@ static void render_open(void) {
         s_cat(rid, sha, sizeof(rid));
         s_cat(rid, "\t", sizeof(rid));
         s_cat(rid, full[0] ? full : base, sizeof(rid));
-        row(rid, base[0] ? base : sha, sub);
+        row_icon(rid, base[0] ? base : sha, sub, icon_for(base));
       }
       p = next_obj(p, slice, sizeof(slice));
     }
@@ -868,8 +931,9 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "t_open_link")) {
     prompt_input("open", "Open a torrent", "nfolder1... / npub / hex id", 400);
   } else if (s_eq(cmd, "t_back") || s_eq(cmd, "nav_back")) {
+    /* One back control, one sensible chain: subfolder -> its parent -> the
+     * torrent list -> (nav cleared) out of the wapp. */
     if (g_view == 1 && g_cur_path[0]) {
-      /* up one directory level before leaving the torrent */
       unsigned L = s_len(g_cur_path);
       g_cur_path[L - 1] = 0;
       int k = (int)s_len(g_cur_path) - 1;
@@ -878,6 +942,7 @@ void module_handle_event(void) {
       render_open();
     } else {
       g_view = 0; g_cur[0] = 0; g_cur_path[0] = 0; g_cur_name[0] = 0;
+      nav_set(0, "");     /* at the root: the next back leaves the wapp */
       render_list();
     }
   } else if (s_eq(cmd, "t_manage")) {

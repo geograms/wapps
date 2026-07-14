@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-  <!-- The torrent glyph everyone already knows: a bold download arrow landing on
-       a base line, drawn edge-to-edge so it stays legible at launcher size. -->
-  <path d="M12 1.2a10.8 10.8 0 1 0 0 21.6 10.8 10.8 0 0 0 0-21.6zm0 2.1a8.7 8.7 0 1 1 0 17.4 8.7 8.7 0 0 1 0-17.4z" opacity="0.45"/>
-  <path d="M13.55 5.6h-3.1v5.75H6.9L12 17.2l5.1-5.85h-3.55V5.6z"/>
-  <rect x="6.9" y="18.05" width="10.2" height="1.9" rx="0.95"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="currentColor">
+  <!-- The torrent glyph: a bold download arrow landing on a base line. Drawn on
+       a 48-box with almost no padding, so it renders at the same visual weight
+       as the other launcher icons instead of a small mark floating in space. -->
+  <path d="M28.4 3.5h-8.8v18.9H8.2L24 41.2 39.8 22.4H28.4V3.5z"/>
+  <rect x="7" y="41.6" width="34" height="4.4" rx="2.2"/>
 </svg>
