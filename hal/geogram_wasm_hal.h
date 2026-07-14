@@ -230,6 +230,38 @@ uint32_t hal_folder_owned(char *out_buf, uint32_t out_len);
 __attribute__((import_module("hal"), import_name("folder_subs")))
 uint32_t hal_folder_subs(char *out_buf, uint32_t out_len);
 
+/* 1 when a UI page is attached to this engine, 0 when it is headless (running
+ * as a background service). A wapp that renders lists on a tick should check
+ * this first: a background engine's ui.* messages are read by NOBODY, and
+ * building them still costs main-isolate time. Keep the work that has a reason
+ * to run with the screen off (receiving, notifying, seeding); skip the rest. */
+__attribute__((import_module("hal"), import_name("ui_attached")))
+int32_t hal_ui_attached(void);
+
+/* The folder's shareable pointer: "nfolder1..." (docs/torrents.md §11) — the
+ * folder key plus up to 3 provider hints and the publisher. Accepts hex, npub
+ * or nfolder as input. */
+__attribute__((import_module("hal"), import_name("folder_link")))
+uint32_t hal_folder_link(const char *folder_id, uint32_t id_len,
+                         char *out_buf, uint32_t out_len);
+
+/* Who has this folder (the swarm) → JSON array, best holder first:
+ *   [{"dest","pubkey","provenance":"direct"|"dht","lastHeardMs","hops",
+ *     "capacity","role","power","poweredPct","uplink","bwClass","region",
+ *     "radios":[..]}]
+ * Ranked host-side: an awake machine on mains and a fat uplink first, a battery
+ * phone on cellular last. Answers from the last snapshot immediately and
+ * refreshes in the background (60s TTL) — poll again for fresher data. */
+__attribute__((import_module("hal"), import_name("folder_swarm")))
+uint32_t hal_folder_swarm(const char *folder_id, uint32_t id_len,
+                          char *out_buf, uint32_t out_len);
+
+/* Pin/unpin a folder (on != 0): keep a full copy on this device, follow its
+ * op-log, and advertise ourselves to the Indexers as a holder. Returns 1 when
+ * accepted. */
+__attribute__((import_module("hal"), import_name("folder_pin")))
+uint32_t hal_folder_pin(const char *folder_id, uint32_t id_len, int32_t on);
+
 /* List a real directory for an in-app folder browser → JSON array of
  * {"name","path","dir"} (directories first). Empty/0 if not accessible. */
 __attribute__((import_module("hal"), import_name("fs_listdir")))
