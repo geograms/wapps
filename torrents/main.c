@@ -411,11 +411,17 @@ static void torrent_row(const char *fid, int owned, int pinned,
   uint32_t n = hal_folder_stats(fid, s_len(fid), st, sizeof(st) - 1);
   st[n] = 0;
 
-  /* Title: the folder's PUBLISHED (signed) name, else the head of its key.
-   * Never a name taken from a link — that one is unsigned, and an unsigned name
-   * is a lie waiting to happen (docs/torrents.md §11). */
+  /* Title: what the publisher CALLED it (the listing's title, from
+   * data/meta.json), else the folder's directory name, else the head of its key.
+   * All three come from the SIGNED op-log — never from a link, which is unsigned
+   * and therefore a lie waiting to happen (docs/torrents.md §11).
+   *
+   * A torrent we do not own has no directory name of ours to fall back on, so
+   * without the listing every downloaded torrent read as "npub1r59ucj…" — a key,
+   * where a person expects a name. */
   char name[160];
-  jstr(st, "name", name, sizeof(name));
+  jstr(st, "title", name, sizeof(name));
+  if (!name[0]) jstr(st, "name", name, sizeof(name));
   if (name[0]) {
     s_cpy(title, name, tm);
   } else {
@@ -429,6 +435,14 @@ static void torrent_row(const char *fid, int owned, int pinned,
   unsigned bytes = (unsigned)jnum(st, "totalBytes");
   unsigned serves = (unsigned)jnum(st, "serves");
   sub[0] = 0;
+  /* The category leads: it is what a person scans a torrent list FOR. */
+  { char cat[32];
+    jstr(st, "cat", cat, sizeof(cat));
+    if (cat[0]) {
+      s_cat(sub, cat, sm);
+      if (jbool_def(st, "adult", 0)) s_cat(sub, " +18", sm);
+      s_cat(sub, " - ", sm);
+    } }
   s_cat(sub, owned ? "mine" : (pinned ? "pinned" : "following"), sm);
   { char nb[12]; u_itoa(files, nb);
     s_cat(sub, " - ", sm); s_cat(sub, nb, sm);
