@@ -7,11 +7,8 @@
     "children": [
       {
         "$": "field",
-        "name": "status",
-        "$type": "string",
-        "label": "This device",
-        "readonly": true,
-        "tip": "Whether the network is being sent here right now."
+        "name": "dashboard",
+        "$type": "stats"
       },
       {
         "$": "field",
@@ -41,58 +38,18 @@
       },
       {
         "$": "field",
-        "name": "pointers",
+        "name": "topics",
         "$type": "string",
-        "label": "Addresses held",
-        "readonly": true,
-        "tip": "An indexer holds pointers, never other people's posts."
+        "label": "Topics I index (comma separated)",
+        "hint": "empty = index everything heard",
+        "live": true,
+        "tip": "What you are comfortable indexing. Leave empty to index everything this device hears (wide); name topics to serve only those."
       },
       {
         "$": "field",
-        "name": "authors",
-        "$type": "string",
-        "label": "Authors this device is a home for",
-        "readonly": true,
-        "tip": "Published as who-has records, so people are sent to you and not to a server."
-      },
-      {
-        "$": "field",
-        "name": "peers",
-        "$type": "string",
-        "label": "Indexers synced with",
-        "readonly": true,
-        "tip": "Indexers spread the map between themselves so phones never have to."
-      },
-      {
-        "$": "field",
-        "name": "hygiene",
-        "$type": "string",
-        "label": "Dead pointers pruned · stores refused",
-        "readonly": true,
-        "tip": "A provider that will not serve stops being handed out."
-      },
-      {
-        "$": "field",
-        "name": "hardware",
-        "$type": "string",
-        "label": "Hardware (change in Settings)",
-        "readonly": true,
-        "tip": "Power, uplink and how much of the last week this device actually had power."
-      }
-    ]
-  },
-  {
-    "$": "screen",
-    "name": "The network",
-    "icon": "people",
-    "menu": true,
-    "tip": "Other indexers this device knows — and the leaves it deliberately leaves alone.",
-    "children": [
-      {
-        "$": "field",
-        "name": "network",
-        "$type": "people",
-        "tip": "Leaves announce, get indexed, and are never woken. That asymmetry is why the role exists."
+        "name": "maint",
+        "$type": "stats",
+        "tip": "Maintenance. Every tile says exactly what it would remove; tapping it runs exactly that."
       }
     ]
   }

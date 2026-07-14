@@ -1166,6 +1166,12 @@ int32_t hal_node_peers(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("node_set_pref")))
 int32_t hal_node_set_pref(const char *kv, uint32_t kv_len);
 
+__attribute__((import_module("hal"), import_name("node_maint")))
+int32_t hal_node_maint(char *out, uint32_t out_cap);
+
+__attribute__((import_module("hal"), import_name("node_sweep")))
+int32_t hal_node_sweep(const char *id, uint32_t id_len);
+
 /* ── hal.archive — the Archiver role ──────────────────────────────────────
  * Storage volunteered for other people, with a quota the owner chose and a
  * visible, deletable list of what is being held.
