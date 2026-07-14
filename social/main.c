@@ -128,6 +128,7 @@ static char g_prof[2560];          /* one hal_nostr_profile result         */
 static char g_rdone[96];           /* 1 once replies pushed for post i     */
 static char g_replies[8192];       /* one hal_nostr_replies result         */
 static int  g_ticks = 0;
+static int  g_activity_all = 1;   /* public firehose only while All is visible */
 
 /* ── Subscriptions ───────────────────────────────────────────────────── */
 static void subscribe_all(void) {
@@ -149,7 +150,7 @@ static void subscribe_all(void) {
      * with the screen off we want the people you follow, your replies and your
      * messages — not the public feed of strangers. The host refuses it to a
      * headless engine anyway; this just saves the call. */
-    if (!g_sub_fire[0] && hal_ui_attached()) {
+    if (g_activity_all && !g_sub_fire[0] && hal_ui_attached()) {
         int n = hal_nostr_firehose(g_sub_fire, sizeof(g_sub_fire) - 1);
         if (n > 0) g_sub_fire[n] = '\0';
     }
@@ -157,10 +158,8 @@ static void subscribe_all(void) {
      * (host-side reaction gate). Still worth having: it is the "what is worth
      * reading" signal, and posts arriving here are marked pop=1 so the UI can
      * rank them. It is no longer pretending to be the live feed. */
-    if (!g_sub_disc[0] && hal_ui_attached()) {
-        int n = hal_nostr_discovery(g_sub_disc, sizeof(g_sub_disc) - 1);
-        if (n > 0) g_sub_disc[n] = '\0';
-    }
+    /* Discovery is intentionally not opened for All. Its events bypass the
+     * curated 100-note batch and made stale promotional links look selected. */
     /* (c) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
      * post/reply from someone you follow arrives (even ones that never clear
      * discovery's like gate). This drives the "Following" tab. Opens once the
@@ -203,7 +202,8 @@ static void first_etag(const char *evt, char *out, unsigned cap) {
  * keeps it in the All tab even after the transient like count resets.
  * field routes the post to a chat feed ("activity" = main stream,
  * "search_results" = the Search panel). */
-static void feed_append_to(const char *evt, int pop, const char *field) {
+static void feed_append_to(const char *evt, int pop, const char *field,
+                           const char *source) {
     char pubkey[80] = "", content[6000] = "", ts[24] = "", id[80] = "";
     json_raw(evt, "pubkey", pubkey, sizeof(pubkey));
     json_raw(evt, "content", content, sizeof(content)); /* still escaped */
@@ -232,6 +232,22 @@ static void feed_append_to(const char *evt, int pop, const char *field) {
     str_cat(g_msg, parent, sizeof(g_msg)); /* reply target, or "" for a root */
     str_cat(g_msg, "\",\"pop\":", sizeof(g_msg));
     str_cat(g_msg, pop ? "1" : "0", sizeof(g_msg));
+    str_cat(g_msg, ",\"source\":\"", sizeof(g_msg));
+    str_cat(g_msg, source, sizeof(g_msg));
+    str_cat(g_msg, "\"", sizeof(g_msg));
+    if (str_eq(source, "firehose")) {
+        char batch[24] = "", mode[24] = "", index[16] = "", size[16] = "";
+        json_raw(evt, "_geogram_batch", batch, sizeof(batch));
+        json_raw(evt, "_geogram_batch_mode", mode, sizeof(mode));
+        json_raw(evt, "_geogram_batch_index", index, sizeof(index));
+        json_raw(evt, "_geogram_batch_size", size, sizeof(size));
+        if (batch[0]) {
+            str_cat(g_msg, ",\"batch\":", sizeof(g_msg)); str_cat(g_msg, batch, sizeof(g_msg));
+            str_cat(g_msg, ",\"batch_mode\":\"", sizeof(g_msg)); str_cat(g_msg, mode, sizeof(g_msg));
+            str_cat(g_msg, "\",\"batch_index\":", sizeof(g_msg)); str_cat(g_msg, index[0] ? index : "0", sizeof(g_msg));
+            str_cat(g_msg, ",\"batch_size\":", sizeof(g_msg)); str_cat(g_msg, size[0] ? size : "0", sizeof(g_msg));
+        }
+    }
     str_cat(g_msg, ",", sizeof(g_msg));
     cat_time_fields(g_msg, ts, sizeof(g_msg));
     str_cat(g_msg, "}}", sizeof(g_msg));
@@ -315,17 +331,17 @@ static void drain(void) {
     for (int i = 0; i < 300 && g_sub_fire[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_fire, str_len(g_sub_fire), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* live, unranked */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity", "firehose");
     }
     for (int i = 0; i < 20 && g_sub_disc[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_disc, str_len(g_sub_disc), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_to(g_evt, 1, "activity"); /* pop=1: liked */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 1, "activity", "discovery");
     }
     for (int i = 0; i < 20 && g_sub_follows[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_follows, str_len(g_sub_follows), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity"); /* a follow's post */
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity", "following");
     }
     /* Deep-linked publication (host view.open): the post and its replies go
      * into the activity feed like a follow's post — the host is polling the
@@ -333,7 +349,7 @@ static void drain(void) {
     for (int i = 0; i < 20 && g_sub_post[0]; i++) {
         int n = hal_nostr_event_recv(g_sub_post, str_len(g_sub_post), g_evt, sizeof(g_evt) - 1);
         if (n <= 0) break;
-        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity");
+        g_evt[n] = '\0'; feed_append_to(g_evt, 0, "activity", "thread");
     }
     /* Search results (NIP-50): kind-1 posts → result cards; kind-0 profiles →
      * a "person" card (the host resolves name+avatar by pubkey). */
@@ -347,7 +363,7 @@ static void drain(void) {
         if (!matches_query(g_evt)) continue;
         if (str_eq(k, "0")) search_profile(g_evt);
         else if (!g_search_media || has_media(g_evt))
-            feed_append_to(g_evt, 0, "search_results");
+            feed_append_to(g_evt, 0, "search_results", "search");
     }
 }
 
@@ -604,6 +620,17 @@ int32_t module_tick(void) {
         }
         subscribe_all();
     }
+    /* Relay live-push is not reliable after Android has suspended sockets.
+     * Re-issue the bounded follows query every ten minutes so Following cannot
+     * sit on an hour-old snapshot. The wapp itself runs off the Flutter UI
+     * isolate, and the relay work stays in the NOSTR engine isolate. */
+    if (g_ticks > 0 && g_ticks % 857 == 0) {
+        if (g_sub_follows[0]) {
+            hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+            g_sub_follows[0] = '\0';
+        }
+        subscribe_all();
+    }
     if (g_ticks % 8 == 0) push_relays();
     if (g_ticks % 5 == 0) push_stats();      /* refresh like/reply counts */
     if (g_ticks % 3 == 2) push_profiles();   /* fetch + show author names */
@@ -656,21 +683,39 @@ int32_t module_handle_event(void) {
         if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
             hal_nostr_post(1, text, str_len(text), "[]", 2);
     } else if (str_eq(cmd, "activity_refresh")) {
-        /* Pull-to-refresh / return-to-stream: drop every feed sub and re-open
-         * them so the relays re-send the latest matching posts. */
-        if (g_sub_fire[0]) {
-            hal_nostr_unsubscribe(g_sub_fire, str_len(g_sub_fire));
-            g_sub_fire[0] = '\0';
-        }
-        if (g_sub_disc[0]) {
-            hal_nostr_unsubscribe(g_sub_disc, str_len(g_sub_disc));
-            g_sub_disc[0] = '\0';
-        }
+        /* Pull-to-refresh. The host hands over the best of what the curator is
+         * holding (100 notes) — we do NOT tear the firehose/discovery subs down
+         * and re-open them. Churning a subscription is precisely what makes a
+         * relay quietly stop answering it, and the feed then dies in silence. */
+        (void)0;
         if (g_sub_follows[0]) {
             hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
             g_sub_follows[0] = '\0';
         }
         subscribe_all();
+    } else if (str_eq(cmd, "activity_filter_changed")) {
+        char filter[24] = "";
+        json_raw(buf, "activity_filter", filter, sizeof(filter));
+        g_activity_all = str_eq(filter, "all");
+        if (!g_activity_all) {
+            if (g_sub_fire[0]) {
+                hal_nostr_unsubscribe(g_sub_fire, str_len(g_sub_fire));
+                g_sub_fire[0] = '\0';
+            }
+            if (g_sub_disc[0]) {
+                hal_nostr_unsubscribe(g_sub_disc, str_len(g_sub_disc));
+                g_sub_disc[0] = '\0';
+            }
+            if (str_eq(filter, "following")) {
+                if (g_sub_follows[0]) {
+                    hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+                    g_sub_follows[0] = '\0';
+                }
+                subscribe_all();
+            }
+        } else {
+            subscribe_all();
+        }
     } else if (str_eq(cmd, "clear_feed")) {
         send_msg("{\"type\":\"ui.chat.clear\",\"field\":\"activity\"}");
     } else if (str_eq(cmd, "search_go") || str_eq(cmd, "search_input_changed") ||

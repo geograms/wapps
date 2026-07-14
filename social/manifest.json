@@ -1,6 +1,6 @@
 {
   "id": "tools.geogram.social",
-  "version": "0.2.33",
+  "version": "0.2.37",
   "kind": "app",
   "title": "Social",
   "description": "Social — follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol).",
