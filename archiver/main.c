@@ -12,14 +12,18 @@
  *     consent, so the quota starts at zero and the person has to move it.
  *   - A quota is a CEILING, not a target. Full is full.
  *
- * And the part a user must never be denied: a list of what strangers put on
- * their disk, with a Drop on every row. A person who cannot see and delete what
- * is being held for others has not consented to anything.
+ * And the part a user must never be denied: knowing what is on their disk and
+ * being able to get the space back. NOT as a list of files — an archive holds
+ * hundreds of thousands of them, and scrolling that teaches a person nothing and
+ * lets them do nothing. As STATISTICS (where the space went, whose it is, how
+ * much of it has ever been asked for) plus CLEANUPS that say what they will free
+ * before they free it. A cleanup tool that cannot tell you what it is about to
+ * delete is not a tool, it is a gamble.
  *
  * Host HAL:
  *   hal_archive_status   → quota, used, items, policy switches
- *   hal_archive_items    → what is held for others (size, tier, age)
- *   hal_archive_drop     → delete one of them
+ *   hal_archive_items    → where the space went + previewed cleanups
+ *   hal_archive_drop     → run a previewed cleanup, or evict one depositor
  *   hal_archive_set_pref → quotaGb, followed, fromLan/Bluetooth/Radio/WifiDirect
  *
  * Build: cd wapps/archiver && make
@@ -191,12 +195,17 @@ static void push_quota(void) {
     send_msg(g_msg);
 }
 
-/* What is actually on this disk, and who put it there. With a Drop on every row. */
+/* Where the space went, and how to get it back.
+ *
+ * NOT a list of files. An archive holds hundreds of thousands of them; scrolling
+ * that teaches a person nothing and lets them do nothing. What they need is the
+ * breakdown (whose is it, is any of it even being used) and a cleanup that says
+ * what it will free BEFORE it frees it. The host builds both. */
 static void push_items(void) {
     int n = hal_archive_items(g_items, sizeof(g_items) - 1);
     if (n <= 0) return;
     g_items[n] = '\0';
-    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"held\",\"sections\":", sizeof(g_msg));
+    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"space\",\"sections\":", sizeof(g_msg));
     str_cat(g_msg, g_items, sizeof(g_msg));
     str_cat(g_msg, "}", sizeof(g_msg));
     send_msg(g_msg);
@@ -273,11 +282,12 @@ int32_t module_handle_event(void) {
         if (str_eq(id, "quota") || str_eq(id, "quota_more")) bump_quota();
         else if (str_eq(id, "followed")) toggle("followed");
         else if (str_eq(id, "links")) toggle("fromLan");
-    } else if (str_eq(cmd, "held_tap")) {
-        /* Tapping a held item drops it. It is somebody else's data on YOUR
-         * disk; being able to delete it is the point. */
+    } else if (str_eq(cmd, "space_tap")) {
+        /* A cleanup row, or one depositor. The row already said what it would
+         * free, so tapping it does exactly that and nothing more. Rows starting
+         * with '#' are statistics — they are information, not buttons. */
         char id[80] = "";
-        if (json_raw(buf, "held_id", id, sizeof(id)) && id[0] && id[0] != '#') {
+        if (json_raw(buf, "space_id", id, sizeof(id)) && id[0] && id[0] != '#') {
             hal_archive_drop(id, str_len(id));
             refresh();
         }

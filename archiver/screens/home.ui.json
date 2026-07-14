@@ -15,16 +15,16 @@
   },
   {
     "$": "screen",
-    "name": "What's on my disk",
-    "icon": "folder",
+    "name": "Space",
+    "icon": "chart",
     "menu": true,
-    "tip": "Everything being held for other people. Tap a row to drop it — a person who cannot delete it has not consented to anything.",
+    "tip": "Where the space went, and how to get it back. Every cleanup says what it will free before it frees it.",
     "children": [
       {
         "$": "field",
-        "name": "held",
+        "name": "space",
         "$type": "people",
-        "tip": "Size, whose it is, and how long we have kept it. Tap to drop."
+        "tip": "Statistics, biggest depositors, and previewed cleanups. Tap a cleanup to run exactly what it showed you."
       }
     ]
   }

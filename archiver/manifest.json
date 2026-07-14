@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.archiver",
-  "version":         "0.1.1",
+  "version":         "0.2.0",
   "kind":            "app",
   "title":           "Archiver",
   "description":     "Archiver - donate storage on purpose: hold other people's data up to a quota you choose, and see exactly what is on your disk.",
