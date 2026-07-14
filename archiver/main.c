@@ -85,19 +85,18 @@ static char g_msg[32768];
 
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 
-static void row(char *dst, unsigned cap, const char *id, const char *title,
-                const char *subtitle, int online) {
-    str_cat(dst, "{\"id\":\"", cap);
-    str_cat(dst, id, cap);
-    str_cat(dst, "\",\"title\":\"", cap);
-    str_cat(dst, title, cap);
-    str_cat(dst, "\",\"subtitle\":\"", cap);
-    str_cat(dst, subtitle, cap);
-    str_cat(dst, "\",\"online\":", cap);
-    str_cat(dst, online ? "true}" : "false}", cap);
+/* Set one field on the screen. */
+static void set_field(const char *name, const char *value) {
+    str_copy(g_msg, "{\"type\":\"ui.set_field\",\"name\":\"", sizeof(g_msg));
+    str_cat(g_msg, name, sizeof(g_msg));
+    str_cat(g_msg, "\",\"value\":\"", sizeof(g_msg));
+    str_cat(g_msg, value, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
 }
 
-/* Quota + policy: the contract, in the numbers the owner chose. */
+/* The contract, in the numbers the owner chose. Switches and a picker — this is
+ * a settings screen, so it is built out of settings. */
 static void push_quota(void) {
     int n = hal_archive_status(g_status, sizeof(g_status) - 1);
     if (n <= 0) return;
@@ -105,7 +104,7 @@ static void push_quota(void) {
 
     char quota[16] = "0", used[24] = "0", items[16] = "0";
     char followed[8] = "true", lan[8] = "true", ble[8] = "true";
-    char radio[8] = "true", wfd[8] = "true", direct[8] = "false";
+    char radio[8] = "true", mirror[8] = "true";
     json_raw(g_status, "quotaGb", quota, sizeof(quota));
     json_raw(g_status, "usedBytes", used, sizeof(used));
     json_raw(g_status, "items", items, sizeof(items));
@@ -113,86 +112,34 @@ static void push_quota(void) {
     json_raw(g_status, "fromLan", lan, sizeof(lan));
     json_raw(g_status, "fromBluetooth", ble, sizeof(ble));
     json_raw(g_status, "fromRadio", radio, sizeof(radio));
-    json_raw(g_status, "fromWifiDirect", wfd, sizeof(wfd));
-    json_raw(g_status, "directLinksActive", direct, sizeof(direct));
+    json_raw(g_status, "mirrorSmall", mirror, sizeof(mirror));
 
     int gb = str_to_int(quota);
-    int on = gb > 0;
     int used_mb = str_to_int(used) / (1024 * 1024);
 
-    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"quota\",\"sections\":[", sizeof(g_msg));
-
-    /* The whole contract: one number. */
-    str_cat(g_msg, "{\"title\":\"The offer\",\"items\":[", sizeof(g_msg));
     {
-        char title[80], sub[192], mb[16];
-        if (on) {
-            str_copy(title, "Holding up to ", sizeof(title));
-            str_cat(title, quota, sizeof(title));
-            str_cat(title, " GB for other people", sizeof(title));
+        char v[192], mb[16];
+        if (gb > 0) {
             int_to_str(used_mb, mb, sizeof(mb));
-            str_copy(sub, "Using ", sizeof(sub));
-            str_cat(sub, mb, sizeof(sub));
-            str_cat(sub, " MB across ", sizeof(sub));
-            str_cat(sub, items, sizeof(sub));
-            str_cat(sub, " items. Full is full - nothing of yours is ever evicted for this.", sizeof(sub));
+            str_copy(v, "Holding ", sizeof(v));
+            str_cat(v, mb, sizeof(v));
+            str_cat(v, " MB across ", sizeof(v));
+            str_cat(v, items, sizeof(v));
+            str_cat(v, " files, of ", sizeof(v));
+            str_cat(v, quota, sizeof(v));
+            str_cat(v, " GB offered", sizeof(v));
         } else {
-            str_copy(title, "Not archiving - 0 GB", sizeof(title));
-            str_copy(sub, "This device holds nothing for anybody. Tap to offer 5 GB.", sizeof(sub));
+            str_copy(v, "Holding nothing for anybody", sizeof(v));
         }
-        row(g_msg, sizeof(g_msg), "quota", title, sub, on);
+        set_field("status", v);
     }
-    str_cat(g_msg, ",", sizeof(g_msg));
-    {
-        char title[64];
-        str_copy(title, "+5 GB / reset to 0", sizeof(title));
-        row(g_msg, sizeof(g_msg), "quota_more", title,
-            "Tap to raise the ceiling. Tap past 50 GB to go back to nothing.", 0);
-    }
-    str_cat(g_msg, "]}", sizeof(g_msg));
 
-    /* What it takes. */
-    str_cat(g_msg, ",{\"title\":\"What this device holds\",\"items\":[", sizeof(g_msg));
-    {
-        char title[80];
-        str_copy(title, str_eq(followed, "true")
-                            ? "Authors I follow: yes"
-                            : "Authors I follow: no", sizeof(title));
-        row(g_msg, sizeof(g_msg), "followed", title,
-            "Redundancy for the people you already care about.",
-            str_eq(followed, "true"));
-    }
-    str_cat(g_msg, "]}", sizeof(g_msg));
-
-    /* The direct links: the peers with nowhere else to go. */
-    str_cat(g_msg, ",{\"title\":\"Peers with nowhere else to go\",\"items\":[", sizeof(g_msg));
-    {
-        char sub[192];
-        str_copy(sub, "Their data dies if you refuse it. Accepted on the strength of the link alone.", sizeof(sub));
-        char title[96];
-        str_copy(title, "LAN ", sizeof(title));
-        str_cat(title, str_eq(lan, "true") ? "on" : "off", sizeof(title));
-        str_cat(title, " - Bluetooth ", sizeof(title));
-        str_cat(title, str_eq(ble, "true") ? "on" : "off", sizeof(title));
-        str_cat(title, " - LoRa ", sizeof(title));
-        str_cat(title, str_eq(radio, "true") ? "on" : "off", sizeof(title));
-        str_cat(title, " - WiFi Direct ", sizeof(title));
-        str_cat(title, str_eq(wfd, "true") ? "on" : "off", sizeof(title));
-        row(g_msg, sizeof(g_msg), "links", title, sub, 1);
-    }
-    if (!str_eq(direct, "true")) {
-        /* Said plainly rather than glossed: the switches are stored and honoured
-         * by the policy, but the host cannot yet tell which interface a deposit
-         * arrived on, so nothing can trigger them. A wapp that pretended
-         * otherwise would be lying to the person who volunteered the disk. */
-        str_cat(g_msg, ",", sizeof(g_msg));
-        row(g_msg, sizeof(g_msg), "links_note",
-            "Not active yet",
-            "The host cannot yet see which link a deposit came in on, so these "
-            "switches are saved but do not fire.", 0);
-    }
-    str_cat(g_msg, "]}]}", sizeof(g_msg));
-    send_msg(g_msg);
+    set_field("quota", quota);
+    set_field("followed", followed);
+    set_field("mirror", mirror);
+    set_field("from_lan", lan);
+    set_field("from_bluetooth", ble);
+    set_field("from_radio", radio);
 }
 
 /* Where the space went, and how to get it back.
@@ -221,35 +168,15 @@ static void set_pref(const char *kv) {
     refresh();
 }
 
-/* Raise the ceiling in 5 GB steps; past 50 GB, go back to holding nothing —
- * because revoking must be at least as easy as granting. */
-static void bump_quota(void) {
-    int n = hal_archive_status(g_status, sizeof(g_status) - 1);
-    if (n <= 0) return;
-    g_status[n] = '\0';
-    char q[16] = "0";
-    json_raw(g_status, "quotaGb", q, sizeof(q));
-    int gb = str_to_int(q) + 5;
-    if (gb > 50) gb = 0;
-
-    char kv[32], num[16];
-    int_to_str(gb, num, sizeof(num));
-    str_copy(kv, "quotaGb=", sizeof(kv));
-    str_cat(kv, num, sizeof(kv));
-    set_pref(kv);
-}
-
-static void toggle(const char *key) {
-    int n = hal_archive_status(g_status, sizeof(g_status) - 1);
-    if (n <= 0) return;
-    g_status[n] = '\0';
-    char cur[8] = "true";
-    json_raw(g_status, key, cur, sizeof(cur));
-
+/* A switch the user flipped: read its new value out of the event and hand it to
+ * the host under the name the host knows it by. */
+static void toggle_from(const char *buf, const char *field, const char *key) {
+    char v[8] = "";
+    if (!json_raw(buf, field, v, sizeof(v))) return;
     char kv[48];
     str_copy(kv, key, sizeof(kv));
     str_cat(kv, "=", sizeof(kv));
-    str_cat(kv, str_eq(cur, "true") ? "0" : "1", sizeof(kv));
+    str_cat(kv, str_eq(v, "true") ? "1" : "0", sizeof(kv));
     set_pref(kv);
 }
 
@@ -276,16 +203,28 @@ int32_t module_handle_event(void) {
 
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
         refresh();
-    } else if (str_eq(cmd, "quota_tap")) {
-        char id[32] = "";
-        if (!json_raw(buf, "quota_id", id, sizeof(id))) return 0;
-        if (str_eq(id, "quota") || str_eq(id, "quota_more")) bump_quota();
-        else if (str_eq(id, "followed")) toggle("followed");
-        else if (str_eq(id, "links")) toggle("fromLan");
+    } else if (str_eq(cmd, "quota_changed")) {
+        char v[16] = "";
+        if (json_raw(buf, "quota", v, sizeof(v)) && v[0]) {
+            char kv[32];
+            str_copy(kv, "quotaGb=", sizeof(kv));
+            str_cat(kv, v, sizeof(kv));
+            set_pref(kv);
+        }
+    } else if (str_eq(cmd, "followed_changed")) {
+        toggle_from(buf, "followed", "followed");
+    } else if (str_eq(cmd, "mirror_changed")) {
+        toggle_from(buf, "mirror", "mirrorSmall");
+    } else if (str_eq(cmd, "from_lan_changed")) {
+        toggle_from(buf, "from_lan", "fromLan");
+    } else if (str_eq(cmd, "from_bluetooth_changed")) {
+        toggle_from(buf, "from_bluetooth", "fromBluetooth");
+    } else if (str_eq(cmd, "from_radio_changed")) {
+        toggle_from(buf, "from_radio", "fromRadio");
     } else if (str_eq(cmd, "space_tap")) {
         /* A cleanup row, or one depositor. The row already said what it would
          * free, so tapping it does exactly that and nothing more. Rows starting
-         * with '#' are statistics — they are information, not buttons. */
+         * with '#' are statistics — information, not buttons. */
         char id[80] = "";
         if (json_raw(buf, "space_id", id, sizeof(id)) && id[0] && id[0] != '#') {
             hal_archive_drop(id, str_len(id));

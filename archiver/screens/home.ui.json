@@ -7,9 +7,72 @@
     "children": [
       {
         "$": "field",
+        "name": "status",
+        "$type": "string",
+        "label": "This device",
+        "readonly": true,
+        "tip": "What is currently being held for other people."
+      },
+      {
+        "$": "field",
         "name": "quota",
-        "$type": "people",
-        "tip": "Tap the quota to raise it in 5 GB steps; past 50 GB it returns to zero — revoking must be as easy as granting."
+        "$type": "enum",
+        "label": "Hold for other people",
+        "default": "0",
+        "apply": "quota_changed",
+        "tip": "Zero by default: a device that never volunteered holds nothing for anybody.",
+        "children": [
+          { "$": "option", "name": "0",   "label": "Nothing" },
+          { "$": "option", "name": "5",   "label": "5 GB" },
+          { "$": "option", "name": "20",  "label": "20 GB" },
+          { "$": "option", "name": "50",  "label": "50 GB" },
+          { "$": "option", "name": "200", "label": "200 GB" }
+        ]
+      },
+      {
+        "$": "field",
+        "name": "followed",
+        "$type": "bool",
+        "label": "Keep media from people I follow",
+        "default": true,
+        "apply": "followed_changed",
+        "tip": "Redundancy for the accounts you already care about."
+      },
+      {
+        "$": "field",
+        "name": "mirror",
+        "$type": "bool",
+        "label": "Take the load off nearby phones",
+        "default": true,
+        "apply": "mirror_changed",
+        "tip": "Mirror what battery-powered devices share, then answer for it so the network stops waking them."
+      },
+      {
+        "$": "field",
+        "name": "from_lan",
+        "$type": "bool",
+        "label": "Accept from the local network",
+        "default": true,
+        "apply": "from_lan_changed",
+        "tip": "A peer on your LAN has no route to anywhere else. Its data dies if you refuse it."
+      },
+      {
+        "$": "field",
+        "name": "from_bluetooth",
+        "$type": "bool",
+        "label": "Accept over Bluetooth",
+        "default": true,
+        "apply": "from_bluetooth_changed",
+        "tip": "Short range: this peer is physically here, and has nowhere else to go."
+      },
+      {
+        "$": "field",
+        "name": "from_radio",
+        "$type": "bool",
+        "label": "Accept over LoRa / packet radio",
+        "default": true,
+        "apply": "from_radio_changed",
+        "tip": "Slow and precious. The sender paid for every byte."
       }
     ]
   },

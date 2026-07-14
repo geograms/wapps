@@ -3,22 +3,81 @@
     "$": "screen",
     "name": "Indexer",
     "icon": "hub",
-    "tip": "An indexer answers 'where can I find npub X'. It holds addresses, never other people's posts — a phone book, not a library.",
+    "tip": "An indexer answers 'where can I find npub X'. It hands out addresses and stores no one else's posts — a phone book, not a library.",
     "children": [
       {
         "$": "field",
-        "name": "live",
-        "$type": "people",
-        "tip": "Tap 'Volunteer' to cycle: off, only when plugged in, always."
+        "name": "status",
+        "$type": "string",
+        "label": "This device",
+        "readonly": true,
+        "tip": "Whether the network is being sent here right now."
       },
       {
-        "$": "action",
+        "$": "field",
         "name": "volunteer",
+        "$type": "enum",
         "label": "Volunteer this device",
-        "icon": "power",
-        "style": "primary",
-        "slot": "toolbar",
-        "tip": "Off, when plugged in, or always. Revoking is as easy as granting."
+        "default": "auto",
+        "apply": "volunteer_changed",
+        "tip": "Off = hold nothing. Plugged in = serve while on a charger and a real uplink. Always = serve regardless. Revoking is exactly as easy as granting.",
+        "children": [
+          {
+            "$": "option",
+            "name": "off",
+            "label": "Off"
+          },
+          {
+            "$": "option",
+            "name": "auto",
+            "label": "Plugged in"
+          },
+          {
+            "$": "option",
+            "name": "always",
+            "label": "Always"
+          }
+        ]
+      },
+      {
+        "$": "field",
+        "name": "pointers",
+        "$type": "string",
+        "label": "Addresses held",
+        "readonly": true,
+        "tip": "An indexer holds pointers, never other people's posts."
+      },
+      {
+        "$": "field",
+        "name": "authors",
+        "$type": "string",
+        "label": "Authors this device is a home for",
+        "readonly": true,
+        "tip": "Published as who-has records, so people are sent to you and not to a server."
+      },
+      {
+        "$": "field",
+        "name": "peers",
+        "$type": "string",
+        "label": "Indexers synced with",
+        "readonly": true,
+        "tip": "Indexers spread the map between themselves so phones never have to."
+      },
+      {
+        "$": "field",
+        "name": "hygiene",
+        "$type": "string",
+        "label": "Dead pointers pruned · stores refused",
+        "readonly": true,
+        "tip": "A provider that will not serve stops being handed out."
+      },
+      {
+        "$": "field",
+        "name": "hardware",
+        "$type": "string",
+        "label": "Hardware (change in Settings)",
+        "readonly": true,
+        "tip": "Power, uplink and how much of the last week this device actually had power."
       }
     ]
   },
