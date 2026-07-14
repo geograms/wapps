@@ -43,6 +43,13 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
         if (*p == '"') {
             p++;
             while (*p && *p != '"' && o < m - 1) out[o++] = *p++;
+        } else if (*p == '[') {
+            int depth = 0;
+            while (*p && o < m - 1) {
+                if (*p == '[') depth++;
+                if (*p == ']') { depth--; out[o++] = *p++; if (!depth) break; continue; }
+                out[o++] = *p++;
+            }
         } else {
             while (*p && *p != ',' && *p != '}' && o < m - 1) out[o++] = *p++;
         }
@@ -53,8 +60,10 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
 }
 
 /* ── Buffers ─────────────────────────────────────────────────────────── */
-static char g_status[2048];
-static char g_msg[8192];
+static char g_status[4096];
+static char g_msg[12288];
+static char g_reqSpark[1024];
+static char g_bwSpark[1024];
 
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 
@@ -115,6 +124,8 @@ static void push_dashboard(void) {
     char items[16] = "0", served[16] = "0", freeable[24] = "0 B";
     char full[16] = "0";
     char followed[8] = "true", nearby[8] = "true", mirror[8] = "true";
+    char reqAvg[16] = "0", reqLast[16] = "0";
+    char bwAvg[24] = "0 B", bwLast[24] = "0 B";
     json_raw(g_status, "quotaGb", quota, sizeof(quota));
     json_raw(g_status, "usedText", usedText, sizeof(usedText));
     json_raw(g_status, "quotaText", quotaText, sizeof(quotaText));
@@ -125,6 +136,12 @@ static void push_dashboard(void) {
     json_raw(g_status, "followed", followed, sizeof(followed));
     json_raw(g_status, "fromNearby", nearby, sizeof(nearby));
     json_raw(g_status, "mirrorSmall", mirror, sizeof(mirror));
+    json_raw(g_status, "reqAvgPerHour", reqAvg, sizeof(reqAvg));
+    json_raw(g_status, "reqLastHour", reqLast, sizeof(reqLast));
+    json_raw(g_status, "bwPerHourText", bwAvg, sizeof(bwAvg));
+    json_raw(g_status, "bwLastHourText", bwLast, sizeof(bwLast));
+    json_raw(g_status, "reqSpark", g_reqSpark, sizeof(g_reqSpark));
+    json_raw(g_status, "bwSpark", g_bwSpark, sizeof(g_bwSpark));
 
     int on = !str_eq(quota, "0");
 
@@ -136,6 +153,36 @@ static void push_dashboard(void) {
         str_copy(hint, "of ", sizeof(hint));
         str_cat(hint, quotaText, sizeof(hint));
         tile("used", "Storage used", usedText, "", hint, on ? full : "", 0);
+    }
+    str_cat(g_msg, ",", sizeof(g_msg));
+
+    /* What other people asked for, over the last 48 hours. */
+    {
+        char hint[64];
+        str_copy(hint, reqLast, sizeof(hint));
+        str_cat(hint, " in the last hour", sizeof(hint));
+        str_cat(g_msg, "{\"id\":\"req\",\"label\":\"Requests per hour\",\"value\":\"", sizeof(g_msg));
+        str_cat(g_msg, reqAvg, sizeof(g_msg));
+        str_cat(g_msg, "\",\"unit\":\"avg\",\"hint\":\"", sizeof(g_msg));
+        str_cat(g_msg, hint, sizeof(g_msg));
+        str_cat(g_msg, "\",\"spark\":", sizeof(g_msg));
+        str_cat(g_msg, g_reqSpark[0] ? g_reqSpark : "[]", sizeof(g_msg));
+        str_cat(g_msg, "}", sizeof(g_msg));
+    }
+    str_cat(g_msg, ",", sizeof(g_msg));
+
+    /* And what it cost the uplink to give it to them. */
+    {
+        char hint[64];
+        str_copy(hint, bwLast, sizeof(hint));
+        str_cat(hint, " in the last hour", sizeof(hint));
+        str_cat(g_msg, "{\"id\":\"bw\",\"label\":\"Bandwidth per hour\",\"value\":\"", sizeof(g_msg));
+        str_cat(g_msg, bwAvg, sizeof(g_msg));
+        str_cat(g_msg, "\",\"unit\":\"avg\",\"hint\":\"", sizeof(g_msg));
+        str_cat(g_msg, hint, sizeof(g_msg));
+        str_cat(g_msg, "\",\"spark\":", sizeof(g_msg));
+        str_cat(g_msg, g_bwSpark[0] ? g_bwSpark : "[]", sizeof(g_msg));
+        str_cat(g_msg, "}", sizeof(g_msg));
     }
     str_cat(g_msg, ",", sizeof(g_msg));
     tile("files", "Files kept", items, "", "", "", 0);
