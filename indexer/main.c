@@ -158,7 +158,7 @@ static void push_dashboard(void) {
         str_cat(g_msg, "}", sizeof(g_msg));
     }
     str_cat(g_msg, ",", sizeof(g_msg));
-    tile("pointers", "Pointers", pointers, "", "", 0);
+    tile("pointers", "Links", pointers, "", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));
     tile("authors", "Authors", authors, "", "", 0);
     str_cat(g_msg, ",", sizeof(g_msg));

@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.indexer",
-  "version":         "0.6.1",
+  "version":         "0.6.2",
   "kind":            "app",
   "title":           "Indexer",
   "description":     "Indexer - volunteer this device to answer 'where can I find npub X'. It hands out addresses, never other people's posts.",
