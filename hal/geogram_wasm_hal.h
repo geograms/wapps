@@ -238,9 +238,9 @@ uint32_t hal_folder_subs(char *out_buf, uint32_t out_len);
 __attribute__((import_module("hal"), import_name("ui_attached")))
 int32_t hal_ui_attached(void);
 
-/* The folder's shareable pointer: "nfolder1..." (docs/torrents.md §11) — the
+/* The folder's shareable pointer: "ntorrent1..." (docs/torrents.md §11) — the
  * folder key plus up to 3 provider hints and the publisher. Accepts hex, npub
- * or nfolder as input. */
+ * or ntorrent as input. */
 __attribute__((import_module("hal"), import_name("folder_link")))
 uint32_t hal_folder_link(const char *folder_id, uint32_t id_len,
                          char *out_buf, uint32_t out_len);

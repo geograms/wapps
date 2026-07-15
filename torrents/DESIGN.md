@@ -6,7 +6,7 @@ protocol; this is the control surface over it.
 ## What this wapp is
 
 A torrent client whose **unit of sharing is a folder, not a file**, whose
-**address is a key** (`nfolder1…`, docs/torrents.md §11) rather than a hash of
+**address is a key** (`ntorrent1…`, docs/torrents.md §11) rather than a hash of
 the contents, and whose **tracker is the Indexer mesh** (aurora/docs/NOSTR.md).
 Because the address is a key, the publisher can add or remove files and every
 holder converges on the new state under the *same link* — no new magnet, no dead
@@ -26,7 +26,7 @@ Nothing about storage or networking is in here. The host owns it:
 | download one file / everything | `hal_folder_download` |
 | **pin** (keep a full copy + announce as a holder) | `hal_folder_pin` |
 | **the swarm** (who has this, and what are they made of) | `hal_folder_swarm` |
-| **the share link** (`nfolder1…`) | `hal_folder_link` |
+| **the share link** (`ntorrent1…`) | `hal_folder_link` |
 | republish what changed on disk | `hal_folder_rescan` |
 
 `folder_pin`, `folder_swarm` and `folder_link` are new host HALs added with this
@@ -55,7 +55,7 @@ stays free of any app's vocabulary.
   how recently it was heard, and **whether we heard it ourselves or an Indexer
   told us** — after Indexer-to-Indexer sync the freshness being quoted is
   second-hand, and the age of the information is not the age of the device.
-- **Info** — the `nfolder1…` link, the file count and size, and who holds the
+- **Info** — the `ntorrent1…` link, the file count and size, and who holds the
   key. The link is copyable; the folder's *name* is deliberately not inside it
   (an unsigned name in a shareable string is a phishing surface — the real,
   signed name arrives with the op-log a second later).

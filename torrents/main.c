@@ -2,7 +2,7 @@
  * Torrents — folder torrents over Reticulum (aurora/docs/torrents.md)
  *
  * The unit of sharing is a FOLDER, not a file, and its address is a key
- * (`nfolder1…`) rather than a hash of its contents — so a publisher can add or
+ * (`ntorrent1…`) rather than a hash of its contents — so a publisher can add or
  * remove files and every seeder converges on the new state under the SAME link.
  * Files inside stay content-addressed (sha256), exactly like BitTorrent: the
  * directory is mutable, the bytes are not.
@@ -189,10 +189,13 @@ static void copy_array(const char *json, const char *key, char *out, unsigned m)
 }
 
 static void prompt_copy(const char *title, const char *body, const char *copyval) {
-  char m[900] = "{\"type\":\"ui.prompt\",\"id\":\"noop\",\"title\":\"";
+  /* Copy AND a QR of the same value — show a code someone can scan instead of
+   * copy-pasting a long link. The QR renders on every platform (desktop too). */
+  char m[1600] = "{\"type\":\"ui.prompt\",\"id\":\"noop\",\"title\":\"";
   jesc(m, sizeof(m), title);
   s_cat(m, "\",\"body\":\"", sizeof(m)); jesc(m, sizeof(m), body);
   s_cat(m, "\",\"copy\":\"", sizeof(m)); jesc(m, sizeof(m), copyval);
+  s_cat(m, "\",\"qr\":\"", sizeof(m)); jesc(m, sizeof(m), copyval);
   s_cat(m, "\",\"confirm\":\"Close\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
@@ -261,21 +264,26 @@ static unsigned g_tick = 0;
 /* Settings (KV) */
 static int g_pin_on_open = 1;
 static int g_rescan_min = 15;
+static int g_share_author = 0;   /* include my npub in shared links — OFF by default */
 
 static void settings_save(void) {
   char b[24]; b[0] = 0;
   s_cat(b, g_pin_on_open ? "1" : "0", sizeof(b));
   { char nb[12]; u_itoa((unsigned)g_rescan_min, nb); s_cat(b, nb, sizeof(b)); }
   hal_kv_set("cfg", 3, b, s_len(b));
+  hal_kv_set("aut", 3, g_share_author ? "1" : "0", 1);
 }
 static void settings_load(void) {
   char b[24];
   uint32_t n = hal_kv_get("cfg", 3, b, sizeof(b) - 1);
-  if (n < 2) return;
-  b[n] = 0;
-  g_pin_on_open = b[0] == '1';
-  int r = to_int(b + 1);
-  if (r >= 0 && r < 10000) g_rescan_min = r;
+  if (n >= 2) {
+    b[n] = 0;
+    g_pin_on_open = b[0] == '1';
+    int r = to_int(b + 1);
+    if (r >= 0 && r < 10000) g_rescan_min = r;
+  }
+  char a[4];
+  if (hal_kv_get("aut", 3, a, 3) >= 1) g_share_author = a[0] == '1';
 }
 
 /* ── the torrent list ────────────────────────────────────────────────────── */
@@ -1084,6 +1092,11 @@ static void render_settings(void) {
   root[rn] = 0;
   field_set("dl_root", root[0] ? root : "(not set)");
 
+  { const char *m = g_share_author
+        ? "{\"type\":\"ui.field.set\",\"field\":\"share_author\",\"value\":true}"
+        : "{\"type\":\"ui.field.set\",\"field\":\"share_author\",\"value\":false}";
+    hal_msg_send(m, s_len(m)); }
+
   log_clear("settings_log");
   uint32_t n = hal_folder_subs(g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
@@ -1146,8 +1159,13 @@ static void prompt_manage(void) {
 
 static void do_copy_link(void) {
   if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+  /* Include the author npub only when the user opted in (off by default — a
+   * shared link should not name a person unless they choose to). */
+  char arg[90];
+  s_cpy(arg, g_cur, sizeof(arg));
+  if (g_share_author) s_cat(arg, "\t1", sizeof(arg));
   char link[400];
-  uint32_t n = hal_folder_link(g_cur, s_len(g_cur), link, sizeof(link) - 1);
+  uint32_t n = hal_folder_link(arg, s_len(arg), link, sizeof(link) - 1);
   link[n] = 0;
   if (!link[0]) { notify("warning", "No link yet"); return; }
   char body[600] = "Anyone with this link can read, download and re-host this "
@@ -1289,6 +1307,26 @@ void module_handle_event(void) {
   char cmd[40] = "", typ[24] = "";
   jstr(buf, "command", cmd, sizeof(cmd));
   jstr(buf, "type", typ, sizeof(typ));
+  /* A popup-menu item (the Add "+" menu) arrives as {type:"action",action:name}
+   * rather than a {command:name}; fold its name into cmd so the action handlers
+   * below fire for it too. */
+  if (!cmd[0] && s_eq(typ, "action")) jstr(buf, "action", cmd, sizeof(cmd));
+
+  /* The QR scanner came back with a decoded string — open it like a pasted link.
+   * On desktop the host has no camera and returns an error instead. */
+  if (s_eq(typ, "qr.scanned")) {
+    char text[500] = "";
+    jstr(buf, "text", text, sizeof(text));
+    if (text[0]) {
+      open_by_id(text);
+    } else {
+      char err[24] = "";
+      jstr(buf, "error", err, sizeof(err));
+      if (s_eq(err, "nocamera"))
+        notify("info", "Scanning needs a phone camera");
+    }
+    return;
+  }
 
   /* The picker came back: a directory becomes a torrent — unless we asked for a
    * piece of artwork, in which case it is a FILE for a listing slot. */
@@ -1458,7 +1496,12 @@ void module_handle_event(void) {
                     "\"title\":\"Pick a folder to share as a torrent\"}";
     hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "t_open_link")) {
-    prompt_input("open", "Open a torrent", "nfolder1... / npub / hex id", 400);
+    prompt_input("open", "Open a torrent", "ntorrent1... / npub / hex id", 400);
+  } else if (s_eq(cmd, "t_scan_qr")) {
+    /* Ask the host to open the camera scanner; the decoded text comes back as a
+     * qr.scanned message (Android only; desktop replies with no camera). */
+    const char *m = "{\"type\":\"qr.scan\"}";
+    hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "t_back") || s_eq(cmd, "nav_back")) {
     /* One back control, one sensible chain. Inside a torrent's file browser:
      * subfolder -> parent -> back to the library list. In the library list:
@@ -1592,6 +1635,7 @@ void module_handle_event(void) {
     prompt_copy("Folder id (hex)", g_cur, g_cur);
   } else if (s_eq(cmd, "settings_apply")) {
     g_pin_on_open = jbool_def(buf, "pin_on_open", 1);
+    g_share_author = jbool_def(buf, "share_author", 0);
     char rb[16] = "";
     jstr(buf, "rescan_min", rb, sizeof(rb));
     if (rb[0]) {
