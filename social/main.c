@@ -3,7 +3,7 @@
  *
  *   Activity  ($type:"chat")          kind-1 notes from the accounts you follow
  *   Messages  ($type:"conversations") kind-4 encrypted DMs, per-peer threads
- *   Follows   ($type:"people")        who you follow (+ add / tap-to-unfollow)
+ *   Following ($type:"people")        who you follow (+ add / explicit unfollow)
  *   Relay servers (menu panel)        relay list + reachability + add / remove
  *
  * All relay/crypto/signing/decryption is host-side via hal.nostr; the transport
@@ -391,19 +391,33 @@ static void push_follows(void) {
     int fn = hal_nostr_follows(g_follows, sizeof(g_follows) - 1);
     if (fn > 0) g_follows[fn] = '\0'; else str_copy(g_follows, "[]", sizeof(g_follows));
     str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"follows_list\",\"sections\":[{\"title\":\"Following\",\"items\":[", sizeof(g_msg));
-    int first = 1;
+    int first = 1, shown = 0;
     for (char *p = g_follows; *p; p++) {
         if (*p != '"') continue;
         char hex[80] = ""; unsigned o = 0; p++;
         while (*p && *p != '"' && o < sizeof(hex) - 1) hex[o++] = *p++;
         hex[o] = '\0';
         if (o < 32) continue;   /* skip non-key tokens */
-        char title[16]; short12(hex, title);
+        if (shown >= 20) break; /* keep the UI message below its fixed cap */
+        shown++;
+        char title[256] = "", pic[512] = "", npub[80] = "";
+        int pn = hal_nostr_profile(hex, str_len(hex), g_prof, sizeof(g_prof) - 1);
+        if (pn > 0) {
+            g_prof[pn] = '\0';
+            json_raw(g_prof, "name", title, sizeof(title));
+            json_raw(g_prof, "pic", pic, sizeof(pic));
+            json_raw(g_prof, "npub", npub, sizeof(npub));
+        }
+        if (!title[0]) short12(hex, title);
         if (!first) str_cat(g_msg, ",", sizeof(g_msg));
         first = 0;
         str_cat(g_msg, "{\"id\":\"", sizeof(g_msg)); str_cat(g_msg, hex, sizeof(g_msg));
         str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg)); str_cat(g_msg, title, sizeof(g_msg));
-        str_cat(g_msg, "…\",\"subtitle\":\"tap to unfollow\"}", sizeof(g_msg));
+        str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
+        str_cat(g_msg, npub[0] ? npub : hex, sizeof(g_msg));
+        str_cat(g_msg, "\"", sizeof(g_msg));
+        if (pic[0]) { str_cat(g_msg, ",\"avatar\":\"", sizeof(g_msg)); str_cat(g_msg, pic, sizeof(g_msg)); str_cat(g_msg, "\"", sizeof(g_msg)); }
+        str_cat(g_msg, ",\"action\":\"follows_list_unfollow\",\"actionLabel\":\"Unfollow\"}", sizeof(g_msg));
     }
     str_cat(g_msg, "]}]}", sizeof(g_msg));
     send_msg(g_msg);
@@ -678,6 +692,10 @@ int32_t module_handle_event(void) {
     if (!json_raw(buf, "command", cmd, sizeof(cmd))) return 0;
 
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
+        if (g_sub_follows[0]) {
+            hal_nostr_unsubscribe(g_sub_follows, str_len(g_sub_follows));
+            g_sub_follows[0] = '\0';
+        }
         subscribe_all(); push_relays(); push_follows();
     } else if (str_eq(cmd, "activity_send")) {
         char text[6000] = "";
@@ -824,7 +842,7 @@ int32_t module_handle_event(void) {
             }
             subscribe_all(); push_follows();
         }
-    } else if (str_eq(cmd, "follows_list_tap") || str_eq(cmd, "follows_list")) {
+    } else if (str_eq(cmd, "follows_list_unfollow") || str_eq(cmd, "follows_list")) {
         char key[128] = "";
         if (json_raw(buf, "follows_list_id", key, sizeof(key)) && key[0]) {
             hal_nostr_unfollow(key, str_len(key));

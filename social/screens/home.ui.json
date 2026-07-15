@@ -124,7 +124,7 @@
   },
   {
     "$": "screen",
-    "name": "Follows",
+    "name": "Following",
     "icon": "people",
     "menu": true,
     "tip": "Accounts you follow appear in your Activity feed.",
@@ -148,7 +148,7 @@
         "$": "field",
         "name": "follows_list",
         "$type": "people",
-        "tip": "Who you follow; tap a row to unfollow."
+        "tip": "Accounts you follow. Tap a row to open its profile."
       }
     ],
     "toolbar": true
