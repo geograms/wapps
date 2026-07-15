@@ -1190,15 +1190,22 @@ static void open_torrent(const char *fid) {
   s_cpy(g_sel, g_cur, sizeof(g_sel));
   g_cur_path[0] = 0;
   g_view = 0;
+  /* The name shown in the Info screen's app bar: the listing's TITLE first, else
+   * the folder's own name. */
   { char st[4096]; uint32_t sn = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
-    st[sn] = 0; char nm[160]; jstr(st, "name", nm, sizeof(nm));
+    st[sn] = 0; char nm[160]; jstr(st, "title", nm, sizeof(nm));
+    if (!nm[0]) jstr(st, "name", nm, sizeof(nm));
     s_cpy(g_cur_name, nm, sizeof(g_cur_name)); }
   render_list();
   nav_set(0, "");
   render_swarm();
   render_info();
   render_listing();
-  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Listing\"}";
+  /* App-bar title = the torrent's name (not the static "Listing"); the hero card
+   * no longer repeats it as text, so the name is said once. */
+  char m[240] = "{\"type\":\"ui.screen.open\",\"name\":\"Listing\",\"title\":\"";
+  jesc(m, sizeof(m), g_cur_name[0] ? g_cur_name : "Torrent");
+  s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
 
