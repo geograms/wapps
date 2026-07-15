@@ -128,7 +128,7 @@ static char g_prof[2560];          /* one hal_nostr_profile result         */
 static char g_rdone[96];           /* 1 once replies pushed for post i     */
 static char g_replies[8192];       /* one hal_nostr_replies result         */
 static int  g_ticks = 0;
-static int  g_activity_all = 1;   /* public firehose only while All is visible */
+static int  g_activity_all = 1;   /* current activity filter is All */
 
 /* ── Subscriptions ───────────────────────────────────────────────────── */
 static void subscribe_all(void) {
@@ -717,10 +717,11 @@ int32_t module_handle_event(void) {
         json_raw(buf, "activity_filter", filter, sizeof(filter));
         g_activity_all = str_eq(filter, "all");
         if (!g_activity_all) {
-            if (g_sub_fire[0]) {
-                hal_nostr_unsubscribe(g_sub_fire, str_len(g_sub_fire));
-                g_sub_fire[0] = '\0';
-            }
+            /* Keep the page's firehose subscription alive while another feed
+             * filter is selected.  Tab rebuilds and delayed filter callbacks
+             * used to tear it down even though All was still visible, which
+             * also cancelled the host's ten-minute curator.  The foreground
+             * engine owns this subscription and disposes it with the page. */
             if (g_sub_disc[0]) {
                 hal_nostr_unsubscribe(g_sub_disc, str_len(g_sub_disc));
                 g_sub_disc[0] = '\0';
