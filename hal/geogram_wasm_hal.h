@@ -320,6 +320,25 @@ __attribute__((import_module("hal"), import_name("folder_search")))
 uint32_t hal_folder_search(const char *query, uint32_t query_len,
                            char *out_buf, uint32_t out_len);
 
+/* Download library — real files on disk, organized in subfolders.
+ *   folder_download_root: current download folder path (empty if unset).
+ *   folder_set_download_root(path): choose it; adopts torrents already under it.
+ *   folder_library(relPath) → {"root","path","dirs":[{"name"}],
+ *       "torrents":[{"folderId","name","owned"}]}  — one level of the tree.
+ *   folder_mkdir(relPath): create an organizing subfolder under the root.
+ *   folder_move("folderId\trelPath"): move a torrent into a subfolder. */
+__attribute__((import_module("hal"), import_name("folder_download_root")))
+uint32_t hal_folder_download_root(char *out_buf, uint32_t out_len);
+__attribute__((import_module("hal"), import_name("folder_set_download_root")))
+uint32_t hal_folder_set_download_root(const char *path, uint32_t path_len);
+__attribute__((import_module("hal"), import_name("folder_library")))
+uint32_t hal_folder_library(const char *rel, uint32_t rel_len,
+                            char *out_buf, uint32_t out_len);
+__attribute__((import_module("hal"), import_name("folder_mkdir")))
+uint32_t hal_folder_mkdir(const char *rel, uint32_t rel_len);
+__attribute__((import_module("hal"), import_name("folder_move")))
+uint32_t hal_folder_move(const char *arg, uint32_t arg_len);
+
 /* Open ONE file of a folder with whatever the system uses to view that type —
  * the gallery for a photo, a reader for a PDF, the installer for an APK.
  * arg = "<sha256hex>\t<name>" (the name carries the extension the OS routes on).

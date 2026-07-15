@@ -3,10 +3,13 @@
     "$": "screen",
     "name": "Torrents",
     "icon": "download_for_offline",
-    "tip": "Tap a torrent to see what is inside.",
+    "toolbar": true,
+    "tip": "Tap a torrent to open it, or a folder to go in. Organize with folders.",
     "children": [
-      { "$": "action", "name": "t_manage", "label": "Manage", "icon": "tune", "style": "secondary", "tip": "Download everything, pin, copy the link, rescan or remove the open torrent." },
-      { "$": "field", "name": "torrents", "$type": "people", "empty": "Nothing here yet - tap + to open a link or share a folder.", "tip": "Tap to open; inside, tap a folder to enter or a file to open it." }
+      { "$": "action", "name": "flt_all", "label": "All", "icon": "list", "style": "secondary", "tip": "Show every torrent." },
+      { "$": "action", "name": "flt_mine", "label": "Mine", "icon": "person", "style": "secondary", "tip": "Show only the torrents you created." },
+      { "$": "action", "name": "lib_newfolder", "label": "New folder", "icon": "create_new_folder", "style": "secondary", "tip": "Create a subfolder here to organize torrents." },
+      { "$": "field", "name": "torrents", "$type": "people", "empty": "Nothing here yet - tap + to open a link or share a folder.", "tip": "Tap a torrent to open it, or a folder to go in." }
     ]
   },
   {
@@ -44,6 +47,7 @@
     "icon": "info",
     "children": [
       { "$": "field", "name": "listing_media", "$type": "gallery", "tip": "The listing, then a simple file browser. Tap a screenshot to open it full-screen; tap a file to open it, or Browse for the full-screen file view." },
+      { "$": "action", "name": "listing_move", "label": "Move to folder", "icon": "drive_file_move", "style": "secondary", "tip": "File this torrent under one of your organizing folders." },
       { "$": "action", "name": "listing_edit", "label": "Edit listing", "icon": "edit", "style": "secondary", "tip": "Describe what you share (publisher only)." }
     ]
   },
@@ -118,6 +122,15 @@
     "icon": "settings",
     "tip": "Seeding and rescans.",
     "children": [
+      {
+        "$": "group",
+        "name": "downloads",
+        "tip": "Where downloaded torrents are stored on disk.",
+        "children": [
+          { "$": "field", "name": "dl_root", "$type": "string", "label": "Download folder", "readonly": true, "tip": "Downloaded torrents are written here as real files, and the subfolders under it organize your list. Point it at a folder from a previous install to re-adopt everything inside." },
+          { "$": "action", "name": "dl_folder", "label": "Change download folder", "icon": "folder", "style": "secondary", "tip": "Pick the folder where downloads are stored." }
+        ]
+      },
       {
         "$": "group",
         "name": "seeding",

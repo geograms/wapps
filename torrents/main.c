@@ -250,6 +250,11 @@ static char g_srch_cat[24] = "";   /* restrict to one category ("" = all) */
 static char g_srch_sort[12] = "seeders"; /* seeders | updated | size */
 static uint32_t g_srch_hash = 0;
 
+/* Library (main list) state: the download-folder tree we are navigating. */
+static char g_lib_path[512] = "";  /* current subfolder ("" = root) */
+static int  g_filter = 0;          /* 0 = All, 1 = Mine (owner-created only) */
+static int  g_pick_root = 0;       /* a folder picker is choosing the download root */
+
 static uint32_t g_list_hash = 0;
 static unsigned g_tick = 0;
 
@@ -484,54 +489,83 @@ static void torrent_row(const char *fid, int owned, int pinned,
   g_sc_at[slot] = g_tick;
 }
 
-/* The list. Downloaded first — that is what a torrent client is FOR, and it is
- * the list the user came to look at; what this device publishes is the smaller,
- * rarer case and sits underneath.
- *
- * The section title carries NO count: the host's tab renders "<title> (n)" from
- * the number of rows, so a count written in here would be said twice. And no
- * placeholder rows — an "add your first torrent" row is an item, so it would
- * make an empty section report (1). An empty tab reports (0), honestly. */
-static void render_list(void) {
-  char slice[1024];
+/* Tell the host whether the back arrow should appear (we are inside a
+ * subfolder) or not (at the library root, where back leaves the wapp). */
+static void lib_nav(void) {
+  if (g_lib_path[0]) {
+    char t[520];
+    s_cpy(t, g_lib_path, sizeof(t));
+    unsigned L = s_len(t);
+    if (L && t[L - 1] == '/') t[L - 1] = 0;   /* drop the trailing slash for display */
+    nav_set(1, t);
+  } else {
+    nav_set(0, "");
+  }
+}
 
-  /* Downloaded (someone else's key; we hold a copy of the contents). */
-  uint32_t n = hal_folder_subs(g_json, sizeof(g_json) - 1);
+/* The list is ONE navigable panel over the download-folder tree: the organizing
+ * subfolders at the current level, then the torrents filed there. One section
+ * (so the host draws no tabs); the "All / Mine" toolbar toggles whether we show
+ * everything or only the folders this device created. */
+static void render_list(void) {
+  char arg[520];
+  s_cpy(arg, g_lib_path, sizeof(arg));
+  uint32_t n = hal_folder_library(arg, s_len(arg), g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
 
+  char slice[1200];
   row_open();
-  section_open("Downloaded");
 
-  const char *p = next_obj(g_json, slice, sizeof(slice));
-  while (p) {
-    char fid[80];
-    jstr(slice, "folderId", fid, sizeof(fid));
-    int pinned = jbool_def(slice, "autoSync", 0);
-    if (fid[0]) {
-      char title[160], sub[200], rid[90] = "t:";
-      torrent_row(fid, 0, pinned, title, sizeof(title), sub, sizeof(sub));
-      s_cat(rid, fid, sizeof(rid));
-      row(rid, title, sub);
+  char head[560];
+  if (g_lib_path[0]) {
+    s_cpy(head, g_lib_path, sizeof(head));
+    unsigned L = s_len(head);
+    if (L && head[L - 1] == '/') head[L - 1] = 0;
+  } else {
+    s_cpy(head, g_filter ? "My torrents" : "All torrents", sizeof(head));
+  }
+  section_open(head);
+
+  /* No ".." row: the app-bar back arrow (nav_back) already goes up a folder, and
+   * a second up-control on the same panel is clutter. */
+
+  /* Subfolders: {"dirs":[{"name"}]} — stop at the array's ']' so the torrents
+   * that follow are not read as directories. */
+  const char *d = g_json;
+  while (*d && !s_pre(d, "\"dirs\":[")) d++;
+  if (*d) {
+    const char *end = d;
+    while (*end && *end != ']') end++;
+    const char *p = next_obj(d, slice, sizeof(slice));
+    while (p && p <= end) {
+      char dn[200];
+      jstr(slice, "name", dn, sizeof(dn));
+      if (dn[0]) {
+        char rid[240] = "dir:";
+        s_cat(rid, dn, sizeof(rid));
+        row_icon(rid, dn, "folder", "folder");
+      }
+      p = next_obj(p, slice, sizeof(slice));
     }
-    p = next_obj(p, slice, sizeof(slice));
   }
 
-  /* Mine (we hold the master key: only we can change what is in it). */
-  n = hal_folder_list(g_json, sizeof(g_json) - 1);
-  g_json[n] = 0;
-  section_open("Mine");
-
-  p = next_obj(g_json, slice, sizeof(slice));
-  while (p) {
-    char fid[80];
-    jstr(slice, "folderId", fid, sizeof(fid));
-    if (fid[0]) {
-      char title[160], sub[200], rid[90] = "t:";
-      torrent_row(fid, 1, 0, title, sizeof(title), sub, sizeof(sub));
-      s_cat(rid, fid, sizeof(rid));
-      row(rid, title, sub);
+  /* Torrents: {"torrents":[{"folderId","name","owned"}]} */
+  const char *t = g_json;
+  while (*t && !s_pre(t, "\"torrents\":[")) t++;
+  if (*t) {
+    const char *p = next_obj(t, slice, sizeof(slice));
+    while (p) {
+      char fid[80];
+      jstr(slice, "folderId", fid, sizeof(fid));
+      int owned = jbool_def(slice, "owned", 0);
+      if (fid[0] && (!g_filter || owned)) {
+        char title[160], sub[200], rid[90] = "t:";
+        torrent_row(fid, owned, 0, title, sizeof(title), sub, sizeof(sub));
+        s_cat(rid, fid, sizeof(rid));
+        row(rid, title, sub);
+      }
+      p = next_obj(p, slice, sizeof(slice));
     }
-    p = next_obj(p, slice, sizeof(slice));
   }
 
   row_close();
@@ -1019,6 +1053,13 @@ static void render_info(void) {
 }
 
 static void render_settings(void) {
+  /* Current download folder (real files on disk; downloads land here and the
+   * subfolders under it organize the list). */
+  char root[520];
+  uint32_t rn = hal_folder_download_root(root, sizeof(root) - 1);
+  root[rn] = 0;
+  field_set("dl_root", root[0] ? root : "(not set)");
+
   log_clear("settings_log");
   uint32_t n = hal_folder_subs(g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
@@ -1181,7 +1222,7 @@ void module_init(void) {
    * time — which is exactly the 300ms stall this check removed. Seeding, which
    * is the reason this wapp runs in the background at all, is host-side and
    * needs no render. */
-  if (hal_ui_attached()) { render_list(); render_search(); }
+  if (hal_ui_attached()) { render_list(); render_search(); render_settings(); }
   hal_log(1, "torrents: ready", 15);
 }
 
@@ -1225,6 +1266,20 @@ void module_handle_event(void) {
     jstr(buf, "path", path, sizeof(path));
     if (!path[0]) return;
 
+    if (g_pick_root) {
+      g_pick_root = 0;
+      if (!jbool_def(buf, "dir", 0)) {
+        notify("info", "Pick a folder, not a file");
+        return;
+      }
+      hal_folder_set_download_root(path, s_len(path));
+      stats_cache_clear();
+      notify("info", "Download folder set - adopting any torrents inside it");
+      render_settings();
+      render_list();
+      return;
+    }
+
     if (g_pick_slot[0]) {
       char slot[16];
       s_cpy(slot, g_pick_slot, sizeof(slot));
@@ -1258,14 +1313,47 @@ void module_handle_event(void) {
     return;
   }
 
-  if (s_eq(typ, "prompt")) {
+  /* A ui.prompt result comes back as the command "prompt" with the fields
+   * prompt_id / prompt_value / prompt_input (the host flattens them into the
+   * message; jstr finds them wherever they sit). */
+  if (s_eq(cmd, "prompt")) {
     char id[120] = "", val[400] = "", input[400] = "";
-    jstr(buf, "id", id, sizeof(id));
-    jstr(buf, "value", val, sizeof(val));
-    jstr(buf, "input", input, sizeof(input));
+    jstr(buf, "prompt_id", id, sizeof(id));
+    jstr(buf, "prompt_value", val, sizeof(val));
+    jstr(buf, "prompt_input", input, sizeof(input));
 
     if (s_eq(id, "open")) {
       if (input[0]) open_by_id(input);
+      return;
+    }
+    if (s_eq(id, "newfolder")) {
+      if (input[0]) {
+        char rel[560] = "";
+        s_cpy(rel, g_lib_path, sizeof(rel));   /* create under the current level */
+        s_cat(rel, input, sizeof(rel));
+        hal_folder_mkdir(rel, s_len(rel));
+        notify("info", "Folder created");
+        render_list();
+      }
+      return;
+    }
+    if (s_eq(id, "movefolder")) {
+      if (!g_cur[0]) return;
+      char mv[620] = "";
+      s_cpy(mv, g_cur, sizeof(mv));
+      s_cat(mv, "\t", sizeof(mv));
+      s_cat(mv, input, sizeof(mv));       /* input="" = top level */
+      hal_folder_move(mv, s_len(mv));
+      stats_cache_clear();
+      notify("info", "Moved");
+      /* leave the listing and show the library where it now lives */
+      g_view = 0;
+      s_cpy(g_lib_path, input, sizeof(g_lib_path));
+      if (g_lib_path[0]) s_cat(g_lib_path, "/", sizeof(g_lib_path));
+      lib_nav();
+      render_list();
+      const char *m = "{\"type\":\"ui.screen.close\"}";
+      hal_msg_send(m, s_len(m));
       return;
     }
     if (s_pre(id, "mng:")) {
@@ -1341,20 +1429,51 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "t_open_link")) {
     prompt_input("open", "Open a torrent", "nfolder1... / npub / hex id", 400);
   } else if (s_eq(cmd, "t_back") || s_eq(cmd, "nav_back")) {
-    /* One back control, one sensible chain: subfolder -> its parent -> the
-     * torrent list -> (nav cleared) out of the wapp. */
-    if (g_view == 1 && g_cur_path[0]) {
-      unsigned L = s_len(g_cur_path);
-      g_cur_path[L - 1] = 0;
-      int k = (int)s_len(g_cur_path) - 1;
-      while (k >= 0 && g_cur_path[k] != '/') k--;
-      g_cur_path[k + 1] = 0;
-      render_open();
+    /* One back control, one sensible chain. Inside a torrent's file browser:
+     * subfolder -> parent -> back to the library list. In the library list:
+     * subfolder -> parent -> (nav cleared) out of the wapp. */
+    if (g_view == 1) {
+      if (g_cur_path[0]) {
+        unsigned L = s_len(g_cur_path);
+        g_cur_path[L - 1] = 0;
+        int k = (int)s_len(g_cur_path) - 1;
+        while (k >= 0 && g_cur_path[k] != '/') k--;
+        g_cur_path[k + 1] = 0;
+        render_open();
+      } else {
+        g_view = 0; g_cur[0] = 0; g_cur_name[0] = 0;
+        lib_nav();
+        render_list();
+      }
+    } else if (g_lib_path[0]) {
+      unsigned L = s_len(g_lib_path);
+      g_lib_path[L - 1] = 0;
+      int k = (int)s_len(g_lib_path) - 1;
+      while (k >= 0 && g_lib_path[k] != '/') k--;
+      g_lib_path[k + 1] = 0;
+      lib_nav();
+      render_list();
     } else {
-      g_view = 0; g_cur[0] = 0; g_cur_path[0] = 0; g_cur_name[0] = 0;
       nav_set(0, "");     /* at the root: the next back leaves the wapp */
       render_list();
     }
+  } else if (s_eq(cmd, "flt_all")) {
+    g_filter = 0;
+    render_list();
+  } else if (s_eq(cmd, "flt_mine")) {
+    g_filter = 1;
+    render_list();
+  } else if (s_eq(cmd, "lib_newfolder")) {
+    prompt_input("newfolder", "New folder", "folder name", 60);
+  } else if (s_eq(cmd, "listing_move")) {
+    if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+    prompt_input("movefolder", "Move to folder",
+                 "folder name (blank = top level)", 200);
+  } else if (s_eq(cmd, "dl_folder")) {
+    g_pick_root = 1;
+    const char *m = "{\"type\":\"fs.pick\",\"mode\":\"dir\","
+                    "\"title\":\"Choose the download folder\"}";
+    hal_msg_send(m, s_len(m));
   } else if (s_eq(cmd, "t_manage")) {
     if (g_cur[0]) prompt_manage();
     else notify("info", "Open a torrent first");
@@ -1455,24 +1574,44 @@ void module_handle_event(void) {
     jstr(buf, "torrents_id", id, sizeof(id));
     if (!id[0] || s_eq(id, "none")) return;
 
-    if (s_pre(id, "t:")) {
-      open_torrent(id + 2);
-    } else if (s_pre(id, "cd:")) {
-      s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
-      s_cat(g_cur_path, "/", sizeof(g_cur_path));
-      render_open();
-    } else if (s_eq(id, "up:")) {
-      unsigned L = s_len(g_cur_path);
-      if (L) {
-        g_cur_path[L - 1] = 0;
-        int k = (int)s_len(g_cur_path) - 1;
-        while (k >= 0 && g_cur_path[k] != '/') k--;
-        g_cur_path[k + 1] = 0;
+    if (g_view == 1) {
+      /* the full-screen file browser inside one torrent */
+      if (s_pre(id, "cd:")) {
+        s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
+        s_cat(g_cur_path, "/", sizeof(g_cur_path));
+        render_open();
+      } else if (s_eq(id, "up:")) {
+        unsigned L = s_len(g_cur_path);
+        if (L) {
+          g_cur_path[L - 1] = 0;
+          int k = (int)s_len(g_cur_path) - 1;
+          while (k >= 0 && g_cur_path[k] != '/') k--;
+          g_cur_path[k + 1] = 0;
+        }
+        render_open();
+      } else if (s_pre(id, "f:")) {
+        offer_file_id(id + 2);
       }
-      render_open();
-    } else if (s_pre(id, "f:")) {
-      /* one file: offer the download, and show the hash it will be checked against */
-      offer_file_id(id + 2);
+    } else {
+      /* the library navigator (main list) */
+      if (s_pre(id, "t:")) {
+        open_torrent(id + 2);
+      } else if (s_pre(id, "dir:")) {
+        s_cat(g_lib_path, id + 4, sizeof(g_lib_path));
+        s_cat(g_lib_path, "/", sizeof(g_lib_path));
+        lib_nav();
+        render_list();
+      } else if (s_eq(id, "up:")) {
+        unsigned L = s_len(g_lib_path);
+        if (L) {
+          g_lib_path[L - 1] = 0;
+          int k = (int)s_len(g_lib_path) - 1;
+          while (k >= 0 && g_lib_path[k] != '/') k--;
+          g_lib_path[k + 1] = 0;
+        }
+        lib_nav();
+        render_list();
+      }
     }
   }
 }
