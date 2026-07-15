@@ -98,7 +98,7 @@ static void cat_time_fields(char *dst, const char *ts, unsigned m) {
 static char g_self[80] = "";       /* our x-only pubkey (hex)              */
 static char g_sub_disc[64] = "";   /* popular (>2-like) sub — ranking, NOT "All" */
 static char g_sub_fire[64] = "";   /* LIVE firehose (spam-gated) — the "All" tab */
-static char g_sub_follows[64] = ""; /* kind-1 from my web-of-trust — "Following" */
+static char g_sub_follows[64] = ""; /* kind-1 from direct follows — "Following" */
 static char g_sub_search[64] = ""; /* NIP-50 search sub (posts + profiles)  */
 static int  g_search_media = 0;    /* "Only posts with media" filter is on   */
 static char g_query[128] = "";     /* what the user typed — results are checked
@@ -115,8 +115,8 @@ static char g_evt[65536];          /* one drained event JSON (see below)   */
 static char g_relays[8192];        /* hal_nostr_relays output              */
 static char g_msg[16384];          /* outbound UI message                  */
 static char g_follows[4096];       /* followed pubkeys JSON array          */
-static char g_wot[48128];          /* web-of-trust author set JSON         */
-static char g_feedfilter[52224];   /* built kind-1 WoT filter              */
+static char g_direct[48128];       /* direct-follow author set JSON        */
+static char g_feedfilter[52224];   /* built kind-1 direct-follow filter    */
 static char g_pids[96][66];        /* recent post ids (ring) for stats     */
 static int  g_npids = 0;
 static char g_track[7168];         /* built ids JSON array for tracking    */
@@ -160,16 +160,15 @@ static void subscribe_all(void) {
      * rank them. It is no longer pretending to be the live feed. */
     /* Discovery is intentionally not opened for All. Its events bypass the
      * curated 100-note batch and made stale promotional links look selected. */
-    /* (c) Web of trust — kind-1 from follows + follows-of-follows, so EVERY
-     * post/reply from someone you follow arrives (even ones that never clear
-     * discovery's like gate). This drives the "Following" tab. Opens once the
-     * trust set is non-empty; a brand-new user sees only discovery until then. */
+    /* (c) Direct follows — every kind-1 root/reply from an author the user
+     * explicitly follows. This feed is not curated and never includes followers
+     * or follows-of-follows. */
     if (!g_sub_follows[0]) {
-        int wn = hal_nostr_wot(g_wot, sizeof(g_wot) - 1);
-        if (wn > 0) g_wot[wn] = '\0'; else str_copy(g_wot, "[]", sizeof(g_wot));
-        if (str_len(g_wot) > 2) {
+        int fn = hal_nostr_follows(g_direct, sizeof(g_direct) - 1);
+        if (fn > 0) g_direct[fn] = '\0'; else str_copy(g_direct, "[]", sizeof(g_direct));
+        if (str_len(g_direct) > 2) {
             str_copy(g_feedfilter, "{\"kinds\":[1],\"authors\":", sizeof(g_feedfilter));
-            str_cat(g_feedfilter, g_wot, sizeof(g_feedfilter));
+            str_cat(g_feedfilter, g_direct, sizeof(g_feedfilter));
             str_cat(g_feedfilter, ",\"limit\":200}", sizeof(g_feedfilter));
             int n = hal_nostr_subscribe(g_feedfilter, str_len(g_feedfilter),
                                         g_sub_follows, sizeof(g_sub_follows) - 1);
@@ -222,6 +221,8 @@ static void feed_append_to(const char *evt, int pop, const char *field,
     str_cat(g_msg, field, sizeof(g_msg));
     str_cat(g_msg, "\",\"message\":{\"dir\":\"in\",\"from\":\"", sizeof(g_msg));
     str_cat(g_msg, from, sizeof(g_msg));
+    str_cat(g_msg, "\",\"author\":\"", sizeof(g_msg));
+    str_cat(g_msg, pubkey, sizeof(g_msg));
     str_cat(g_msg, "\",\"text\":\"", sizeof(g_msg));
     str_cat(g_msg, content, sizeof(g_msg));      /* already-escaped body */
     /* The event id becomes the post's mid so the host can count likes/replies
@@ -610,8 +611,8 @@ int32_t module_tick(void) {
     subscribe_all();
     drain();
     g_ticks++;
-    // The web-of-trust set grows as kind-3 contact lists arrive, so re-open the
-    // follows feed a couple of times early to pick up follows-of-follows.
+    // The direct contact snapshot can arrive after startup, so re-open the
+    // follows feed a couple of times early to pick it up promptly.
     // (Discovery is author-independent — leave it live.)
     if (g_ticks == 10 || g_ticks == 30) {
         if (g_sub_follows[0]) {
