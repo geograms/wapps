@@ -309,6 +309,17 @@ __attribute__((import_module("hal"), import_name("folder_media")))
 uint32_t hal_folder_media(const char *folder_id, uint32_t id_len,
                           char *out_buf, uint32_t out_len);
 
+/* Search the listings this node knows (owned + subscribed). query = JSON
+ *   {"q":"free text","cat":"film","sort":"seeders|updated|size"}
+ * → {"cats":[{"cat":"film","count":12},..],
+ *    "results":[{"folderId":..,"title":..,"cat":..,"adult":bool,
+ *                "seeders":n,"size":bytes,"updated":ts},..]}
+ * `q` matches title/name/description/tags; `cats` lists only non-empty buckets so
+ * a browser can hide empty categories. Generic — no torrent-specific logic. */
+__attribute__((import_module("hal"), import_name("folder_search")))
+uint32_t hal_folder_search(const char *query, uint32_t query_len,
+                           char *out_buf, uint32_t out_len);
+
 /* Open ONE file of a folder with whatever the system uses to view that type —
  * the gallery for a photo, a reader for a PDF, the installer for an APK.
  * arg = "<sha256hex>\t<name>" (the name carries the extension the OS routes on).

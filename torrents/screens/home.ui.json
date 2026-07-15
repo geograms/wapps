@@ -24,9 +24,23 @@
   },
   {
     "$": "screen",
-    "name": "Listing",
+    "name": "Search",
     "menu": true,
     "appbar": true,
+    "toolbar": true,
+    "search": true,
+    "icon": "search",
+    "tip": "Find torrents by title, description or tags, or browse by category.",
+    "children": [
+      { "$": "action", "name": "srch_sort", "label": "Sort", "icon": "sort", "style": "secondary", "tip": "Cycle sort: seeders, recently updated, size (shown in the results header)." },
+      { "$": "action", "name": "srch_cats", "label": "Categories", "icon": "category", "style": "secondary", "tip": "Browse torrents by category (only categories that have torrents are shown)." },
+      { "$": "field", "name": "results", "$type": "people", "empty": "No torrents here yet. Type above to search, or tap Categories to browse.", "tip": "Tap a category to browse it, or a torrent to open its listing." }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Listing",
+    "menu": true,
     "icon": "info",
     "children": [
       { "$": "field", "name": "listing_media", "$type": "gallery", "tip": "The listing, then a simple file browser. Tap a screenshot to open it full-screen; tap a file to open it, or Browse for the full-screen file view." },
@@ -101,7 +115,6 @@
     "$": "screen",
     "name": "Settings",
     "menu": true,
-    "appbar": true,
     "icon": "settings",
     "tip": "Seeding and rescans.",
     "children": [

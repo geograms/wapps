@@ -244,6 +244,12 @@ static char g_cur_name[120] = "";
 static char g_cur_path[512] = "";  /* "" = root, else ends with '/' */
 static char g_sel[80] = "";        /* the torrent a "..." menu was opened on */
 
+/* Search panel state. */
+static char g_srch_q[80] = "";     /* free-text query */
+static char g_srch_cat[24] = "";   /* restrict to one category ("" = all) */
+static char g_srch_sort[12] = "seeders"; /* seeders | updated | size */
+static uint32_t g_srch_hash = 0;
+
 static uint32_t g_list_hash = 0;
 static unsigned g_tick = 0;
 
@@ -292,12 +298,14 @@ static const char *next_obj(const char *p, char *slice, unsigned m) {
 
 /* One row of the torrent list, appended to g_out. */
 static int g_first_row = 1;
-static void row_open(void) {
+static void row_open_field(const char *field) {
   g_first_row = 1;
   g_out[0] = 0;
-  s_cat(g_out, "{\"type\":\"ui.people.set\",\"field\":\"torrents\",\"sections\":[",
-        sizeof(g_out));
+  s_cat(g_out, "{\"type\":\"ui.people.set\",\"field\":\"", sizeof(g_out));
+  s_cat(g_out, field, sizeof(g_out));
+  s_cat(g_out, "\",\"sections\":[", sizeof(g_out));
 }
+static void row_open(void) { row_open_field("torrents"); }
 static void section_open(const char *title) {
   if (!g_first_row) s_cat(g_out, "]},", sizeof(g_out));
   s_cat(g_out, "{\"title\":\"", sizeof(g_out));
@@ -528,6 +536,121 @@ static void render_list(void) {
 
   row_close();
   changed_send(g_out, &g_list_hash);
+}
+
+/* A human label for a fixed category id. */
+static const char *cat_label(const char *c) {
+  if (s_eq(c, "film")) return "Film";
+  if (s_eq(c, "series")) return "Series / TV";
+  if (s_eq(c, "anime")) return "Anime";
+  if (s_eq(c, "documentary")) return "Documentary";
+  if (s_eq(c, "music")) return "Music";
+  if (s_eq(c, "audiobook")) return "Audiobook";
+  if (s_eq(c, "book")) return "Book";
+  if (s_eq(c, "comic")) return "Comic";
+  if (s_eq(c, "manga")) return "Manga";
+  if (s_eq(c, "magazine")) return "Magazine";
+  if (s_eq(c, "game")) return "Game";
+  if (s_eq(c, "software")) return "Software";
+  if (s_eq(c, "course")) return "Course";
+  if (s_eq(c, "podcast")) return "Podcast";
+  if (s_eq(c, "photo")) return "Photos";
+  if (s_eq(c, "dataset")) return "Dataset";
+  if (s_eq(c, "other")) return "Other";
+  return c;
+}
+
+/* The Search panel's results feed. With no query and no category, it lists the
+ * non-empty categories (tap one to browse it); otherwise it lists matching
+ * torrents, sorted by the host (seeders / recently updated / size). Everything
+ * is host-side and generic (hal_folder_search); the wapp only lays it out. */
+static void render_search(void) {
+  char q[240] = "{\"q\":\"";
+  jesc(q, sizeof(q), g_srch_q);
+  s_cat(q, "\",\"cat\":\"", sizeof(q));
+  jesc(q, sizeof(q), g_srch_cat);
+  s_cat(q, "\",\"sort\":\"", sizeof(q));
+  jesc(q, sizeof(q), g_srch_sort);
+  s_cat(q, "\"}", sizeof(q));
+
+  uint32_t n = hal_folder_search(q, s_len(q), g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+
+  const int browsing = (!g_srch_q[0] && !g_srch_cat[0]);
+  char slice[1200];
+
+  row_open_field("results");
+
+  if (browsing) {
+    /* {"cats":[{"cat":"film","count":12}]} */
+    section_open("Browse categories");
+    const char *c = g_json;
+    while (*c && !s_pre(c, "\"cats\":[")) c++;
+    if (*c) {
+      const char *end = c;
+      while (*end && *end != ']') end++;
+      const char *p = next_obj(c, slice, sizeof(slice));
+      while (p && p <= end) {
+        char cat[24];
+        jstr(slice, "cat", cat, sizeof(cat));
+        unsigned count = (unsigned)jnum(slice, "count");
+        if (cat[0]) {
+          char rid[40] = "cat:";
+          s_cat(rid, cat, sizeof(rid));
+          char sub[40];
+          u_itoa(count, sub);
+          s_cat(sub, count == 1 ? " torrent" : " torrents", sizeof(sub));
+          row_icon(rid, cat_label(cat), sub, "category");
+        }
+        p = next_obj(p, slice, sizeof(slice));
+      }
+    }
+  } else {
+    char head[80];
+    if (g_srch_cat[0]) {
+      s_cpy(head, cat_label(g_srch_cat), sizeof(head));
+    } else {
+      s_cpy(head, "Results", sizeof(head));
+    }
+    s_cat(head, "  ·  by ", sizeof(head));
+    s_cat(head, g_srch_sort, sizeof(head));
+    section_open(head);
+
+    /* Skip the "cats" array so its objects are not read as results, then walk
+     * the "results" array. */
+    const char *r = g_json;
+    while (*r && !s_pre(r, "\"results\":[")) r++;
+    if (*r) {
+      const char *p = next_obj(r, slice, sizeof(slice));
+      int any = 0;
+      while (p) {
+        char fid[80], title[160], cat[24];
+        jstr(slice, "folderId", fid, sizeof(fid));
+        jstr(slice, "title", title, sizeof(title));
+        jstr(slice, "cat", cat, sizeof(cat));
+        unsigned seeders = (unsigned)jnum(slice, "seeders");
+        unsigned size = (unsigned)jnum(slice, "size");
+        if (fid[0]) {
+          any = 1;
+          char sub[120] = "";
+          { char nb[12]; u_itoa(seeders, nb); s_cat(sub, nb, sizeof(sub)); }
+          s_cat(sub, seeders == 1 ? " seeder" : " seeders", sizeof(sub));
+          if (size) { char fs[24]; fmt_size(size, fs, sizeof(fs));
+            s_cat(sub, "  ·  ", sizeof(sub)); s_cat(sub, fs, sizeof(sub)); }
+          if (cat[0]) { s_cat(sub, "  ·  ", sizeof(sub));
+            s_cat(sub, cat_label(cat), sizeof(sub)); }
+          char rid[90] = "t:";
+          s_cat(rid, fid, sizeof(rid));
+          row(rid, title[0] ? title : fid, sub);
+        }
+        p = next_obj(p, slice, sizeof(slice));
+      }
+      if (!any) section_open("No torrents match");
+    }
+  }
+
+  row_close();
+  changed_send(g_out, &g_srch_hash);
 }
 
 /* Inside one torrent: this directory level only (the host keeps the payload —
@@ -993,6 +1116,27 @@ static void open_by_id(const char *idOrLink) {
   }
 }
 
+/* Open a known torrent to its Listing (Info) screen — the hero card plus a
+ * compact file browser. The torrent LIST stays underneath (g_view=0), so backing
+ * out of the Info screen returns to the list. Shared by the list tap and the
+ * search-result tap. */
+static void open_torrent(const char *fid) {
+  s_cpy(g_cur, fid, sizeof(g_cur));
+  s_cpy(g_sel, g_cur, sizeof(g_sel));
+  g_cur_path[0] = 0;
+  g_view = 0;
+  { char st[4096]; uint32_t sn = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
+    st[sn] = 0; char nm[160]; jstr(st, "name", nm, sizeof(nm));
+    s_cpy(g_cur_name, nm, sizeof(g_cur_name)); }
+  render_list();
+  nav_set(0, "");
+  render_swarm();
+  render_info();
+  render_listing();
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Listing\"}";
+  hal_msg_send(m, s_len(m));
+}
+
 /* Offer to open or download one file: a prompt showing the hash every byte is
  * checked against. Shared by the full browser and the compact listing browser. */
 static void offer_file(const char *sha, const char *name) {
@@ -1037,7 +1181,7 @@ void module_init(void) {
    * time — which is exactly the 300ms stall this check removed. Seeding, which
    * is the reason this wapp runs in the background at all, is host-side and
    * needs no render. */
-  if (hal_ui_attached()) render_list();
+  if (hal_ui_attached()) { render_list(); render_search(); }
   hal_log(1, "torrents: ready", 15);
 }
 
@@ -1250,6 +1394,34 @@ void module_handle_event(void) {
       const char *m = "{\"type\":\"ui.screen.close\"}";
       hal_msg_send(m, s_len(m));
     }
+  } else if (s_eq(cmd, "results_search")) {
+    /* the built-in search bar fired: read its query, search across all cats */
+    jstr(buf, "results_query", g_srch_q, sizeof(g_srch_q));
+    g_srch_cat[0] = 0;
+    render_search();
+  } else if (s_eq(cmd, "srch_cats")) {
+    /* back to the category browser */
+    g_srch_q[0] = 0;
+    g_srch_cat[0] = 0;
+    render_search();
+  } else if (s_eq(cmd, "srch_sort")) {
+    /* cycle seeders -> updated -> size */
+    if (s_eq(g_srch_sort, "seeders")) s_cpy(g_srch_sort, "updated", sizeof(g_srch_sort));
+    else if (s_eq(g_srch_sort, "updated")) s_cpy(g_srch_sort, "size", sizeof(g_srch_sort));
+    else s_cpy(g_srch_sort, "seeders", sizeof(g_srch_sort));
+    { char t[40] = "Sorting by "; s_cat(t, g_srch_sort, sizeof(t)); notify("info", t); }
+    render_search();
+  } else if (s_eq(cmd, "results_tap")) {
+    char id[600] = "";
+    jstr(buf, "results_id", id, sizeof(id));
+    if (!id[0] || s_eq(id, "none")) return;
+    if (s_pre(id, "cat:")) {
+      s_cpy(g_srch_cat, id + 4, sizeof(g_srch_cat));  /* "" = back to categories */
+      g_srch_q[0] = 0;
+      render_search();
+    } else if (s_pre(id, "t:")) {
+      open_torrent(id + 2);
+    }
   } else if (s_eq(cmd, "m_save")) {
     save_listing(buf);
     render_listing();
@@ -1284,23 +1456,7 @@ void module_handle_event(void) {
     if (!id[0] || s_eq(id, "none")) return;
 
     if (s_pre(id, "t:")) {
-      s_cpy(g_cur, id + 2, sizeof(g_cur));
-      s_cpy(g_sel, g_cur, sizeof(g_sel));
-      g_cur_path[0] = 0;
-      /* Open the Info (Listing) screen by default — the hero card plus a compact
-       * file browser at the bottom. The torrent LIST stays underneath (g_view=0,
-       * render_list), so backing out of the Info screen returns to the list. */
-      g_view = 0;
-      { char st[4096]; uint32_t sn = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
-        st[sn] = 0; char nm[160]; jstr(st, "name", nm, sizeof(nm));
-        s_cpy(g_cur_name, nm, sizeof(g_cur_name)); }
-      render_list();
-      nav_set(0, "");   /* the list is the root: back from it leaves the wapp */
-      render_swarm();   /* the swarm panel is about the torrent that is open */
-      render_info();
-      render_listing(); /* title, category, artwork + files — even with no bytes */
-      { const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Listing\"}";
-        hal_msg_send(m, s_len(m)); }
+      open_torrent(id + 2);
     } else if (s_pre(id, "cd:")) {
       s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
       s_cat(g_cur_path, "/", sizeof(g_cur_path));
