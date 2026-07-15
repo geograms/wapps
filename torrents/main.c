@@ -711,7 +711,14 @@ static void render_listing(void) {
    * the bytes; it hands the JSON to the host's gallery field and the host draws
    * it. (That HAL boundary is why the wapp can be updated on its own, without a
    * new engine.) */
-  uint32_t n = hal_folder_media(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
+  /* "folderId\tpath" — the host returns the hero AND the file list at this
+   * directory level, so the compact browser under the hero shares the folder
+   * path with the full-screen browser (going full-screen keeps your place). */
+  char arg[600];
+  s_cpy(arg, g_cur, sizeof(arg));
+  s_cat(arg, "\t", sizeof(arg));
+  s_cat(arg, g_cur_path, sizeof(arg));
+  uint32_t n = hal_folder_media(arg, s_len(arg), g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
   char m[16384] =
       "{\"type\":\"ui.field.set\",\"field\":\"listing_media\",\"value\":\"";
@@ -986,6 +993,41 @@ static void open_by_id(const char *idOrLink) {
   }
 }
 
+/* Offer to open or download one file: a prompt showing the hash every byte is
+ * checked against. Shared by the full browser and the compact listing browser. */
+static void offer_file(const char *sha, const char *name) {
+  if (!sha[0]) return;
+  char m[900] = "{\"type\":\"ui.prompt\",\"id\":\"file:";
+  jesc(m, sizeof(m), sha);
+  s_cat(m, "\\t", sizeof(m));
+  jesc(m, sizeof(m), name);
+  s_cat(m, "\",\"title\":\"", sizeof(m));
+  jesc(m, sizeof(m), name[0] ? name : "File");
+  s_cat(m, "\",\"body\":\"Opens with whatever this device uses for that "
+           "type. Every byte is checked against this hash before it is "
+           "kept:\\n", sizeof(m));
+  jesc(m, sizeof(m), sha);
+  s_cat(m, "\",\"copy\":\"", sizeof(m));
+  jesc(m, sizeof(m), sha);
+  s_cat(m, "\",\"chips\":[{\"label\":\"Open\",\"value\":\"open\"},"
+           "{\"label\":\"Download\",\"value\":\"dl\"}],"
+           "\"confirm\":\"Close\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* "sha\tname" → offer_file. Used by both browsers' file taps. */
+static void offer_file_id(const char *id) {
+  char sha[80] = "", name[400] = "";
+  unsigned i = 0;
+  while (*id && *id != '\t' && i < sizeof(sha) - 1) sha[i++] = *id++;
+  sha[i] = 0;
+  if (*id == '\t') id++;
+  i = 0;
+  while (*id && i < sizeof(name) - 1) name[i++] = *id++;
+  name[i] = 0;
+  offer_file(sha, name);
+}
+
 /* ── lifecycle ───────────────────────────────────────────────────────────── */
 __attribute__((export_name("module_init")))
 void module_init(void) {
@@ -1176,6 +1218,38 @@ void module_handle_event(void) {
     render_swarm();
   } else if (s_eq(cmd, "listing_edit")) {
     open_listing_edit();
+  } else if (s_eq(cmd, "listing_media_cd")) {
+    /* enter a subfolder in the compact browser (shares g_cur_path with the
+     * full-screen browser, so going full-screen keeps your place) */
+    char sel[300] = "";
+    jstr(buf, "listing_media_sel", sel, sizeof(sel));
+    if (sel[0]) {
+      s_cat(g_cur_path, sel, sizeof(g_cur_path));
+      s_cat(g_cur_path, "/", sizeof(g_cur_path));
+      render_listing();
+    }
+  } else if (s_eq(cmd, "listing_media_up")) {
+    unsigned L = s_len(g_cur_path);
+    if (L) {
+      g_cur_path[L - 1] = 0;
+      int k = (int)s_len(g_cur_path) - 1;
+      while (k >= 0 && g_cur_path[k] != '/') k--;
+      g_cur_path[k + 1] = 0;
+    }
+    render_listing();
+  } else if (s_eq(cmd, "listing_media_open")) {
+    char sel[440] = "";
+    jstr(buf, "listing_media_sel", sel, sizeof(sel));
+    if (sel[0]) offer_file_id(sel);   /* sel = "sha\tname" */
+  } else if (s_eq(cmd, "listing_media_full")) {
+    /* go full-screen: the Torrents screen becomes the browser at the same path,
+     * then close the Info screen to reveal it */
+    if (g_cur[0]) {
+      g_view = 1;
+      render_open();
+      const char *m = "{\"type\":\"ui.screen.close\"}";
+      hal_msg_send(m, s_len(m));
+    }
   } else if (s_eq(cmd, "m_save")) {
     save_listing(buf);
     render_listing();
@@ -1212,13 +1286,21 @@ void module_handle_event(void) {
     if (s_pre(id, "t:")) {
       s_cpy(g_cur, id + 2, sizeof(g_cur));
       s_cpy(g_sel, g_cur, sizeof(g_sel));
-      g_cur_name[0] = 0;
       g_cur_path[0] = 0;
-      g_view = 1;
-      render_open();
+      /* Open the Info (Listing) screen by default — the hero card plus a compact
+       * file browser at the bottom. The torrent LIST stays underneath (g_view=0,
+       * render_list), so backing out of the Info screen returns to the list. */
+      g_view = 0;
+      { char st[4096]; uint32_t sn = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
+        st[sn] = 0; char nm[160]; jstr(st, "name", nm, sizeof(nm));
+        s_cpy(g_cur_name, nm, sizeof(g_cur_name)); }
+      render_list();
+      nav_set(0, "");   /* the list is the root: back from it leaves the wapp */
       render_swarm();   /* the swarm panel is about the torrent that is open */
       render_info();
-      render_listing(); /* title, category, artwork — even if we hold no bytes */
+      render_listing(); /* title, category, artwork + files — even with no bytes */
+      { const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Listing\"}";
+        hal_msg_send(m, s_len(m)); }
     } else if (s_pre(id, "cd:")) {
       s_cat(g_cur_path, id + 3, sizeof(g_cur_path));
       s_cat(g_cur_path, "/", sizeof(g_cur_path));
@@ -1234,31 +1316,7 @@ void module_handle_event(void) {
       render_open();
     } else if (s_pre(id, "f:")) {
       /* one file: offer the download, and show the hash it will be checked against */
-      const char *r = id + 2;
-      char sha[80] = "", name[400] = "";
-      unsigned i = 0;
-      while (*r && *r != '\t' && i < sizeof(sha) - 1) sha[i++] = *r++;
-      sha[i] = 0;
-      if (*r == '\t') r++;
-      i = 0;
-      while (*r && i < sizeof(name) - 1) name[i++] = *r++;
-      name[i] = 0;
-      char m[900] = "{\"type\":\"ui.prompt\",\"id\":\"file:";
-      jesc(m, sizeof(m), sha);
-      s_cat(m, "\\t", sizeof(m));
-      jesc(m, sizeof(m), name);
-      s_cat(m, "\",\"title\":\"", sizeof(m));
-      jesc(m, sizeof(m), name[0] ? name : "File");
-      s_cat(m, "\",\"body\":\"Opens with whatever this device uses for that "
-               "type. Every byte is checked against this hash before it is "
-               "kept:\\n", sizeof(m));
-      jesc(m, sizeof(m), sha);
-      s_cat(m, "\",\"copy\":\"", sizeof(m));
-      jesc(m, sizeof(m), sha);
-      s_cat(m, "\",\"chips\":[{\"label\":\"Open\",\"value\":\"open\"},"
-               "{\"label\":\"Download\",\"value\":\"dl\"}],"
-               "\"confirm\":\"Close\"}", sizeof(m));
-      hal_msg_send(m, s_len(m));
+      offer_file_id(id + 2);
     }
   }
 }

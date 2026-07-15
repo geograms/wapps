@@ -29,7 +29,7 @@
     "appbar": true,
     "icon": "info",
     "children": [
-      { "$": "field", "name": "listing_media", "$type": "gallery", "tip": "Tap a screenshot to open it full-screen; a clip plays where it sits." },
+      { "$": "field", "name": "listing_media", "$type": "gallery", "tip": "The listing, then a simple file browser. Tap a screenshot to open it full-screen; tap a file to open it, or Browse for the full-screen file view." },
       { "$": "action", "name": "listing_edit", "label": "Edit listing", "icon": "edit", "style": "secondary", "tip": "Describe what you share (publisher only)." }
     ]
   },
