@@ -262,6 +262,24 @@ uint32_t hal_folder_swarm(const char *folder_id, uint32_t id_len,
 __attribute__((import_module("hal"), import_name("folder_pin")))
 uint32_t hal_folder_pin(const char *folder_id, uint32_t id_len, int32_t on);
 
+/* Device-local popularity of a folder over recent months → JSON
+ * {folderId, months:[{ym, seeders, leechers}]} where ym = year*100 + month.
+ * Kept on THIS device only, never in the folder. */
+__attribute__((import_module("hal"), import_name("folder_popularity")))
+uint32_t hal_folder_popularity(const char *folder_id, uint32_t id_len,
+                               char *out_buf, uint32_t out_len);
+
+/* Enable/disable pulling the publisher's updates for a folder (on == 0 freezes
+ * it at the version you hold — a static copy, no re-downloads; on != 0 resumes
+ * following changes). Returns 1 when accepted. */
+__attribute__((import_module("hal"), import_name("folder_set_updates")))
+uint32_t hal_folder_set_updates(const char *folder_id, uint32_t id_len, int32_t on);
+
+/* Whether a folder currently follows the publisher's updates: 1 = updates on
+ * (the default), 0 = frozen. */
+__attribute__((import_module("hal"), import_name("folder_updates")))
+int32_t hal_folder_updates(const char *folder_id, uint32_t id_len);
+
 /* ── The listing: data/meta.json (aurora/docs/torrents.md) ──────────────────
  * A shared folder describes itself with ordinary files inside it:
  *   data/meta.json     title, desc, cat, tags, adult, + the media names

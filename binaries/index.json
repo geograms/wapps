@@ -257,5 +257,15 @@
   {"file":"torrents/torrents-0.4.2.wapp","id":"tools.geogram.torrents","version":"0.4.2","size":39451,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.5.0.wapp","id":"tools.geogram.torrents","version":"0.5.0","size":38120,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.5.1.wapp","id":"tools.geogram.torrents","version":"0.5.1","size":37340,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.10.wapp","id":"tools.geogram.torrents","version":"0.5.10","size":48151,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.11.wapp","id":"tools.geogram.torrents","version":"0.5.11","size":49786,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.2.wapp","id":"tools.geogram.torrents","version":"0.5.2","size":38824,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.3.wapp","id":"tools.geogram.torrents","version":"0.5.3","size":43248,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.4.wapp","id":"tools.geogram.torrents","version":"0.5.4","size":45672,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.5.wapp","id":"tools.geogram.torrents","version":"0.5.5","size":45538,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.6.wapp","id":"tools.geogram.torrents","version":"0.5.6","size":45720,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.7.wapp","id":"tools.geogram.torrents","version":"0.5.7","size":46324,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.8.wapp","id":"tools.geogram.torrents","version":"0.5.8","size":46577,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.5.9.wapp","id":"tools.geogram.torrents","version":"0.5.9","size":47994,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."}
 ]

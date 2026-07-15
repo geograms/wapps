@@ -1174,6 +1174,50 @@ static void do_copy_link(void) {
   prompt_copy(g_cur_name[0] ? g_cur_name : "Torrent link", body, link);
 }
 
+/* Popularity panel: pull the device-local monthly seeders/leechers for this
+ * torrent and open the chart screen. The count lives on this device only (never
+ * in the folder) — it grows as the torrent is shared. */
+static void show_popularity(void) {
+  if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+  uint32_t n = hal_folder_popularity(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+  char m[4096] = "{\"type\":\"ui.field.set\",\"field\":\"pop_chart\",\"value\":\"";
+  jesc(m, sizeof(m), g_json);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+  const char *o = "{\"type\":\"ui.screen.open\",\"name\":\"Popularity\"}";
+  hal_msg_send(o, s_len(o));
+}
+
+/* A torrent folder is dynamic: the publisher can push changes. Let the user
+ * follow those updates or freeze a static copy (e.g. to save bandwidth). The
+ * publisher has nothing to freeze — they are the source of the updates. */
+static void prompt_updates(void) {
+  if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+  char st[4096];
+  uint32_t sn = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
+  st[sn] = 0;
+  if (jbool_def(st, "owned", 0)) {
+    notify("info", "You publish this torrent - updates are yours to make");
+    return;
+  }
+  int on = hal_folder_updates(g_cur, s_len(g_cur));
+  char m[700] = "{\"type\":\"ui.prompt\",\"id\":\"upd:";
+  jesc(m, sizeof(m), g_cur);
+  s_cat(m, "\",\"title\":\"Folder updates\",\"body\":\"", sizeof(m));
+  s_cat(m, on ? "Following updates: new versions the publisher pushes are "
+                "downloaded automatically."
+              : "Frozen: you keep the version you hold and do not download the "
+                "publisher's changes.",
+        sizeof(m));
+  s_cat(m, "\",\"chips\":["
+           "{\"label\":\"Follow updates\",\"value\":\"on\"},"
+           "{\"label\":\"Freeze (static copy)\",\"value\":\"off\"}],"
+           "\"confirm\":\"Cancel\"}",
+        sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
 /* Open a torrent by any address a user might paste. */
 static void open_by_id(const char *idOrLink) {
   char st[4096];
@@ -1454,6 +1498,17 @@ void module_handle_event(void) {
       }
       return;
     }
+    if (s_pre(id, "upd:")) {
+      const char *fid = id + 4;
+      if (s_eq(val, "on")) {
+        hal_folder_set_updates(fid, s_len(fid), 1);
+        notify("info", "Following updates for this torrent");
+      } else if (s_eq(val, "off")) {
+        hal_folder_set_updates(fid, s_len(fid), 0);
+        notify("info", "Frozen: keeping a static copy, no updates");
+      }
+      return;
+    }
     if (s_pre(id, "file:")) {
       /* "file:<sha>\t<name>" — the one file the user tapped. */
       const char *r = id + 5;
@@ -1578,15 +1633,20 @@ void module_handle_event(void) {
     char sel[440] = "";
     jstr(buf, "listing_media_sel", sel, sizeof(sel));
     if (sel[0]) offer_file_id(sel);   /* sel = "sha\tname" */
-  } else if (s_eq(cmd, "listing_media_full")) {
+  } else if (s_eq(cmd, "listing_media_full") || s_eq(cmd, "listing_browse")) {
     /* go full-screen: the Torrents screen becomes the browser at the same path,
-     * then close the Info screen to reveal it */
+     * then close the Info screen to reveal it. Reached from the gallery or the
+     * Info screen's ☰ menu ("Browse files"). */
     if (g_cur[0]) {
       g_view = 1;
       render_open();
       const char *m = "{\"type\":\"ui.screen.close\"}";
       hal_msg_send(m, s_len(m));
     }
+  } else if (s_eq(cmd, "listing_popularity")) {
+    show_popularity();
+  } else if (s_eq(cmd, "listing_updates")) {
+    prompt_updates();
   } else if (s_eq(cmd, "results_search")) {
     /* the built-in search bar fired: read its query, search across all cats */
     jstr(buf, "results_query", g_srch_q, sizeof(g_srch_q));
