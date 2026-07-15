@@ -703,61 +703,21 @@ static void render_swarm(void) {
 static char g_pick_slot[16] = "";
 
 static void render_listing(void) {
-  log_clear("listing_log");
-  if (!g_cur[0]) {
-    log_line("listing_log", "Open a torrent first.");
-    return;
-  }
+  if (!g_cur[0]) return;
 
-  /* The artwork: hand the tokens straight to the host's gallery field. The wapp
-   * never touches the bytes — it cannot, and it does not need to. */
+  /* One hero card. hal_folder_media returns the whole listing — banner, poster,
+   * title, category, tags, description, screenshots — from the SIGNED op-log, so
+   * it is there even for a torrent we have not downloaded. The wapp never touches
+   * the bytes; it hands the JSON to the host's gallery field and the host draws
+   * it. (That HAL boundary is why the wapp can be updated on its own, without a
+   * new engine.) */
   uint32_t n = hal_folder_media(g_cur, s_len(g_cur), g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
-  {
-    char m[8192] = "{\"type\":\"ui.field.set\",\"field\":\"listing_media\",\"value\":\"";
-    jesc(m, sizeof(m), g_json);
-    s_cat(m, "\"}", sizeof(m));
-    hal_msg_send(m, s_len(m));
-  }
-
-  /* The words: from the signed op-log (folder_stats), so they are here even for
-   * a torrent we have not downloaded. */
-  char st[4096];
-  n = hal_folder_stats(g_cur, s_len(g_cur), st, sizeof(st) - 1);
-  st[n] = 0;
-
-  char title[80], cat[32], tags[200], desc[260];
-  jstr(st, "title", title, sizeof(title));
-  jstr(st, "cat", cat, sizeof(cat));
-  jstr(st, "tags", tags, sizeof(tags));
-  jstr(st, "desc", desc, sizeof(desc));
-  int adult = jbool_def(st, "adult", 0);
-
-  if (!title[0] && !cat[0] && !desc[0]) {
-    log_line("listing_log", "This torrent carries no listing.");
-    log_line("listing_log",
-             "A publisher describes it with data/meta.json inside the folder - "
-             "a title, one category, a description and artwork.");
-    if (jbool_def(st, "owned", 0))
-      log_line("listing_log", "It is yours: tap \"Edit the listing\".");
-    return;
-  }
-
-  if (title[0]) log_line("listing_log", title);
-  if (cat[0]) {
-    char l[80] = "Category: ";
-    s_cat(l, cat, sizeof(l));
-    if (adult) s_cat(l, "  (+18)", sizeof(l));
-    log_line("listing_log", l);
-  } else if (adult) {
-    log_line("listing_log", "+18");
-  }
-  if (tags[0]) {
-    char l[240] = "Tags: ";
-    s_cat(l, tags, sizeof(l));
-    log_line("listing_log", l);
-  }
-  if (desc[0]) log_line("listing_log", desc);
+  char m[16384] =
+      "{\"type\":\"ui.field.set\",\"field\":\"listing_media\",\"value\":\"";
+  jesc(m, sizeof(m), g_json);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 
 /* Load data/meta.json into the Edit screen and open it. */
@@ -812,42 +772,6 @@ static void open_listing_edit(void) {
         ? "{\"type\":\"ui.field.set\",\"field\":\"m_adult\",\"value\":true}"
         : "{\"type\":\"ui.field.set\",\"field\":\"m_adult\",\"value\":false}";
     hal_msg_send(m, s_len(m)); }
-
-  /* What artwork is already there. */
-  log_clear("m_log");
-  {
-    char cover[64], banner[64], trailer[64];
-    jstr(g_json, "cover", cover, sizeof(cover));
-    jstr(g_json, "banner", banner, sizeof(banner));
-    jstr(g_json, "trailer", trailer, sizeof(trailer));
-    char l[200];
-    s_cpy(l, "Cover: ", sizeof(l));
-    s_cat(l, cover[0] ? cover : "none", sizeof(l));
-    log_line("m_log", l);
-    s_cpy(l, "Banner: ", sizeof(l));
-    s_cat(l, banner[0] ? banner : "none", sizeof(l));
-    log_line("m_log", l);
-    s_cpy(l, "Trailer: ", sizeof(l));
-    s_cat(l, trailer[0] ? trailer : "none", sizeof(l));
-    log_line("m_log", l);
-    /* count the gallery entries */
-    int g = 0;
-    const char *p = g_json;
-    while (*p && !s_pre(p, "\"gallery\":[")) p++;
-    if (*p) {
-      p += 11;
-      while (*p && *p != ']') { if (*p == '"') { g++; while (*p && *(++p) != '"') {} } if (*p) p++; }
-      g = (g + 1) / 2; /* a quoted name has two quotes */
-    }
-    char nb[12]; u_itoa((unsigned)g, nb);
-    s_cpy(l, "Gallery: ", sizeof(l));
-    s_cat(l, nb, sizeof(l));
-    s_cat(l, " of 10", sizeof(l));
-    log_line("m_log", l);
-    log_line("m_log",
-             "Each item up to 30MB. The listing is what people look at before "
-             "they download, so it has to stay cheap to fetch.");
-  }
 
   const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Edit listing\"}";
   hal_msg_send(m, s_len(m));
