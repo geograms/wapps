@@ -86,6 +86,7 @@
       { "$": "field", "name": "m_tags", "$type": "string", "label": "Tags", "max": 120, "hint": "e.g. 1080p, scifi, open", "tip": "Up to 10, comma separated." },
       { "$": "field", "name": "m_adult", "$type": "bool", "label": "+18 (adult)", "default": false, "tip": "Adult content flag." },
       { "$": "action", "name": "m_save", "label": "Save the listing", "icon": "save", "style": "primary", "tip": "Publish the listing." },
+      { "$": "action", "name": "m_icon", "label": "Icon", "icon": "image", "style": "secondary", "tip": "A small square icon for this torrent — like a website's tab icon. Shown next to it in the list. Saved as data/favicon.*" },
       { "$": "action", "name": "m_cover", "label": "Cover image", "icon": "image", "style": "secondary", "tip": "Poster / box art. Up to 30MB." },
       { "$": "action", "name": "m_banner", "label": "Banner image", "icon": "image", "style": "secondary", "tip": "A wide header image. Up to 30MB." },
       { "$": "action", "name": "m_trailer", "label": "Trailer (webm)", "icon": "movie", "style": "secondary", "tip": "A short clip. Up to 30MB." },

@@ -339,6 +339,20 @@ static void row(const char *id, const char *title, const char *subtitle) {
   row_icon(id, title, subtitle, 0);
 }
 
+/* A torrent row whose avatar is a media token (its favicon-style icon). When the
+ * token is empty the host draws the generated key-sigil, as before. */
+static void row_avatar(const char *id, const char *title, const char *subtitle,
+                       const char *avatar) {
+  if (!avatar || !avatar[0]) { row(id, title, subtitle); return; }
+  if (!g_first_row) s_cat(g_out, ",", sizeof(g_out));
+  g_first_row = 0;
+  s_cat(g_out, "{\"id\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), id);
+  s_cat(g_out, "\",\"title\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), title);
+  s_cat(g_out, "\",\"subtitle\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), subtitle);
+  s_cat(g_out, "\",\"avatar\":\"", sizeof(g_out)); jesc(g_out, sizeof(g_out), avatar);
+  s_cat(g_out, "\"}", sizeof(g_out));
+}
+
 /* The icon a file's NAME earns it. The extension is all we have (the bytes may
  * not even be here yet), and it is what the OS routes on anyway. */
 static const char *icon_for(const char *name) {
@@ -403,6 +417,7 @@ static void row_close(void) {
 static char g_sc_fid[STATS_CACHE][80];
 static char g_sc_title[STATS_CACHE][160];
 static char g_sc_sub[STATS_CACHE][200];
+static char g_sc_avatar[STATS_CACHE][120];  /* the row's icon media token, if any */
 static unsigned g_sc_at[STATS_CACHE];
 static unsigned g_sc_used = 0;
 
@@ -411,18 +426,24 @@ static unsigned g_sc_used = 0;
 static void stats_cache_clear(void) { g_sc_used = 0; }
 
 static void torrent_row(const char *fid, int owned, int pinned,
-                        char *title, unsigned tm, char *sub, unsigned sm) {
+                        char *title, unsigned tm, char *sub, unsigned sm,
+                        char *avatar, unsigned am) {
+  if (avatar) avatar[0] = 0;
   for (unsigned i = 0; i < g_sc_used; i++) {
     if (!s_eq(g_sc_fid[i], fid)) continue;
     if (g_tick - g_sc_at[i] > STATS_TTL_TICKS) break;   /* stale: re-stat below */
     s_cpy(title, g_sc_title[i], tm);
     s_cpy(sub, g_sc_sub[i], sm);
+    if (avatar) s_cpy(avatar, g_sc_avatar[i], am);
     return;
   }
 
   char st[4096];
   uint32_t n = hal_folder_stats(fid, s_len(fid), st, sizeof(st) - 1);
   st[n] = 0;
+
+  /* The listing's favicon-style icon (a media token), for the row avatar. */
+  if (avatar) jstr(st, "icon", avatar, am);
 
   /* Title: what the publisher CALLED it (the listing's title, from
    * data/meta.json), else the folder's directory name, else the head of its key.
@@ -486,6 +507,7 @@ static void torrent_row(const char *fid, int owned, int pinned,
   s_cpy(g_sc_fid[slot], fid, sizeof(g_sc_fid[slot]));
   s_cpy(g_sc_title[slot], title, sizeof(g_sc_title[slot]));
   s_cpy(g_sc_sub[slot], sub, sizeof(g_sc_sub[slot]));
+  s_cpy(g_sc_avatar[slot], avatar ? avatar : "", sizeof(g_sc_avatar[slot]));
   g_sc_at[slot] = g_tick;
 }
 
@@ -559,10 +581,11 @@ static void render_list(void) {
       jstr(slice, "folderId", fid, sizeof(fid));
       int owned = jbool_def(slice, "owned", 0);
       if (fid[0] && (!g_filter || owned)) {
-        char title[160], sub[200], rid[90] = "t:";
-        torrent_row(fid, owned, 0, title, sizeof(title), sub, sizeof(sub));
+        char title[160], sub[200], avatar[120], rid[90] = "t:";
+        torrent_row(fid, owned, 0, title, sizeof(title), sub, sizeof(sub),
+                    avatar, sizeof(avatar));
         s_cat(rid, fid, sizeof(rid));
-        row(rid, title, sub);
+        row_avatar(rid, title, sub, avatar);
       }
       p = next_obj(p, slice, sizeof(slice));
     }
@@ -658,10 +681,11 @@ static void render_search(void) {
       const char *p = next_obj(r, slice, sizeof(slice));
       int any = 0;
       while (p) {
-        char fid[80], title[160], cat[24];
+        char fid[80], title[160], cat[24], avatar[120];
         jstr(slice, "folderId", fid, sizeof(fid));
         jstr(slice, "title", title, sizeof(title));
         jstr(slice, "cat", cat, sizeof(cat));
+        jstr(slice, "icon", avatar, sizeof(avatar));
         unsigned seeders = (unsigned)jnum(slice, "seeders");
         unsigned size = (unsigned)jnum(slice, "size");
         if (fid[0]) {
@@ -675,7 +699,7 @@ static void render_search(void) {
             s_cat(sub, cat_label(cat), sizeof(sub)); }
           char rid[90] = "t:";
           s_cat(rid, fid, sizeof(rid));
-          row(rid, title[0] ? title : fid, sub);
+          row_avatar(rid, title[0] ? title : fid, sub, avatar);
         }
         p = next_obj(p, slice, sizeof(slice));
       }
@@ -1545,7 +1569,8 @@ void module_handle_event(void) {
     save_listing(buf);
     render_listing();
   } else if (s_eq(cmd, "m_cover") || s_eq(cmd, "m_banner") ||
-             s_eq(cmd, "m_trailer") || s_eq(cmd, "m_gallery")) {
+             s_eq(cmd, "m_trailer") || s_eq(cmd, "m_gallery") ||
+             s_eq(cmd, "m_icon")) {
     if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
     /* the action name minus the "m_" prefix IS the slot, except the gallery */
     s_cpy(g_pick_slot, s_eq(cmd, "m_gallery") ? "gallery" : cmd + 2,
