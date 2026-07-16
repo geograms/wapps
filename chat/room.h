@@ -57,6 +57,10 @@ int room_is_room(const char *id);
  * caller renders it through the normal conversation pipeline; else 0. */
 int room_note_roomid(const char *event_json, char *out, unsigned cap);
 
+/* May the current user post in [roomId] now? 0 if closed / self banned or
+ * suspended (client-enforced soft gating). */
+int room_self_can_post(const char *roomId);
+
 /* Post [text] to room [roomId] as a NIP-72 community message. Returns 1 ok. */
 int room_post(const char *roomId, const char *text);
 

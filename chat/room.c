@@ -497,6 +497,19 @@ int room_moderate(const char *roomId, const char *op, const char *target_pub,
   return 1;
 }
 
+/* May the current user post in [roomId] right now? 0 if the room is closed or
+ * self is banned / still suspended (soft gating the client enforces). */
+int room_self_can_post(const char *roomId) {
+  char cl[8]; room_field(roomId, "closed", cl, sizeof(cl));
+  if (cl[0] == '1') return 0;
+  if (!g_self[0]) return 1;
+  long until = 0;
+  int st = member_status(roomId, g_self, &until);
+  if (st == 2) return 0;
+  if (st == 1) { long now = (long)hal_time_epoch(); if (until == 0 || until > now) return 0; }
+  return 1;
+}
+
 /* Ban [target_pub] from the whole wapp (op h="*"); only a global authority may. */
 int room_ban_wapp(const char *target_pub) {
   if (!target_pub || !target_pub[0]) return 0;

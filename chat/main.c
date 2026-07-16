@@ -2546,6 +2546,10 @@ static void do_convo_send(const char *buf) {
   /* A room message is a NIP-72 community post (kind-1 tagged to the room); it
    * does not ride APRS/BLE/encryption. Post it and echo locally. */
   if (room_is_room(id)) {
+    if (!room_self_can_post(id)) {
+      notify("warning", "You can't post here right now (suspended, banned, or the room is closed)");
+      return;
+    }
     if (room_post(id, text)) {
       char from[16]; s_cpy(from, g_pubkey[0] ? g_pubkey : g_call, 13);
       convo_msg(id, "out", from, text, "", "", 0, 0, "NOS", "", "", "verified", 0, 0);
