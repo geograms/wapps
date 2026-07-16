@@ -24,9 +24,26 @@
             "icon": "repeat",
             "slot": "room",
             "tip": "Repeat this message periodically"
+          },
+          {
+            "$": "action",
+            "name": "room_members",
+            "icon": "group",
+            "slot": "room",
+            "tip": "Members & moderation (rooms only)"
           }
         ]
       }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Members",
+    "menu": true,
+    "icon": "group",
+    "tip": "Who is in this room, with their reputation level. Admins and moderators can tap a member to award or deduct points, suspend, kick or ban.",
+    "children": [
+      { "$": "field", "name": "room_members", "$type": "people" }
     ]
   },
   {

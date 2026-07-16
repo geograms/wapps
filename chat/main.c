@@ -15,6 +15,7 @@
 #include "geogram_wasm_hal.h"
 #include "chat.h"
 #include "ble.h"
+#include "room.h"
 
 /* ── tiny libc ──────────────────────────────────────────────────────── */
 static unsigned s_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
@@ -1088,7 +1089,7 @@ static void convo_msg(const char *id, const char *dir, const char *from,
    * do not know the difference), but rendering it here would rebuild the second
    * inbox we just removed. The Messages wapp owns 1:1. Dropping the bubble does
    * not drop the message: it arrives there as a NOSTR kind-4. */
-  if (!is_group(id)) return;
+  if (!is_group(id) && !room_is_room(id)) return;
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -1261,6 +1262,7 @@ static int extract_am(char *s, char *am) {
 static void do_convo_open(const char *buf) {
   char convo[16] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
   if (!convo[0] || convo[0] == '#') return;      /* groups: no receipts */
+  if (room_is_room(convo)) return;               /* rooms: no 1:1 receipts */
   int w = 0;
   for (int i = 0; i < g_rpend_n; i++) {
     if (s_eq(g_rpend_convo[i], convo)) {
@@ -2541,6 +2543,17 @@ static void do_convo_send(const char *buf) {
   jstr(buf, "conversations_convo", id, sizeof(id));
   jstr(buf, "conversations_input", text, sizeof(text));
   if (!id[0] || !text[0]) return;
+  /* A room message is a NIP-72 community post (kind-1 tagged to the room); it
+   * does not ride APRS/BLE/encryption. Post it and echo locally. */
+  if (room_is_room(id)) {
+    if (room_post(id, text)) {
+      char from[16]; s_cpy(from, g_pubkey[0] ? g_pubkey : g_call, 13);
+      convo_msg(id, "out", from, text, "", "", 0, 0, "NOS", "", "", "verified", 0, 0);
+    } else {
+      notify("warning", "Couldn't post to this room");
+    }
+    return;
+  }
   int net = (g_sock >= 0 && g_logged);
   int rns = rns_up();
   /* Private (Reticulum-only) 1:1 rides Reticulum alone; a normal message needs
@@ -3119,12 +3132,38 @@ static void do_convo_close(const char *buf) {
   }
 }
 
+static char g_cur_room[80] = "";       /* the room whose members panel is open */
+
 /* Result of a ui.prompt the host showed for us. */
 static void do_prompt_result(const char *buf) {
   char pid[24] = "", val[40] = "", inp[80] = "";
   jstr(buf, "prompt_id", pid, sizeof(pid));
   jstr(buf, "prompt_value", val, sizeof(val));
   jstr(buf, "prompt_input", inp, sizeof(inp));
+  /* Moderation prompt "rmod:<roomId>\t<targetPub>" — its id exceeds pid[24], so
+   * read it into a wider buffer and handle it before the short-id switch. */
+  {
+    char big[200] = ""; jstr(buf, "prompt_id", big, sizeof(big));
+    if (big[0] == 'r' && big[1] == 'm' && big[2] == 'o' && big[3] == 'd' && big[4] == ':') {
+      char rid[80] = "", tp[80] = ""; const char *p = big + 5; int j = 0;
+      while (*p && *p != '\t' && j < 79) rid[j++] = *p++; rid[j] = 0;
+      if (*p == '\t') p++;
+      j = 0; while (*p && j < 79) tp[j++] = *p++; tp[j] = 0;
+      long now = (long)hal_time_epoch();
+      if (s_eq(val, "award")) room_moderate(rid, "award", tp, 0, 5, "");
+      else if (s_eq(val, "deduct")) room_moderate(rid, "deduct", tp, 0, 5, "");
+      else if (s_eq(val, "suspend")) room_moderate(rid, "suspend", tp, now + 86400, 0, "");
+      else if (s_eq(val, "unsuspend")) room_moderate(rid, "unsuspend", tp, 0, 0, "");
+      else if (s_eq(val, "kick")) room_moderate(rid, "kick", tp, 0, 0, "");
+      else if (s_eq(val, "ban")) room_moderate(rid, "ban", tp, 0, 0, "");
+      else if (s_eq(val, "banwapp")) room_ban_wapp(tp);
+      if (val[0]) {
+        notify("info", "Moderation action sent");
+        if (g_cur_room[0]) room_render_members(g_cur_room);
+      }
+      return;
+    }
+  }
   if (s_eq(pid, "newchat")) {
     /* Typed text wins; otherwise a tapped reachable-station chip (its callsign
      * arrives in prompt_value). */
@@ -3600,6 +3639,76 @@ static void groups_subscribe(void) {
   s_cat(f, "],\"limit\":100}", sizeof(f));
   uint32_t n = hal_nostr_subscribe(f, s_len(f), g_sub_groups, sizeof(g_sub_groups) - 1);
   if (n > 0 && n < sizeof(g_sub_groups)) g_sub_groups[n] = 0; else g_sub_groups[0] = 0;
+}
+
+/* ── Rooms (NIP-72 communities + moderation op-log; see room.c) ──────────── */
+static char g_sub_rooms[64] = "";
+
+static void rooms_subscribe(void) {
+  if (g_sub_rooms[0]) {
+    hal_nostr_unsubscribe(g_sub_rooms, s_len(g_sub_rooms));
+    g_sub_rooms[0] = 0;
+  }
+  char f[1400];
+  unsigned fn = room_sub_filter(f, sizeof(f));
+  if (!fn) return;
+  uint32_t n = hal_nostr_subscribe(f, s_len(f), g_sub_rooms, sizeof(g_sub_rooms) - 1);
+  if (n > 0 && n < sizeof(g_sub_rooms)) g_sub_rooms[n] = 0; else g_sub_rooms[0] = 0;
+}
+
+/* One event off the room subscription: a room def/op is consumed by room.c; a
+ * room message is rendered into its conversation. */
+static void room_event_ingest(const char *evt) {
+  if (room_ingest(evt)) return;
+  char rid[80];
+  if (!room_note_roomid(evt, rid, sizeof(rid))) return;
+  char id[80] = "", pub[80] = "", from[16] = "";
+  static char content[900];
+  content[0] = 0;
+  jstr(evt, "id", id, sizeof(id));
+  jstr(evt, "pubkey", pub, sizeof(pub));
+  jstr(evt, "content", content, sizeof(content));
+  if (!content[0]) return;
+  if (pub[0] && g_pubkey[0] && s_eq_ci(pub, g_pubkey)) return;   /* our own echo */
+  s_cpy(from, pub, 13);
+  convo_msg(rid, "in", from, content, "", "", 0, 0, "NOS", id, "", "verified", 0, 0);
+  notify_msg(rid, from, content, content);
+}
+
+/* Open the Members panel for the currently-open room. */
+static void do_room_members(const char *buf) {
+  char rid[80] = ""; jstr(buf, "conversations_convo", rid, sizeof(rid));
+  if (!rid[0] || !room_is_room(rid)) { notify("info", "Open a room first"); return; }
+  s_cpy(g_cur_room, rid, sizeof(g_cur_room));
+  room_render_members(rid);
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Members\"}";
+  hal_msg_send(m, s_len(m));
+}
+
+/* A member row tapped: authorities get a moderation prompt; others see the
+ * member's reputation level. */
+static void do_room_member_tap(const char *buf) {
+  char pub[80] = ""; jstr(buf, "room_members_id", pub, sizeof(pub));
+  if (!pub[0] || !g_cur_room[0]) return;
+  if (!room_self_authority(g_cur_room)) {
+    char b[40] = "Reputation level "; char lv[8]; u_itoa((unsigned)room_rep_level(pub), lv);
+    s_cat(b, lv, sizeof(b)); status(b);
+    return;
+  }
+  char pid[200] = "rmod:"; s_cat(pid, g_cur_room, sizeof(pid));
+  s_cat(pid, "\t", sizeof(pid)); s_cat(pid, pub, sizeof(pid));
+  char m[720] = "{\"type\":\"ui.prompt\",\"id\":\"";
+  jesc(m, sizeof(m), pid);
+  s_cat(m, "\",\"title\":\"Moderate member\",\"body\":\"Choose an action.\",\"chips\":["
+           "{\"label\":\"Award +5\",\"value\":\"award\"},"
+           "{\"label\":\"Deduct 5\",\"value\":\"deduct\"},"
+           "{\"label\":\"Suspend 1 day\",\"value\":\"suspend\"},"
+           "{\"label\":\"Unsuspend\",\"value\":\"unsuspend\"},"
+           "{\"label\":\"Kick\",\"value\":\"kick\"},"
+           "{\"label\":\"Ban from room\",\"value\":\"ban\"},"
+           "{\"label\":\"Ban from wapp\",\"value\":\"banwapp\"}],"
+           "\"confirm\":\"Cancel\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
 }
 
 /* Value of the first ["t","<topic>"] tag — which group a note belongs to. */
@@ -5231,6 +5340,23 @@ void module_tick(void) {
     evt[n] = 0;
     group_note_ingest(evt);
   }
+
+  /* Rooms: seed the main room once our key is known, subscribe, draw the tree
+   * once, then drain room defs / ops / messages. */
+  room_init();
+  {
+    static int tree_drawn = 0;
+    if (!g_sub_rooms[0]) rooms_subscribe();
+    if (!tree_drawn && room_is_room(MAIN_ROOM_ID)) { room_render_tree(); tree_drawn = 1; }
+  }
+  for (int i = 0; i < 20 && g_sub_rooms[0]; i++) {
+    static char rv[1600];
+    int n = hal_nostr_event_recv(g_sub_rooms, s_len(g_sub_rooms), rv, sizeof(rv) - 1);
+    if (n <= 0) break;
+    rv[n] = 0;
+    room_event_ingest(rv);
+  }
+
   lxmf_drain();
 
   /* Cold-start 1:1: drain callsign→npub resolutions and flush queued public
@@ -5281,6 +5407,8 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "conversations_close")) do_convo_close(buf);
   else if (s_eq(cmd, "new_chat")) do_new_chat();
   else if (s_eq(cmd, "add_group")) do_add_group();
+  else if (s_eq(cmd, "room_members")) do_room_members(buf);
+  else if (s_eq(cmd, "room_members_tap")) do_room_member_tap(buf);
   else if (s_eq(cmd, "recur")) do_recur(buf);
   else if (s_eq(cmd, "prompt")) do_prompt_result(buf);
   else if (s_eq(cmd, "set_radius")) do_set_radius(buf);
