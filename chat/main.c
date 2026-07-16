@@ -3695,8 +3695,9 @@ static void do_room_member_tap(const char *buf) {
   char pub[80] = ""; jstr(buf, "room_members_id", pub, sizeof(pub));
   if (!pub[0] || !g_cur_room[0]) return;
   if (!room_self_authority(g_cur_room)) {
-    char b[40] = "Reputation level "; char lv[8]; u_itoa((unsigned)room_rep_level(pub), lv);
-    s_cat(b, lv, sizeof(b)); status(b);
+    char b[48] = "Level "; char lv[8]; u_itoa((unsigned)room_rep_level(pub), lv);
+    s_cat(b, lv, sizeof(b)); s_cat(b, " (view only)", sizeof(b));
+    notify("info", b);
     return;
   }
   char pid[200] = "rmod:"; s_cat(pid, g_cur_room, sizeof(pid));

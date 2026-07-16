@@ -230,6 +230,12 @@ int room_is_room(const char *id) {
 
 /* ── authority (subtree walk) ── */
 
+/* Make sure we know our own pubkey (the profile key can land after init). */
+static void ensure_self(void) {
+  if (!g_self[0]) { unsigned n = hal_nostr_self(g_self, sizeof(g_self)); g_self[n] = 0; }
+  if (!ROOM_MAIN_ADMIN[0] && g_self[0]) s_cpy(ROOM_MAIN_ADMIN, g_self, sizeof(ROOM_MAIN_ADMIN));
+}
+
 int room_has_authority(const char *pub, const char *roomId) {
   if (!pub || !pub[0]) return 0;
   if (ROOM_MAIN_ADMIN[0] && s_eq(pub, ROOM_MAIN_ADMIN)) return 1; /* global admin */
@@ -250,7 +256,7 @@ int room_has_authority(const char *pub, const char *roomId) {
   return 0;
 }
 
-int room_self_authority(const char *roomId) { return room_has_authority(g_self, roomId); }
+int room_self_authority(const char *roomId) { ensure_self(); return room_has_authority(g_self, roomId); }
 
 /* ── moderation reducer: a member's status in a room ── */
 
@@ -502,6 +508,7 @@ int room_moderate(const char *roomId, const char *op, const char *target_pub,
 int room_self_can_post(const char *roomId) {
   char cl[8]; room_field(roomId, "closed", cl, sizeof(cl));
   if (cl[0] == '1') return 0;
+  ensure_self();
   if (!g_self[0]) return 1;
   long until = 0;
   int st = member_status(roomId, g_self, &until);
@@ -513,6 +520,7 @@ int room_self_can_post(const char *roomId) {
 /* Ban [target_pub] from the whole wapp (op h="*"); only a global authority may. */
 int room_ban_wapp(const char *target_pub) {
   if (!target_pub || !target_pub[0]) return 0;
+  ensure_self();
   if (!room_has_authority(g_self, MAIN_ROOM_ID)) return 0;
   char tags[400] = "[[\"h\",\"*\"],[\"op\",\"ban\"],[\"p\",\"";
   s_cat(tags, target_pub, sizeof(tags));
