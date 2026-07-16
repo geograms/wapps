@@ -80,6 +80,13 @@ int room_self_authority(const char *roomId);
 /* Ban [target_pub] from the whole wapp (global op). Global authority only. */
 int room_ban_wapp(const char *target_pub);
 
+/* Is [pub] our own pubkey (used to drop our own federated-back copy)? */
+int room_is_self(const char *pub);
+
+/* Create a sub-room named [name] under [parentId] (empty = top level): publish a
+ * NIP-72 34550 with self as admin + parent link. Returns 1. */
+int room_create(const char *parentId, const char *name);
+
 /* Global reputation level 1..10 for [pub] (hex). */
 int room_rep_level(const char *pub);
 

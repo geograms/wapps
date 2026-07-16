@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.chat",
-  "version":         "0.2.114",
+  "version":         "0.2.116",
   "kind":            "app",
   "title":           "Chat",
   "description":     "Chat - encrypted messaging, live map and beacons over Reticulum, Bluetooth mesh and NOSTR relays (legacy APRS-IS optional).",

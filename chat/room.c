@@ -408,7 +408,7 @@ int room_ingest(const char *ev) {
     s_cat(p, "]", sizeof(p));
     db_exec(sql, p);
     mods_replace(roomId, ev);
-    return 1;
+    return 2; /* a room definition changed → caller re-renders the rail */
   }
 
   if (kind == KIND_ROOM_OP) {
@@ -452,6 +452,10 @@ int room_note_roomid(const char *ev, char *out, unsigned cap) {
   char id[80], author[65]; j_str(ev, "id", id, sizeof(id));
   j_str(ev, "pubkey", author, sizeof(author));
   long ts = j_long(ev, "created_at", 0);
+  /* Dedup: if we already recorded this event, it is a re-delivery — do not
+   * render it a second time. */
+  { char dp[128]; params_of(dp, sizeof(dp), id, 0, 0, 0);
+    if (db_exists("SELECT 1 FROM msgs WHERE id=? LIMIT 1", dp)) return 0; }
   char tsb[24]; u_ltoa(ts, tsb);
   char p[400]; p[0] = 0; s_cat(p, "[", sizeof(p));
   const char *vals[4] = {id, roomId, author, tsb};
@@ -517,6 +521,48 @@ int room_self_can_post(const char *roomId) {
   return 1;
 }
 
+/* Is [pub] our own pubkey? (case-insensitive hex, refreshing g_self.) */
+int room_is_self(const char *pub) {
+  if (!pub || !pub[0]) return 0;
+  ensure_self();
+  if (!g_self[0]) return 0;
+  unsigned i = 0;
+  for (; pub[i] && g_self[i]; i++) {
+    char a = pub[i], b = g_self[i];
+    if (a >= 'A' && a <= 'Z') a += 32;
+    if (b >= 'A' && b <= 'Z') b += 32;
+    if (a != b) return 0;
+  }
+  return pub[i] == 0 && g_self[i] == 0;
+}
+
+/* Create a sub-room under [parentId] (or a top-level room if parentId empty):
+ * publish a NIP-72 34550 with self as admin + the parent link. Returns 1. */
+int room_create(const char *parentId, const char *name) {
+  ensure_self();
+  if (!g_self[0] || !name || !name[0]) return 0;
+  unsigned char rb[8]; hal_crypto_random((char *)rb, 8);
+  static const char hx[] = "0123456789abcdef";
+  char rid[20]; for (int i = 0; i < 8; i++) { rid[i * 2] = hx[rb[i] >> 4]; rid[i * 2 + 1] = hx[rb[i] & 15]; }
+  rid[16] = 0;
+  char tags[500] = "[[\"d\",\"";
+  s_cat(tags, rid, sizeof(tags));
+  s_cat(tags, "\"],[\"name\",\"", sizeof(tags));
+  jesc(tags, sizeof(tags), name);
+  s_cat(tags, "\"],[\"access\",\"open\"]", sizeof(tags));
+  if (parentId && parentId[0]) {
+    char padmin[65]; room_field(parentId, "adminPub", padmin, sizeof(padmin));
+    if (padmin[0]) {
+      s_cat(tags, ",[\"a\",\"34550:", sizeof(tags));
+      s_cat(tags, padmin, sizeof(tags)); s_cat(tags, ":", sizeof(tags));
+      s_cat(tags, parentId, sizeof(tags)); s_cat(tags, "\"]", sizeof(tags));
+    }
+  }
+  s_cat(tags, "]", sizeof(tags));
+  hal_nostr_post(KIND_ROOM_DEF, "", 0, tags, s_len(tags));
+  return 1;
+}
+
 /* Ban [target_pub] from the whole wapp (op h="*"); only a global authority may. */
 int room_ban_wapp(const char *target_pub) {
   if (!target_pub || !target_pub[0]) return 0;
@@ -554,25 +600,22 @@ unsigned room_sub_filter(char *out, unsigned cap) {
   return s_len(out);
 }
 
-/* ── rendering ── */
+/* ── rendering: the Discord-like rail (ui.rooms.set) ── */
 
-/* Render the room tree into the conversations widget, sub-rooms indented. */
-static void render_room_row(const char *roomId, int depth, int selected) {
+static char g_rail[8192];
+static int g_rail_first;
+static void rail_add(const char *roomId, int depth) {
   char name[80]; room_field(roomId, "name", name, sizeof(name));
   if (!name[0]) s_cpy(name, roomId, sizeof(name));
-  char title[120]; title[0] = 0;
-  for (int i = 0; i < depth && i < 6; i++) s_cat(title, "\xE2\x80\x83", sizeof(title)); /* em space */
-  if (depth > 0) s_cat(title, "\xE2\x86\xB3 ", sizeof(title)); /* ↳ */
-  s_cat(title, name, sizeof(title));
-  char m[400] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
-  jesc(m, sizeof(m), roomId);
-  s_cat(m, "\",\"title\":\"", sizeof(m)); jesc(m, sizeof(m), title);
-  s_cat(m, "\",\"icon\":\"", sizeof(m));
-  s_cat(m, depth == 0 ? "campaign" : "forum", sizeof(m));
-  s_cat(m, selected ? "\",\"select\":true}" : "\"}", sizeof(m));
-  hal_msg_send(m, s_len(m));
+  if (!g_rail_first) s_cat(g_rail, ",", sizeof(g_rail));
+  g_rail_first = 0;
+  s_cat(g_rail, "{\"id\":\"", sizeof(g_rail)); jesc(g_rail, sizeof(g_rail), roomId);
+  s_cat(g_rail, "\",\"name\":\"", sizeof(g_rail)); jesc(g_rail, sizeof(g_rail), name);
+  s_cat(g_rail, "\",\"depth\":", sizeof(g_rail)); cat_l(g_rail, depth, sizeof(g_rail));
+  if (s_eq(roomId, MAIN_ROOM_ID)) s_cat(g_rail, ",\"selected\":true", sizeof(g_rail));
+  s_cat(g_rail, "}", sizeof(g_rail));
 }
-static void render_children(const char *parentId, int depth) {
+static void rail_children(const char *parentId, int depth) {
   if (depth > 8) return;
   char p[128]; params_of(p, sizeof(p), parentId, 0, 0, 0);
   char r[4096];
@@ -583,13 +626,18 @@ static void render_children(const char *parentId, int depth) {
     const char *obj = 0; for (const char *s = q; *s; s++) if (*s == '{') { obj = s; break; }
     if (!obj) break;
     char rid[80]; j_str(obj, "v", rid, sizeof(rid));
-    if (rid[0]) { render_room_row(rid, depth, 0); render_children(rid, depth + 1); }
+    if (rid[0]) { rail_add(rid, depth); rail_children(rid, depth + 1); }
     const char *e = obj; for (; *e && *e != '}'; e++) {} q = (*e == '}') ? e + 1 : obj + 1;
   }
 }
 void room_render_tree(void) {
-  render_room_row(MAIN_ROOM_ID, 0, 1);
-  render_children(MAIN_ROOM_ID, 1);
+  g_rail[0] = 0;
+  s_cat(g_rail, "{\"type\":\"ui.rooms.set\",\"field\":\"rooms\",\"rooms\":[", sizeof(g_rail));
+  g_rail_first = 1;
+  rail_add(MAIN_ROOM_ID, 0);
+  rail_children(MAIN_ROOM_ID, 1);
+  s_cat(g_rail, "]}", sizeof(g_rail));
+  hal_msg_send(g_rail, s_len(g_rail));
 }
 
 /* Append one people-item {id,title,subtitle} for [pub] with role/status label. */

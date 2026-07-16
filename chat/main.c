@@ -3137,6 +3137,8 @@ static void do_convo_close(const char *buf) {
 }
 
 static char g_cur_room[80] = "";       /* the room whose members panel is open */
+static char g_new_parent[80] = "";     /* parent for a room being created */
+static char g_mod_target[80] = "";     /* member a moderation prompt targets */
 
 /* Result of a ui.prompt the host showed for us. */
 static void do_prompt_result(const char *buf) {
@@ -3144,29 +3146,29 @@ static void do_prompt_result(const char *buf) {
   jstr(buf, "prompt_id", pid, sizeof(pid));
   jstr(buf, "prompt_value", val, sizeof(val));
   jstr(buf, "prompt_input", inp, sizeof(inp));
-  /* Moderation prompt "rmod:<roomId>\t<targetPub>" — its id exceeds pid[24], so
-   * read it into a wider buffer and handle it before the short-id switch. */
-  {
-    char big[200] = ""; jstr(buf, "prompt_id", big, sizeof(big));
-    if (big[0] == 'r' && big[1] == 'm' && big[2] == 'o' && big[3] == 'd' && big[4] == ':') {
-      char rid[80] = "", tp[80] = ""; const char *p = big + 5; int j = 0;
-      while (*p && *p != '\t' && j < 79) rid[j++] = *p++; rid[j] = 0;
-      if (*p == '\t') p++;
-      j = 0; while (*p && j < 79) tp[j++] = *p++; tp[j] = 0;
-      long now = (long)hal_time_epoch();
-      if (s_eq(val, "award")) room_moderate(rid, "award", tp, 0, 5, "");
-      else if (s_eq(val, "deduct")) room_moderate(rid, "deduct", tp, 0, 5, "");
-      else if (s_eq(val, "suspend")) room_moderate(rid, "suspend", tp, now + 86400, 0, "");
-      else if (s_eq(val, "unsuspend")) room_moderate(rid, "unsuspend", tp, 0, 0, "");
-      else if (s_eq(val, "kick")) room_moderate(rid, "kick", tp, 0, 0, "");
-      else if (s_eq(val, "ban")) room_moderate(rid, "ban", tp, 0, 0, "");
-      else if (s_eq(val, "banwapp")) room_ban_wapp(tp);
-      if (val[0]) {
-        notify("info", "Moderation action sent");
-        if (g_cur_room[0]) room_render_members(g_cur_room);
-      }
-      return;
+  if (s_eq(pid, "rmod")) {
+    /* Moderation action on g_mod_target in g_cur_room (both set at tap time). */
+    const char *rid = g_cur_room, *tp = g_mod_target;
+    long now = (long)hal_time_epoch();
+    if (s_eq(val, "award")) room_moderate(rid, "award", tp, 0, 5, "");
+    else if (s_eq(val, "deduct")) room_moderate(rid, "deduct", tp, 0, 5, "");
+    else if (s_eq(val, "suspend")) room_moderate(rid, "suspend", tp, now + 86400, 0, "");
+    else if (s_eq(val, "unsuspend")) room_moderate(rid, "unsuspend", tp, 0, 0, "");
+    else if (s_eq(val, "kick")) room_moderate(rid, "kick", tp, 0, 0, "");
+    else if (s_eq(val, "ban")) room_moderate(rid, "ban", tp, 0, 0, "");
+    else if (s_eq(val, "banwapp")) room_ban_wapp(tp);
+    if (val[0]) {
+      notify("info", "Moderation action sent");
+      if (g_cur_room[0]) room_render_members(g_cur_room);
     }
+    return;
+  }
+  if (s_eq(pid, "newroom")) {
+    if (inp[0]) {
+      if (room_create(g_new_parent[0] ? g_new_parent : "main", inp))
+        notify("info", "Creating the room...");
+    }
+    return;
   }
   if (s_eq(pid, "newchat")) {
     /* Typed text wins; otherwise a tapped reachable-station chip (its callsign
@@ -3663,9 +3665,11 @@ static void rooms_subscribe(void) {
 /* One event off the room subscription: a room def/op is consumed by room.c; a
  * room message is rendered into its conversation. */
 static void room_event_ingest(const char *evt) {
-  if (room_ingest(evt)) return;
+  int rc = room_ingest(evt);
+  if (rc == 2) room_render_tree();   /* a room definition changed → refresh rail */
+  if (rc) return;
   char rid[80];
-  if (!room_note_roomid(evt, rid, sizeof(rid))) return;
+  if (!room_note_roomid(evt, rid, sizeof(rid))) return;   /* new msg, or 0 if dup */
   char id[80] = "", pub[80] = "", from[16] = "";
   static char content[900];
   content[0] = 0;
@@ -3673,10 +3677,43 @@ static void room_event_ingest(const char *evt) {
   jstr(evt, "pubkey", pub, sizeof(pub));
   jstr(evt, "content", content, sizeof(content));
   if (!content[0]) return;
-  if (pub[0] && g_pubkey[0] && s_eq_ci(pub, g_pubkey)) return;   /* our own echo */
+  if (room_is_self(pub)) return;   /* our own federated-back copy; already echoed */
   s_cpy(from, pub, 13);
   convo_msg(rid, "in", from, content, "", "", 0, 0, "NOS", id, "", "verified", 0, 0);
   notify_msg(rid, from, content, content);
+}
+
+/* ── Rooms widget commands (Discord-like layout) ── */
+static void do_rooms_open(const char *buf) {
+  char rid[80] = ""; jstr(buf, "rooms_convo", rid, sizeof(rid));
+  if (!rid[0]) return;
+  s_cpy(g_cur_room, rid, sizeof(g_cur_room));
+  room_render_members(rid);          /* populate the member panel for this room */
+}
+static void do_rooms_send(const char *buf) {
+  char rid[80] = "", text[400] = "";
+  jstr(buf, "rooms_convo", rid, sizeof(rid));
+  jstr(buf, "rooms_input", text, sizeof(text));
+  if (!rid[0] || !text[0] || !room_is_room(rid)) return;
+  if (!room_self_can_post(rid)) {
+    notify("warning", "You can't post here right now (suspended, banned, or closed)");
+    return;
+  }
+  if (room_post(rid, text)) {
+    char from[16]; s_cpy(from, g_pubkey[0] ? g_pubkey : g_call, 13);
+    convo_msg(rid, "out", from, text, "", "", 0, 0, "NOS", "", "", "verified", 0, 0);
+  } else {
+    notify("warning", "Couldn't post to this room");
+  }
+}
+static void do_rooms_new(const char *buf) {
+  char parent[80] = ""; jstr(buf, "rooms_convo", parent, sizeof(parent));
+  s_cpy(g_new_parent, parent[0] ? parent : MAIN_ROOM_ID, sizeof(g_new_parent));
+  const char *m = "{\"type\":\"ui.prompt\",\"id\":\"newroom\",\"title\":\"New room\","
+                  "\"body\":\"Name the room. It is created under the room you have "
+                  "open.\",\"input\":{\"hint\":\"room name\",\"max\":40},"
+                  "\"confirm\":\"Create\"}";
+  hal_msg_send(m, s_len(m));
 }
 
 /* Open the Members panel for the currently-open room. */
@@ -3693,26 +3730,26 @@ static void do_room_members(const char *buf) {
  * member's reputation level. */
 static void do_room_member_tap(const char *buf) {
   char pub[80] = ""; jstr(buf, "room_members_id", pub, sizeof(pub));
-  if (!pub[0] || !g_cur_room[0]) return;
+  if (!pub[0]) { notify("warning", "member: no id"); return; }
+  if (!g_cur_room[0]) s_cpy(g_cur_room, MAIN_ROOM_ID, sizeof(g_cur_room));
   if (!room_self_authority(g_cur_room)) {
     char b[48] = "Level "; char lv[8]; u_itoa((unsigned)room_rep_level(pub), lv);
     s_cat(b, lv, sizeof(b)); s_cat(b, " (view only)", sizeof(b));
     notify("info", b);
     return;
   }
-  char pid[200] = "rmod:"; s_cat(pid, g_cur_room, sizeof(pid));
-  s_cat(pid, "\t", sizeof(pid)); s_cat(pid, pub, sizeof(pid));
-  char m[720] = "{\"type\":\"ui.prompt\",\"id\":\"";
-  jesc(m, sizeof(m), pid);
-  s_cat(m, "\",\"title\":\"Moderate member\",\"body\":\"Choose an action.\",\"chips\":["
-           "{\"label\":\"Award +5\",\"value\":\"award\"},"
-           "{\"label\":\"Deduct 5\",\"value\":\"deduct\"},"
-           "{\"label\":\"Suspend 1 day\",\"value\":\"suspend\"},"
-           "{\"label\":\"Unsuspend\",\"value\":\"unsuspend\"},"
-           "{\"label\":\"Kick\",\"value\":\"kick\"},"
-           "{\"label\":\"Ban from room\",\"value\":\"ban\"},"
-           "{\"label\":\"Ban from wapp\",\"value\":\"banwapp\"}],"
-           "\"confirm\":\"Cancel\"}", sizeof(m));
+  s_cpy(g_mod_target, pub, sizeof(g_mod_target));
+  const char *m =
+      "{\"type\":\"ui.prompt\",\"id\":\"rmod\",\"title\":\"Moderate member\","
+      "\"body\":\"Choose an action.\",\"chips\":["
+      "{\"label\":\"Award +5\",\"value\":\"award\"},"
+      "{\"label\":\"Deduct 5\",\"value\":\"deduct\"},"
+      "{\"label\":\"Suspend 1 day\",\"value\":\"suspend\"},"
+      "{\"label\":\"Unsuspend\",\"value\":\"unsuspend\"},"
+      "{\"label\":\"Kick\",\"value\":\"kick\"},"
+      "{\"label\":\"Ban from room\",\"value\":\"ban\"},"
+      "{\"label\":\"Ban from wapp\",\"value\":\"banwapp\"}],"
+      "\"confirm\":\"Cancel\"}";
   hal_msg_send(m, s_len(m));
 }
 
@@ -3831,13 +3868,9 @@ static const char *DEFAULT_GROUPS[] = {
   "#DEV*", "#NEWS*", "#MISC*", "#HELP*", "#HELLO*", "#CHILL*"
 };
 static void groups_seed_defaults(void) {
-  char f[2];
-  if (hal_kv_get("grpseed", 7, f, sizeof(f) - 1) > 0) return; /* already seeded */
-  for (unsigned i = 0; i < sizeof(DEFAULT_GROUPS) / sizeof(DEFAULT_GROUPS[0]); i++)
-    convo_ensure(DEFAULT_GROUPS[i]);
-  groups_save();
-  groups_subscribe();
-  hal_kv_set("grpseed", 7, "1", 1);
+  /* Retired: the Discord-like rooms rail replaces the old default #topics, so a
+   * fresh install seeds none. (Kept referenced to satisfy -Werror.) */
+  (void)DEFAULT_GROUPS;
 }
 /* One-time: drop the conversation rows this wapp used to own.
  *
@@ -5352,7 +5385,12 @@ void module_tick(void) {
   {
     static int tree_drawn = 0;
     if (!g_sub_rooms[0]) rooms_subscribe();
-    if (!tree_drawn && room_is_room(MAIN_ROOM_ID)) { room_render_tree(); tree_drawn = 1; }
+    if (!tree_drawn && room_is_room(MAIN_ROOM_ID)) {
+      room_render_tree();
+      s_cpy(g_cur_room, MAIN_ROOM_ID, sizeof(g_cur_room));
+      room_render_members(MAIN_ROOM_ID);
+      tree_drawn = 1;
+    }
   }
   for (int i = 0; i < 20 && g_sub_rooms[0]; i++) {
     static char rv[1600];
@@ -5414,6 +5452,13 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "add_group")) do_add_group();
   else if (s_eq(cmd, "room_members")) do_room_members(buf);
   else if (s_eq(cmd, "room_members_tap")) do_room_member_tap(buf);
+  else if (s_eq(cmd, "rooms_open")) do_rooms_open(buf);
+  else if (s_eq(cmd, "rooms_send")) do_rooms_send(buf);
+  else if (s_eq(cmd, "rooms_new")) do_rooms_new(buf);
+  else if (s_eq(cmd, "rooms_settings")) {
+    const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Settings\"}";
+    hal_msg_send(m, s_len(m));
+  }
   else if (s_eq(cmd, "recur")) do_recur(buf);
   else if (s_eq(cmd, "prompt")) do_prompt_result(buf);
   else if (s_eq(cmd, "set_radius")) do_set_radius(buf);
