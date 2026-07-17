@@ -3139,6 +3139,7 @@ static void do_convo_close(const char *buf) {
 static char g_cur_room[80] = "";       /* the room whose members panel is open */
 static char g_new_parent[80] = "";     /* parent for a room being created */
 static char g_mod_target[80] = "";     /* member a moderation prompt targets */
+static char g_appr_target[80] = "";    /* proposal id an approval prompt targets */
 
 /* Result of a ui.prompt the host showed for us. */
 static void do_prompt_result(const char *buf) {
@@ -3165,9 +3166,20 @@ static void do_prompt_result(const char *buf) {
   }
   if (s_eq(pid, "newroom")) {
     if (inp[0]) {
-      if (room_create(g_new_parent[0] ? g_new_parent : "main", inp))
-        notify("info", "Creating the room...");
+      const char *par = g_new_parent[0] ? g_new_parent : "main";
+      if (room_propose(par, inp)) {
+        if (room_self_authority(par)) notify("info", "Creating the room...");
+        else notify("info", "Room requested — waiting for a moderator to approve");
+      }
     }
+    return;
+  }
+  if (s_eq(pid, "rappr")) {
+    if (s_eq(val, "approve") && g_appr_target[0]) {
+      if (room_approve(g_appr_target)) notify("info", "Approved — creating the room");
+      else notify("warning", "Couldn't approve (not authorised?)");
+    }
+    g_appr_target[0] = 0;
     return;
   }
   if (s_eq(pid, "newchat")) {
@@ -3664,9 +3676,24 @@ static void rooms_subscribe(void) {
 
 /* One event off the room subscription: a room def/op is consumed by room.c; a
  * room message is rendered into its conversation. */
+/* Ask the user (a parent authority) to approve the newest pending proposal. */
+static void prompt_pending_approval(void) {
+  char pid[80], name[80], parent[80];
+  if (!room_newest_pending(pid, sizeof(pid), name, sizeof(name), parent, sizeof(parent)))
+    return;
+  s_cpy(g_appr_target, pid, sizeof(g_appr_target));
+  char m[512] = "{\"type\":\"ui.prompt\",\"id\":\"rappr\",\"title\":\"New room request\","
+                "\"body\":\"Approve the sub-room \\\"";
+  jesc(m, sizeof(m), name);
+  s_cat(m, "\\\"?\",\"chips\":[{\"label\":\"Approve\",\"value\":\"approve\"},"
+           "{\"label\":\"Dismiss\",\"value\":\"dismiss\"}],\"confirm\":\"Cancel\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
 static void room_event_ingest(const char *evt) {
   int rc = room_ingest(evt);
-  if (rc == 2) room_render_tree();   /* a room definition changed → refresh rail */
+  if (rc == 3) { prompt_pending_approval(); return; } /* a proposal I can approve */
+  if (rc == 2) { rooms_subscribe(); room_render_tree(); } /* room appeared/changed */
   if (rc) return;
   char rid[80];
   if (!room_note_roomid(evt, rid, sizeof(rid))) return;   /* new msg, or 0 if dup */
@@ -3710,9 +3737,10 @@ static void do_rooms_new(const char *buf) {
   char parent[80] = ""; jstr(buf, "rooms_convo", parent, sizeof(parent));
   s_cpy(g_new_parent, parent[0] ? parent : MAIN_ROOM_ID, sizeof(g_new_parent));
   const char *m = "{\"type\":\"ui.prompt\",\"id\":\"newroom\",\"title\":\"New room\","
-                  "\"body\":\"Name the room. It is created under the room you have "
-                  "open.\",\"input\":{\"hint\":\"room name\",\"max\":40},"
-                  "\"confirm\":\"Create\"}";
+                  "\"body\":\"Name the sub-room. It is created under the room you have "
+                  "open — if you are not a moderator there, a moderator must approve "
+                  "it first.\",\"input\":{\"hint\":\"room name\",\"max\":40},"
+                  "\"confirm\":\"Request\"}";
   hal_msg_send(m, s_len(m));
 }
 
@@ -5393,7 +5421,7 @@ void module_tick(void) {
     }
   }
   for (int i = 0; i < 20 && g_sub_rooms[0]; i++) {
-    static char rv[1600];
+    static char rv[8192];
     int n = hal_nostr_event_recv(g_sub_rooms, s_len(g_sub_rooms), rv, sizeof(rv) - 1);
     if (n <= 0) break;
     rv[n] = 0;

@@ -26,9 +26,11 @@
 
 /* Event kinds. 34550/1 are standard; 9078 is our custom op-log (regular event,
  * stored by any relay, ignored by clients that don't know it). */
-#define KIND_ROOM_DEF 34550
-#define KIND_ROOM_MSG 1
-#define KIND_ROOM_OP  9078
+#define KIND_ROOM_DEF      34550
+#define KIND_ROOM_MSG      1
+#define KIND_ROOM_OP       9078
+#define KIND_ROOM_PROPOSAL 9079  /* someone asks to create a sub-room */
+#define KIND_ROOM_APPROVAL 9080  /* a parent authority approves a proposal */
 
 /* The root room. Its admin pubkey is the GLOBAL admin. This is the project key;
  * it is published (the 34550) by whoever runs the project. Replace before
@@ -86,6 +88,21 @@ int room_is_self(const char *pub);
 /* Create a sub-room named [name] under [parentId] (empty = top level): publish a
  * NIP-72 34550 with self as admin + parent link. Returns 1. */
 int room_create(const char *parentId, const char *name);
+
+/* Propose a sub-room [name] under [parentId]. If self already has authority over
+ * the parent it is created immediately; otherwise a proposal (9079) is published
+ * for a parent authority to approve. Returns 1. */
+int room_propose(const char *parentId, const char *name);
+
+/* Approve proposal [proposalId] if self has authority over its parent (publishes
+ * a 9080). The proposer then publishes the sub-room, becoming its admin, with the
+ * approver added as a moderator. Returns 1 if published. */
+int room_approve(const char *proposalId);
+
+/* Newest still-pending proposal this user can act on (authority over its parent).
+ * Writes its id/name/parent; returns 1 if one exists, else 0. */
+int room_newest_pending(char *id, unsigned idcap, char *name, unsigned namecap,
+                        char *parent, unsigned pcap);
 
 /* Global reputation level 1..10 for [pub] (hex). */
 int room_rep_level(const char *pub);

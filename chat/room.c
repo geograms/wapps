@@ -187,6 +187,15 @@ static void ensure_schema(void) {
           "id TEXT PRIMARY KEY, roomId TEXT, author TEXT, ts INTEGER)", 0);
   db_exec("CREATE INDEX IF NOT EXISTS msgs_author ON msgs(author, ts)", 0);
   db_exec("CREATE INDEX IF NOT EXISTS ops_room ON ops(roomId, ts)", 0);
+  db_exec("CREATE TABLE IF NOT EXISTS proposals("
+          "id TEXT PRIMARY KEY, parentRoomId TEXT, proposerPub TEXT,"
+          "name TEXT, description TEXT, ts INTEGER, status TEXT)", 0);
+  db_exec("CREATE TABLE IF NOT EXISTS approvals("
+          "id TEXT PRIMARY KEY, proposalId TEXT, approverPub TEXT, ts INTEGER)", 0);
+  /* verified = the room's creation was sanctioned (root, or created by / approved
+   * by a parent authority). Unverified sub-rooms are hidden until an approval
+   * lands. Separate from moderation `closed`. (harmless if the column exists.) */
+  db_exec("ALTER TABLE rooms ADD COLUMN verified INTEGER DEFAULT 1", 0);
 }
 
 void room_init(void) {
@@ -374,7 +383,11 @@ static void mods_replace(const char *roomId, const char *ev) {
   }
 }
 
+static int room_publish_def(const char *parentId, const char *name,
+                            const char *approverPub, const char *approvalId);
+
 int room_ingest(const char *ev) {
+  ensure_self();
   long kind = j_long(ev, "kind", -1);
   char id[80], author[65];
   j_str(ev, "id", id, sizeof(id));
@@ -382,33 +395,53 @@ int room_ingest(const char *ev) {
   long ts = j_long(ev, "created_at", 0);
 
   if (kind == KIND_ROOM_DEF) {
-    char roomId[80], name[80], desc[200], parentAddr[160], access[16];
+    char roomId[80], name[80], desc[200], parentAddr[160], access[16], approvedId[80];
     if (!tag_get(ev, "d", 1, roomId, sizeof(roomId)) || !roomId[0]) return 1;
     tag_get(ev, "name", 1, name, sizeof(name));
     tag_get(ev, "description", 1, desc, sizeof(desc));
     tag_get(ev, "access", 1, access, sizeof(access));
+    tag_get(ev, "approved", 1, approvedId, sizeof(approvedId));
     char parent[80]; parent[0] = 0;
     if (tag_get(ev, "a", 1, parentAddr, sizeof(parentAddr))) {
       /* "34550:<pub>:<parentId>" -> parentId */
       int colon = 0; const char *s = parentAddr;
       for (; *s; s++) { if (*s == ':') { colon++; if (colon == 2) { s_cpy(parent, s + 1, sizeof(parent)); break; } } }
     }
+    /* Approval gate: a root room is always valid; a sub-room is valid if its
+     * author has authority over the parent, or it carries a 9080 approval signed
+     * by a parent authority. Otherwise it stays hidden until such an approval
+     * arrives (see the 9080 branch, which re-verifies). */
+    int valid = 1;
+    if (parent[0] && !room_has_authority(author, parent)) {
+      valid = 0;
+      if (approvedId[0]) {
+        char ap[65] = ""; char qp[128]; params_of(qp, sizeof(qp), approvedId, 0, 0, 0);
+        char r[256];
+        if (db_query("SELECT approverPub AS v FROM approvals WHERE id=? LIMIT 1", qp, r, sizeof(r)) > 2)
+          j_str(r, "v", ap, sizeof(ap));
+        if (ap[0] && room_has_authority(ap, parent)) valid = 1;
+      }
+    }
     char tsb[24]; u_ltoa(ts, tsb);
-    /* REPLACE: 34550 is addressable, latest wins. Keep admin = event author. */
-    char sql[320] =
-      "INSERT INTO rooms(roomId,adminPub,name,description,parentRoomId,access,closed,createdTs)"
-      " VALUES(?,?,?,?,?,?,0,?) ON CONFLICT(roomId) DO UPDATE SET "
+    char verb[2]; verb[0] = valid ? '1' : '0'; verb[1] = 0;
+    /* REPLACE fields but do NOT reset moderation `closed` on update. */
+    char sql[460] =
+      "INSERT INTO rooms(roomId,adminPub,name,description,parentRoomId,access,approvedBy,closed,verified,createdTs)"
+      " VALUES(?,?,?,?,?,?,?,0,?,?) ON CONFLICT(roomId) DO UPDATE SET "
       "adminPub=excluded.adminPub,name=excluded.name,description=excluded.description,"
-      "parentRoomId=excluded.parentRoomId,access=excluded.access";
-    /* params_of tops out at 4; build the 7-arg array by hand */
+      "parentRoomId=excluded.parentRoomId,access=excluded.access,"
+      "approvedBy=excluded.approvedBy,verified=excluded.verified";
     char p[900]; p[0] = 0; s_cat(p, "[", sizeof(p));
-    const char *vals[7] = {roomId, author, name, desc, parent, access[0] ? access : "open", tsb};
-    for (int i = 0; i < 7; i++) { if (i) s_cat(p, ",", sizeof(p));
+    const char *vals[8] = {roomId, author, name, desc, parent,
+                           access[0] ? access : "open", approvedId, verb};
+    for (int i = 0; i < 8; i++) { if (i) s_cat(p, ",", sizeof(p));
       s_cat(p, "\"", sizeof(p)); jesc(p, sizeof(p), vals[i]); s_cat(p, "\"", sizeof(p)); }
+    /* createdTs is an integer, append it raw */
+    s_cat(p, ",", sizeof(p)); s_cat(p, tsb, sizeof(p));
     s_cat(p, "]", sizeof(p));
     db_exec(sql, p);
     mods_replace(roomId, ev);
-    return 2; /* a room definition changed → caller re-renders the rail */
+    return valid ? 2 : 1; /* only refresh the rail when the room is visible */
   }
 
   if (kind == KIND_ROOM_OP) {
@@ -437,6 +470,75 @@ int room_ingest(const char *ev) {
       db_exec("UPDATE rooms SET closed=1 WHERE roomId=?", cp);
     }
     return 1;
+  }
+
+  if (kind == KIND_ROOM_PROPOSAL) {
+    if (!id[0]) return 1;
+    char parent[80], name[80], desc[200];
+    tag_get(ev, "h", 1, parent, sizeof(parent));
+    tag_get(ev, "name", 1, name, sizeof(name));
+    tag_get(ev, "description", 1, desc, sizeof(desc));
+    if (!parent[0] || !name[0]) return 1;
+    char tsb[24]; u_ltoa(ts, tsb);
+    char p[500]; p[0] = 0; s_cat(p, "[", sizeof(p));
+    const char *vals[5] = {id, parent, author, name, desc};
+    for (int i = 0; i < 5; i++) { if (i) s_cat(p, ",", sizeof(p));
+      s_cat(p, "\"", sizeof(p)); jesc(p, sizeof(p), vals[i]); s_cat(p, "\"", sizeof(p)); }
+    s_cat(p, ",", sizeof(p)); s_cat(p, tsb, sizeof(p));
+    s_cat(p, "]", sizeof(p));
+    db_exec("INSERT OR IGNORE INTO proposals"
+            "(id,parentRoomId,proposerPub,name,description,ts,status) "
+            "VALUES(?,?,?,?,?,?,'pending')", p);
+    /* if this user can act on it, tell the caller to surface an approval prompt */
+    if (room_has_authority(g_self, parent)) return 3;
+    return 1;
+  }
+
+  if (kind == KIND_ROOM_APPROVAL) {
+    if (!id[0]) return 1;
+    char proposalId[80], parent[80];
+    tag_get(ev, "e", 1, proposalId, sizeof(proposalId));
+    tag_get(ev, "h", 1, parent, sizeof(parent));
+    if (!proposalId[0]) return 1;
+    char tsb[24]; u_ltoa(ts, tsb);
+    { char p[400]; p[0] = 0; s_cat(p, "[", sizeof(p));
+      const char *vals[3] = {id, proposalId, author};
+      for (int i = 0; i < 3; i++) { if (i) s_cat(p, ",", sizeof(p));
+        s_cat(p, "\"", sizeof(p)); jesc(p, sizeof(p), vals[i]); s_cat(p, "\"", sizeof(p)); }
+      s_cat(p, ",", sizeof(p)); s_cat(p, tsb, sizeof(p)); s_cat(p, "]", sizeof(p));
+      db_exec("INSERT OR IGNORE INTO approvals(id,proposalId,approverPub,ts) "
+              "VALUES(?,?,?,?)", p); }
+    /* honour only if the approver has authority over the proposal's parent */
+    char proposer[65] = "", pname[80] = "", pparent[80] = "", pstat[16] = "";
+    { char qp[128]; params_of(qp, sizeof(qp), proposalId, 0, 0, 0); char r[512];
+      if (db_query("SELECT proposerPub,name,parentRoomId,status FROM proposals "
+                   "WHERE id=? LIMIT 1", qp, r, sizeof(r)) > 2) {
+        j_str(r, "proposerPub", proposer, sizeof(proposer));
+        j_str(r, "name", pname, sizeof(pname));
+        j_str(r, "parentRoomId", pparent, sizeof(pparent));
+        j_str(r, "status", pstat, sizeof(pstat)); } }
+    /* The parent may be named on the approval (h) or only known via the proposal
+     * (a node might hold one but not the other). */
+    const char *par = parent[0] ? parent : pparent;
+    if (!par[0] || !room_has_authority(author, par)) return 1;
+    /* Un-hide any sub-room published carrying this approval id. This must NOT
+     * depend on holding the 9079 proposal: a node can receive the room def and
+     * the approval without ever seeing the request. */
+    { char up[128]; params_of(up, sizeof(up), id, 0, 0, 0);
+      db_exec("UPDATE rooms SET verified=1 WHERE approvedBy=?", up); }
+    /* Proposal-dependent steps: mark it approved, and if I am the proposer,
+     * publish the sub-room now (self=admin, approver=mod). Guard on the pending
+     * status so a re-delivered approval doesn't publish the room twice. */
+    if (s_eq(pstat, "pending")) {
+      { char up[128]; params_of(up, sizeof(up), proposalId, 0, 0, 0);
+        db_exec("UPDATE proposals SET status='approved' WHERE id=?", up); }
+      if (proposer[0] && pname[0] && room_is_self(proposer)) {
+        room_publish_def(pparent[0] ? pparent : par, pname, author, id);
+        char up[128]; params_of(up, sizeof(up), proposalId, 0, 0, 0);
+        db_exec("UPDATE proposals SET status='published' WHERE id=?", up);
+      }
+    }
+    return 2; /* a room may have become visible — refresh the rail */
   }
   return 0;
 }
@@ -536,16 +638,19 @@ int room_is_self(const char *pub) {
   return pub[i] == 0 && g_self[i] == 0;
 }
 
-/* Create a sub-room under [parentId] (or a top-level room if parentId empty):
- * publish a NIP-72 34550 with self as admin + the parent link. Returns 1. */
-int room_create(const char *parentId, const char *name) {
+/* Publish a NIP-72 34550 sub-room under [parentId] (empty = top level) with self
+ * as admin. If [approverPub]/[approvalId] are set, the approver is added as a
+ * moderator and the approval id is recorded (the proof this creation was
+ * sanctioned). Returns 1. */
+static int room_publish_def(const char *parentId, const char *name,
+                            const char *approverPub, const char *approvalId) {
   ensure_self();
   if (!g_self[0] || !name || !name[0]) return 0;
   unsigned char rb[8]; hal_crypto_random((char *)rb, 8);
   static const char hx[] = "0123456789abcdef";
   char rid[20]; for (int i = 0; i < 8; i++) { rid[i * 2] = hx[rb[i] >> 4]; rid[i * 2 + 1] = hx[rb[i] & 15]; }
   rid[16] = 0;
-  char tags[500] = "[[\"d\",\"";
+  char tags[700] = "[[\"d\",\"";
   s_cat(tags, rid, sizeof(tags));
   s_cat(tags, "\"],[\"name\",\"", sizeof(tags));
   jesc(tags, sizeof(tags), name);
@@ -558,9 +663,68 @@ int room_create(const char *parentId, const char *name) {
       s_cat(tags, parentId, sizeof(tags)); s_cat(tags, "\"]", sizeof(tags));
     }
   }
+  if (approverPub && approverPub[0]) {
+    s_cat(tags, ",[\"p\",\"", sizeof(tags)); s_cat(tags, approverPub, sizeof(tags));
+    s_cat(tags, "\",\"\",\"moderator\"]", sizeof(tags));
+  }
+  if (approvalId && approvalId[0]) {
+    s_cat(tags, ",[\"approved\",\"", sizeof(tags)); s_cat(tags, approvalId, sizeof(tags));
+    s_cat(tags, "\"]", sizeof(tags));
+  }
   s_cat(tags, "]", sizeof(tags));
   hal_nostr_post(KIND_ROOM_DEF, "", 0, tags, s_len(tags));
   return 1;
+}
+
+int room_create(const char *parentId, const char *name) {
+  return room_publish_def(parentId, name, 0, 0);
+}
+
+/* Propose a sub-room. An authority over the parent creates it directly; anyone
+ * else publishes a proposal (9079) for an authority to approve. */
+int room_propose(const char *parentId, const char *name) {
+  ensure_self();
+  if (!g_self[0] || !name || !name[0]) return 0;
+  const char *parent = (parentId && parentId[0]) ? parentId : MAIN_ROOM_ID;
+  if (room_has_authority(g_self, parent)) return room_create(parent, name);
+  char tags[400] = "[[\"h\",\"";
+  s_cat(tags, parent, sizeof(tags));
+  s_cat(tags, "\"],[\"name\",\"", sizeof(tags));
+  jesc(tags, sizeof(tags), name);
+  s_cat(tags, "\"],[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  hal_nostr_post(KIND_ROOM_PROPOSAL, "", 0, tags, s_len(tags));
+  return 1;
+}
+
+int room_approve(const char *proposalId) {
+  ensure_self();
+  if (!g_self[0] || !proposalId || !proposalId[0]) return 0;
+  char parent[80] = "";
+  { char p[128]; params_of(p, sizeof(p), proposalId, 0, 0, 0); char r[256];
+    if (db_query("SELECT parentRoomId AS v FROM proposals WHERE id=? LIMIT 1", p, r, sizeof(r)) > 2)
+      j_str(r, "v", parent, sizeof(parent)); }
+  if (!parent[0] || !room_has_authority(g_self, parent)) return 0;
+  char tags[300] = "[[\"e\",\"";
+  s_cat(tags, proposalId, sizeof(tags));
+  s_cat(tags, "\"],[\"h\",\"", sizeof(tags));
+  s_cat(tags, parent, sizeof(tags));
+  s_cat(tags, "\"],[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  hal_nostr_post(KIND_ROOM_APPROVAL, "", 0, tags, s_len(tags));
+  return 1;
+}
+
+int room_newest_pending(char *id, unsigned idcap, char *name, unsigned namecap,
+                        char *parent, unsigned pcap) {
+  id[0] = name[0] = parent[0] = 0;
+  char r[1024];
+  if (db_query("SELECT id,name,parentRoomId FROM proposals WHERE status='pending' "
+               "ORDER BY ts DESC LIMIT 1", 0, r, sizeof(r)) <= 2) return 0;
+  j_str(r, "id", id, idcap);
+  j_str(r, "name", name, namecap);
+  j_str(r, "parentRoomId", parent, pcap);
+  if (!id[0]) return 0;
+  /* only offer proposals whose parent we can act on */
+  return room_has_authority(g_self, parent);
 }
 
 /* Ban [target_pub] from the whole wapp (op h="*"); only a global authority may. */
@@ -578,7 +742,7 @@ int room_ban_wapp(const char *target_pub) {
 /* ── subscription filter ── */
 
 unsigned room_sub_filter(char *out, unsigned cap) {
-  /* {"kinds":[34550,9078],"limit":500} plus kind-1 #h across known rooms */
+  /* {"kinds":[34550,9078,9079,9080],"limit":500} plus kind-1 #h across rooms */
   char ids[1024]; ids[0] = 0;
   char r[4096];
   if (db_query("SELECT roomId AS v FROM rooms LIMIT 100", 0, r, sizeof(r)) > 2) {
@@ -593,7 +757,7 @@ unsigned room_sub_filter(char *out, unsigned cap) {
     }
   }
   out[0] = 0;
-  s_cat(out, "[{\"kinds\":[34550,9078],\"limit\":500}", cap);
+  s_cat(out, "[{\"kinds\":[34550,9078,9079,9080],\"limit\":500}", cap);
   if (ids[0]) { s_cat(out, ",{\"kinds\":[1],\"#h\":[", cap); s_cat(out, ids, cap);
                 s_cat(out, "],\"limit\":200}", cap); }
   s_cat(out, "]", cap);
@@ -620,7 +784,7 @@ static void rail_children(const char *parentId, int depth) {
   char p[128]; params_of(p, sizeof(p), parentId, 0, 0, 0);
   char r[4096];
   if (db_query("SELECT roomId AS v FROM rooms WHERE parentRoomId=? AND closed=0 "
-               "ORDER BY name LIMIT 100", p, r, sizeof(r)) <= 2) return;
+               "AND verified=1 ORDER BY name LIMIT 100", p, r, sizeof(r)) <= 2) return;
   const char *q = r;
   for (;;) {
     const char *obj = 0; for (const char *s = q; *s; s++) if (*s == '{') { obj = s; break; }
