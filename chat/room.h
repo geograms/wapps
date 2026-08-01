@@ -123,6 +123,11 @@ int room_on_main_tree(const char *roomId);
 /* The room's display name (its id when unnamed). */
 void room_name_of(const char *roomId, char *out, unsigned cap);
 
+/* Distinct authors seen posting in [roomId]. NOT a membership count — rooms
+ * have no roster (nobody publishes join/leave), so this is what we have
+ * actually observed, and callers must label it "seen". */
+int room_people_seen(const char *roomId);
+
 /* Render the room list (indented tree) into the conversations widget. */
 void room_render_tree(void);
 

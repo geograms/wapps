@@ -1120,10 +1120,18 @@ uint32_t hal_relay_resolve_recv(char *out, uint32_t out_cap);
  * than a different app.
  *
  * Pop the next inbound LXMF message as JSON {from(hex), title, content, hash,
- * ts}: `from` is the sender's delivery dest — the address you reply TO. Returns
- * bytes written, 0 when drained. Poll each tick, like the other inboxes. The
- * cursor is per-engine and advances only on a successful read, so nothing that
- * arrived while the wapp was down is lost. */
+ * ts, fields?}: `from` is the sending NODE's delivery dest — the address you
+ * reply TO. For a distribution group that is the GROUP's own address, not the
+ * member who wrote the message, so `from` alone cannot tell people apart.
+ *
+ * `fields` (present only when the message carried any) is the decoded LXMF
+ * field map: keys are decimal strings (8 = thread, 11 = group), byte values
+ * arrive as text when printable and hex otherwise. It is the only way to tell
+ * a group message from a direct one.
+ *
+ * Returns bytes written, 0 when drained. Poll each tick, like the other
+ * inboxes. The cursor is per-engine and advances only on a successful read, so
+ * nothing that arrived while the wapp was down is lost. */
 __attribute__((import_module("hal"), import_name("lxmf_recv")))
 uint32_t hal_lxmf_recv(char *out, uint32_t out_cap);
 

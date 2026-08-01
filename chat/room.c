@@ -810,6 +810,32 @@ static void rail_children(const char *parentId, int depth) {
     const char *e = obj; for (; *e && *e != '}'; e++) {} q = (*e == '}') ? e + 1 : obj + 1;
   }
 }
+/* How many DISTINCT people we have seen post in [roomId].
+ *
+ * Not a membership count — a NIP-72 room has no roster: nobody publishes
+ * "joined" or "left", so the only truthful number is how many different
+ * authors this device has actually seen. Callers label it "seen", never
+ * "members", so the number does not promise more than it knows. */
+int room_people_seen(const char *roomId) {
+  char p[128]; params_of(p, sizeof(p), roomId, 0, 0, 0);
+  char r[128];
+  if (db_query("SELECT COUNT(DISTINCT author) AS v FROM msgs WHERE roomId=?",
+               p, r, sizeof(r)) <= 2)
+    return 0;
+  char v[24]; j_str(r, "v", v, sizeof(v));
+  if (!v[0]) {
+    /* db_query renders numbers unquoted; pull the first digit run. */
+    const char *s = r;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    int n = 0;
+    while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+    return n;
+  }
+  int n = 0;
+  for (const char *s = v; *s >= '0' && *s <= '9'; s++) n = n * 10 + (*s - '0');
+  return n;
+}
+
 void room_name_of(const char *roomId, char *out, unsigned cap) {
   room_field(roomId, "name", out, cap);
   if (!out[0]) s_cpy(out, roomId, cap);

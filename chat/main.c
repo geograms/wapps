@@ -1493,6 +1493,144 @@ static void convo_react(const char *id, const char *mid, const char *from,
   s_cat(m, "}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
+/* ── Recency + people-seen, per conversation ──────────────────────────────
+ *
+ * Two things the rail could not answer: which conversations you actually use,
+ * and how many people are in one. Neither is derivable from the protocols —
+ * a broadcast channel has no roster and a NIP-72 room publishes no join/leave
+ * — so both are OBSERVED here and labelled as such.
+ *
+ * recency: last time a conversation was opened or carried a message, so the
+ * rail and the search results can lead with what you talk to.
+ * people: distinct senders seen per channel (rooms count theirs from the
+ * op-log DB instead — see room_people_seen). */
+#define RECENT_MAX 48
+#define CHANPPL_MAX 16      /* channels tracked */
+#define CHANPPL_WHO 24      /* senders remembered per channel */
+static char g_recent_id[RECENT_MAX][80];
+static uint64_t g_recent_ts[RECENT_MAX];
+static int g_recent_n = 0;
+
+static void recent_save(void) {
+  char b[RECENT_MAX * 96]; b[0] = 0;
+  for (int i = 0; i < g_recent_n; i++) {
+    char nb[24]; u_itoa((unsigned)g_recent_ts[i], nb);
+    s_cat(b, g_recent_id[i], sizeof(b)); s_cat(b, "=", sizeof(b));
+    s_cat(b, nb, sizeof(b)); s_cat(b, ";", sizeof(b));
+  }
+  hal_kv_set("recent", 6, b, s_len(b));
+}
+static void recent_touch(const char *id) {
+  if (!id || !id[0]) return;
+  uint64_t now = hal_time_epoch();
+  for (int i = 0; i < g_recent_n; i++) {
+    if (s_eq(g_recent_id[i], id)) { g_recent_ts[i] = now; recent_save(); return; }
+  }
+  int slot = g_recent_n;
+  if (g_recent_n < RECENT_MAX) g_recent_n++;
+  else {                                   /* evict the stalest */
+    slot = 0;
+    for (int i = 1; i < g_recent_n; i++)
+      if (g_recent_ts[i] < g_recent_ts[slot]) slot = i;
+  }
+  s_cpy(g_recent_id[slot], id, sizeof(g_recent_id[0]));
+  g_recent_ts[slot] = now;
+  recent_save();
+}
+static uint64_t recent_of(const char *id) {
+  for (int i = 0; i < g_recent_n; i++)
+    if (s_eq(g_recent_id[i], id)) return g_recent_ts[i];
+  return 0;
+}
+static void recent_load(void) {
+  char b[RECENT_MAX * 96];
+  uint32_t n = hal_kv_get("recent", 6, b, sizeof(b) - 1);
+  if (n == 0) return;
+  b[n] = 0;
+  char id[80]; char ts[24]; int j = 0, in_ts = 0;
+  id[0] = 0; ts[0] = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? b[i] : ';';
+    if (ch == '=') { id[j] = 0; j = 0; in_ts = 1; }
+    else if (ch == ';') {
+      if (in_ts) {
+        ts[j] = 0;
+        if (id[0] && g_recent_n < RECENT_MAX) {
+          s_cpy(g_recent_id[g_recent_n], id, sizeof(g_recent_id[0]));
+          g_recent_ts[g_recent_n] = (uint64_t)to_int(ts);
+          g_recent_n++;
+        }
+      }
+      j = 0; in_ts = 0; id[0] = 0; ts[0] = 0;
+    } else if (!in_ts && j < 79) id[j++] = ch;
+    else if (in_ts && j < 23) ts[j++] = ch;
+  }
+}
+
+/* Distinct senders seen per channel. */
+static char g_cp_id[CHANPPL_MAX][40];
+static char g_cp_who[CHANPPL_MAX][CHANPPL_WHO][16];
+static int g_cp_n[CHANPPL_MAX];
+static int g_cp_used = 0;
+
+static void chanppl_save(void) {
+  char b[CHANPPL_MAX * (40 + CHANPPL_WHO * 17)]; b[0] = 0;
+  for (int i = 0; i < g_cp_used; i++) {
+    s_cat(b, g_cp_id[i], sizeof(b)); s_cat(b, "=", sizeof(b));
+    for (int k = 0; k < g_cp_n[i]; k++) {
+      s_cat(b, g_cp_who[i][k], sizeof(b)); s_cat(b, ",", sizeof(b));
+    }
+    s_cat(b, ";", sizeof(b));
+  }
+  hal_kv_set("chanppl", 7, b, s_len(b));
+}
+static void chanppl_add(const char *chan, const char *who) {
+  if (!chan || chan[0] != '#' || !who || !who[0]) return;
+  int slot = -1;
+  for (int i = 0; i < g_cp_used; i++) if (s_eq(g_cp_id[i], chan)) { slot = i; break; }
+  if (slot < 0) {
+    if (g_cp_used >= CHANPPL_MAX) return;
+    slot = g_cp_used++;
+    s_cpy(g_cp_id[slot], chan, sizeof(g_cp_id[0]));
+    g_cp_n[slot] = 0;
+  }
+  for (int k = 0; k < g_cp_n[slot]; k++)
+    if (s_eq(g_cp_who[slot][k], who)) return;          /* already counted */
+  if (g_cp_n[slot] >= CHANPPL_WHO) return;             /* "24+" is enough */
+  s_cpy(g_cp_who[slot][g_cp_n[slot]++], who, sizeof(g_cp_who[0][0]));
+  chanppl_save();
+}
+static int chanppl_count(const char *chan) {
+  for (int i = 0; i < g_cp_used; i++) if (s_eq(g_cp_id[i], chan)) return g_cp_n[i];
+  return 0;
+}
+static void chanppl_load(void) {
+  static char b[CHANPPL_MAX * (40 + CHANPPL_WHO * 17)];
+  uint32_t n = hal_kv_get("chanppl", 7, b, sizeof(b) - 1);
+  if (n == 0) return;
+  b[n] = 0;
+  char id[40], who[16]; int j = 0, in_who = 0, slot = -1;
+  id[0] = 0; who[0] = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? b[i] : ';';
+    if (ch == '=' && !in_who) {
+      id[j] = 0; j = 0; in_who = 1;
+      if (id[0] && g_cp_used < CHANPPL_MAX) {
+        slot = g_cp_used++;
+        s_cpy(g_cp_id[slot], id, sizeof(g_cp_id[0]));
+        g_cp_n[slot] = 0;
+      } else slot = -1;
+    } else if (ch == ',' && in_who) {
+      who[j] = 0; j = 0;
+      if (slot >= 0 && who[0] && g_cp_n[slot] < CHANPPL_WHO)
+        s_cpy(g_cp_who[slot][g_cp_n[slot]++], who, sizeof(g_cp_who[0][0]));
+    } else if (ch == ';') {
+      j = 0; in_who = 0; slot = -1; id[0] = 0; who[0] = 0;
+    } else if (!in_who && j < 39) id[j++] = ch;
+    else if (in_who && j < 15) who[j++] = ch;
+  }
+}
+
 /* Display title for a conversation row. Groups show the bare name; local vs
  * global (trailing '*') is conveyed by the row icon (campaign vs public/globe)
  * plus a " · global"/" · local" tag (ASCII — the host renders titles as latin1,
@@ -1597,8 +1735,9 @@ static void lxmf_title(const char *id, char *out, unsigned osz) {
 }
 
 static void convo_touch(const char *id, const char *preview, int select) {
-  if (!is_group(id) && !is_lxmf(id)) return;
+  if (!is_group(id) && !is_lxmf(id) && !room_is_room(id)) return;
   convo_remember(id);
+  recent_touch(id);   /* traffic counts as recency, and survives a restart */
   int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
   const char *icon = (id[0] == '#') ? (global ? "public" : "campaign") : "person";
   char badge[24] = "";
@@ -3877,11 +4016,58 @@ static int roomlike_parse(const char *text, char mid[70], int *unlike) {
  * the conversation store but on no screen at all — their unread counted on
  * the launcher badge while nothing in the UI could show, open or clear them,
  * which is exactly how "7 notifications from nowhere" happens. */
+static const char *fnd_next_obj(const char *p, char *slice, unsigned m);
+
+/* One rail row's JSON. [people] < 0 means "do not claim a number". */
+static void rail_item(char *out, unsigned cap, const char *id, const char *name,
+                      int people, int live) {
+  s_cat(out, "{\"id\":\"", cap); jesc(out, cap, id);
+  s_cat(out, "\",\"name\":\"", cap); jesc(out, cap, name);
+  s_cat(out, "\",\"depth\":0", cap);
+  if (people > 0) {
+    char nb[12]; u_itoa((unsigned)people, nb);
+    s_cat(out, ",\"people\":", cap); s_cat(out, nb, cap);
+  }
+  if (live) s_cat(out, ",\"live\":true", cap);
+  { char tb[16]; u_itoa((unsigned)recent_of(id), tb);
+    s_cat(out, ",\"seen\":", cap); s_cat(out, tb, cap); }
+  s_cat(out, "}", cap);
+}
+
+/* Is this LXMF peer announcing right now? One directory read per rail render;
+ * the host caches the registry, and the rail renders on a slow cadence. */
+static int lxmf_live(const char *dest) {
+  static char dir[8192];
+  int32_t n = hal_people_directory(dest, s_len(dest), dir, sizeof(dir) - 1);
+  if (n <= 0) return 0;
+  dir[n] = 0;
+  char slice[900];
+  const char *p = fnd_next_obj(dir, slice, sizeof(slice));
+  while (p) {
+    char d[70]; jstr(slice, "dest", d, sizeof(d));
+    if (s_eq(d, dest)) return jbool(slice, "live");
+    p = fnd_next_obj(p, slice, sizeof(slice));
+  }
+  return 0;
+}
+
 static void render_rail(void) {
-  char extra[3000] = "";
+  static char extra[6000];
+  extra[0] = 0;
   int first = 1;
-  for (int i = 0; i < g_convo_n; i++) {
-    const char *id = g_convo_ids[i];
+  /* Most recently visited/talked first — the rail's whole job is to lead with
+   * what you actually use. Rows never touched sort last, in insertion order. */
+  int idx[32], cnt = 0;
+  for (int i = 0; i < g_convo_n && cnt < 32; i++) idx[cnt++] = i;
+  for (int a = 0; a < cnt; a++) {
+    for (int b = a + 1; b < cnt; b++) {
+      if (recent_of(g_convo_ids[idx[b]]) > recent_of(g_convo_ids[idx[a]])) {
+        int t = idx[a]; idx[a] = idx[b]; idx[b] = t;
+      }
+    }
+  }
+  for (int k = 0; k < cnt; k++) {
+    const char *id = g_convo_ids[idx[k]];
     int lx = is_lxmf(id);
     char title[80];
     if (id[0] != '#' && !lx) {
@@ -3892,9 +4078,7 @@ static void render_rail(void) {
       room_name_of(id, title, sizeof(title));
       if (!first) s_cat(extra, ",", sizeof(extra));
       first = 0;
-      s_cat(extra, "{\"id\":\"", sizeof(extra)); jesc(extra, sizeof(extra), id);
-      s_cat(extra, "\",\"name\":\"", sizeof(extra)); jesc(extra, sizeof(extra), title);
-      s_cat(extra, "\",\"depth\":0}", sizeof(extra));
+      rail_item(extra, sizeof(extra), id, title, room_people_seen(id), 0);
       continue;
     }
     if (room_is_room(id)) continue;          /* already on the tree */
@@ -3902,9 +4086,12 @@ static void render_rail(void) {
     convo_title(id, title, sizeof(title));
     if (!first) s_cat(extra, ",", sizeof(extra));
     first = 0;
-    s_cat(extra, "{\"id\":\"", sizeof(extra)); jesc(extra, sizeof(extra), id);
-    s_cat(extra, "\",\"name\":\"", sizeof(extra)); jesc(extra, sizeof(extra), title);
-    s_cat(extra, "\",\"depth\":0}", sizeof(extra));
+    /* People seen: only where senders were actually distinguishable (see
+     * lxmf_drain). A direct 1:1 is two people by definition, so it claims
+     * nothing. */
+    int people = lx ? -1 : chanppl_count(id);
+    rail_item(extra, sizeof(extra), id, title, people,
+              lx ? lxmf_live(id + 5) : 0);
   }
   room_render_tree_with(extra);
 }
@@ -3948,6 +4135,7 @@ static void room_event_ingest(const char *evt) {
 static void do_rooms_open(const char *buf) {
   char rid[80] = ""; jstr(buf, "rooms_convo", rid, sizeof(rid));
   if (!rid[0]) return;
+  recent_touch(rid);   /* opening it IS the visit the rail orders on */
   /* An LXMF thread deep-linked from elsewhere (the Reticulum graph's "message
    * this device"): adopt it as a real conversation so it persists and shows on
    * the rail — otherwise the row vanishes on the next launch. */
@@ -4227,6 +4415,14 @@ static void render_searchall(void) {
         s_cat(o, "\",\"title\":\"", sz); jesc(o, sz, name[0] ? name : rid);
         s_cat(o, "\",\"subtitle\":\"Room", sz);
         if (convo_known(rid)) s_cat(o, " - joined", sz);
+        /* A NIP-72 room DOES have per-author messages, so this count is real
+         * (still "seen", never "members" — rooms publish no roster either). */
+        { int seen = room_people_seen(rid);
+          if (seen > 0) {
+            char nb[12]; u_itoa((unsigned)seen, nb);
+            s_cat(o, " - ", sz); s_cat(o, nb, sz);
+            s_cat(o, seen == 1 ? " person seen" : " people seen", sz);
+          } }
         s_cat(o, "\",\"icon\":\"forum\"}", sz);
       }
       p = fnd_next_obj(p, slice, sizeof(slice));
@@ -4238,8 +4434,16 @@ static void render_searchall(void) {
   s_cat(o, ",{\"title\":\"Channels and conversations\",\"items\":[", sz);
   {
     int first = 1;
-    for (int i = 0; i < g_convo_n; i++) {
-      const char *id = g_convo_ids[i];
+    /* Same order as the rail: most recently visited or talked to first. */
+    int idx[32], cnt = 0;
+    for (int i = 0; i < g_convo_n && cnt < 32; i++) idx[cnt++] = i;
+    for (int a = 0; a < cnt; a++)
+      for (int b = a + 1; b < cnt; b++)
+        if (recent_of(g_convo_ids[idx[b]]) > recent_of(g_convo_ids[idx[a]])) {
+          int t = idx[a]; idx[a] = idx[b]; idx[b] = t;
+        }
+    for (int k = 0; k < cnt; k++) {
+      const char *id = g_convo_ids[idx[k]];
       int lx = is_lxmf(id);
       if (id[0] != '#' && !lx) continue;
       if (room_is_room(id)) continue;   /* listed under Rooms */
@@ -4257,6 +4461,13 @@ static void render_searchall(void) {
         s_cat(o, "...", sz);
       } else {
         s_cat(o, "Channel", sz);
+        /* Only when senders were actually distinguishable — see lxmf_drain. */
+        int seen = chanppl_count(id);
+        if (seen > 0) {
+          char nb[12]; u_itoa((unsigned)seen, nb);
+          s_cat(o, " - ", sz); s_cat(o, nb, sz);
+          s_cat(o, seen == 1 ? " person seen" : " people seen", sz);
+        }
       }
       s_cat(o, "\",\"icon\":\"", sz);
       s_cat(o, lx ? "person" : "campaign", sz);
@@ -4505,6 +4716,63 @@ static void group_note_ingest(const char *evt) {
  * silently dropped. Ingest only — we do not invent an outbound LXMF group
  * protocol here (see the wapp README / commit message). */
 #define LXMF_GROUP "#NOMADNET"
+/* Does this inbound LXMF JSON carry the group field (LXMF field 11 = 0x0B)?
+ * The host now passes the decoded field map through as "fields":{"11":…}. */
+static int lxmf_is_group(const char *js) {
+  const char *f = js;
+  while (*f && !s_pre(f, "\"fields\":")) f++;
+  if (!*f) return 0;
+  for (const char *p = f; *p && *p != '}'; p++) if (s_pre(p, "\"11\"")) return 1;
+  return 0;
+}
+/* An LXMF field naming the message's author, when the sender supplied one.
+ * Field 11 (group) carries the group context; some stacks put a display name
+ * there or in a custom string field. Accept a plain string value, reject a
+ * hash — a 32/64-hex blob is an address, not a name to show. */
+static int lxmf_field_sender(const char *js, char *out, unsigned cap) {
+  out[0] = 0;
+  const char *f = js;
+  while (*f && !s_pre(f, "\"fields\":")) f++;
+  if (!*f) return 0;
+  /* Look at field 11's value when it is a quoted string. */
+  const char *p = f;
+  while (*p && *p != '}') {
+    if (s_pre(p, "\"11\":\"")) {
+      p += 6;
+      unsigned i = 0;
+      while (*p && *p != '"' && i < cap - 1) out[i++] = *p++;
+      out[i] = 0;
+      /* A pure hex blob is an address; not a name. */
+      int hex = out[0] != 0;
+      for (unsigned k = 0; out[k]; k++) {
+        char c = out[k];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { hex = 0; break; }
+      }
+      if (hex || s_len(out) > 32) { out[0] = 0; return 0; }
+      return out[0] != 0;
+    }
+    p++;
+  }
+  return 0;
+}
+/* Length of a leading "<name>: " sender prefix, 0 when there is none.
+ * NomadNet group software prefixes the author this way. Bounded so a sentence
+ * containing a colon ("note: it works") is not mistaken for an author. */
+static unsigned sender_prefix_len(const char *text) {
+  for (unsigned i = 0; i < 24 && text[i]; i++) {
+    if (text[i] == '\n') return 0;
+    if (text[i] == ':' && text[i + 1] == ' ' && i > 0) {
+      /* A name, not prose: no sentence punctuation before the colon. */
+      for (unsigned k = 0; k < i; k++) {
+        char c = text[k];
+        if (c == ',' || c == '.' || c == '?' || c == '!') return 0;
+      }
+      return i;
+    }
+  }
+  return 0;
+}
+
 static void lxmf_drain(void) {
   for (int guard = 0; guard < 10; guard++) {
     char js[1400];
@@ -4544,10 +4812,43 @@ static void lxmf_drain(void) {
       render_rail();
     }
 
-    char who[16]; s_cpy(who, from, 13);         /* LXMF dest prefix as the name */
-    convo_msg(cid, "in", who, content, "", "", 0, 0, "LXM", hash, "", "", 0, 0);
-    convo_touch(cid, content, 0);
-    notify_msg(cid, who, content, content);
+    /* WHO wrote this.
+     *
+     * `from` is the sending NODE. For a distribution group that is the group's
+     * own address, so every member arrives under one identity — which is why
+     * group bubbles all used to show the same 12-hex prefix and why counting
+     * people was impossible. Recover the author where the sender gave us one:
+     *   1. an LXMF field naming the originator, else
+     *   2. the NomadNet convention of a "<name>: " prefix on the content, else
+     *   3. nobody — attribute to the node and count nothing. */
+    char who[40] = "";
+    const char *body = content;
+    int is_group_msg = (title[0] == '#') || lxmf_is_group(js);
+    if (is_group_msg) {
+      char f[64];
+      if (lxmf_field_sender(js, f, sizeof(f)) && f[0]) {
+        s_cpy(who, f, sizeof(who));
+      } else {
+        unsigned cut = sender_prefix_len(content);
+        if (cut) {
+          unsigned k = 0;
+          while (k < cut && k < sizeof(who) - 1) { who[k] = content[k]; k++; }
+          who[k] = 0;
+          body = content + cut + 2;       /* past ": " */
+        }
+      }
+    }
+    int sender_known = who[0] != 0;
+    if (!sender_known) s_cpy(who, from, 13);    /* the node, not a person */
+
+    /* People seen: only a DISTINGUISHED sender counts. A group whose messages
+     * never name their author must show no number rather than "1 person",
+     * which would read as a fact and be an artefact of the addressing. */
+    if (is_group_msg && sender_known) chanppl_add(cid, who);
+
+    convo_msg(cid, "in", who, body, "", "", 0, 0, "LXM", hash, "", "", 0, 0);
+    convo_touch(cid, body, 0);
+    notify_msg(cid, who, body, body);
   }
 }
 
@@ -5855,6 +6156,8 @@ void module_init(void) {
   gseen_load();    /* before groups_load: the LXMF cursor restarts at 0 per engine */
   chan_load();     /* before groups_load: the rail render honours the switches */
   lxname_load();   /* before groups_load: lxmf rows render with their names */
+  recent_load();   /* …and in the order you last used them, not insertion order */
+  chanppl_load();  /* distinct senders seen per channel, for the people count */
   groups_load();   /* restore subscribed groups so the g/ filter is correct now */
   /* Cache our public key (base64url) and the persisted pubkey-beacon pref. */
   { uint32_t pn = hal_identity_pubkey(g_pubkey, sizeof(g_pubkey) - 1);
