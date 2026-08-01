@@ -810,6 +810,81 @@ static void rail_children(const char *parentId, int depth) {
     const char *e = obj; for (; *e && *e != '}'; e++) {} q = (*e == '}') ? e + 1 : obj + 1;
   }
 }
+void room_name_of(const char *roomId, char *out, unsigned cap) {
+  room_field(roomId, "name", out, cap);
+  if (!out[0]) s_cpy(out, roomId, cap);
+}
+
+/* Is [roomId] reachable by walking parents up to the main room? The rail
+ * renders the main tree, so a room joined from search that hangs elsewhere
+ * (or has no parent at all) would otherwise be openable and invisible. */
+int room_on_main_tree(const char *roomId) {
+  char cur[80]; s_cpy(cur, roomId, sizeof(cur));
+  for (int depth = 0; depth < 12; depth++) {
+    if (s_eq(cur, MAIN_ROOM_ID)) return 1;
+    char parent[80];
+    room_field(cur, "parentRoomId", parent, sizeof(parent));
+    if (!parent[0]) return 0;
+    s_cpy(cur, parent, sizeof(cur));
+  }
+  return 0;
+}
+
+/* Rooms whose name (or id) contains [q], case-insensitively — every room this
+ * device knows, not only the ones already on the rail. Writes JSON items
+ * {"id","name"} (no enclosing brackets) so the caller can drop them straight
+ * into a people-list section. Returns the count. */
+int room_search(const char *q, char *out, unsigned cap) {
+  out[0] = 0;
+  char r[8192];
+  if (db_query("SELECT roomId AS v, name AS n FROM rooms WHERE closed=0 "
+               "AND verified=1 ORDER BY name LIMIT 200", "[]", r, sizeof(r)) <= 2)
+    return 0;
+  /* Lowercase the needle once. */
+  char needle[64]; unsigned qi = 0;
+  for (; q[qi] && qi < sizeof(needle) - 1; qi++) {
+    char c = q[qi];
+    needle[qi] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  needle[qi] = 0;
+
+  int n = 0, first = 1;
+  const char *p = r;
+  for (;;) {
+    const char *obj = 0; for (const char *s = p; *s; s++) if (*s == '{') { obj = s; break; }
+    if (!obj) break;
+    char rid[80], name[80];
+    j_str(obj, "v", rid, sizeof(rid));
+    j_str(obj, "n", name, sizeof(name));
+    const char *e = obj; for (; *e && *e != '}'; e++) {} p = (*e == '}') ? e + 1 : obj + 1;
+    if (!rid[0]) continue;
+    if (!name[0]) s_cpy(name, rid, sizeof(name));
+    if (needle[0]) {
+      /* case-insensitive substring over "name id" */
+      char hay[170]; hay[0] = 0;
+      s_cat(hay, name, sizeof(hay)); s_cat(hay, " ", sizeof(hay));
+      s_cat(hay, rid, sizeof(hay));
+      for (unsigned i = 0; hay[i]; i++)
+        if (hay[i] >= 'A' && hay[i] <= 'Z') hay[i] = (char)(hay[i] + 32);
+      unsigned nl = s_len(needle), hl = s_len(hay);
+      int hit = 0;
+      for (unsigned i = 0; nl && i + nl <= hl; i++) {
+        unsigned k = 0;
+        for (; k < nl; k++) if (hay[i + k] != needle[k]) break;
+        if (k == nl) { hit = 1; break; }
+      }
+      if (!hit) continue;
+    }
+    if (!first) s_cat(out, ",", cap);
+    first = 0;
+    s_cat(out, "{\"id\":\"", cap); jesc(out, cap, rid);
+    s_cat(out, "\",\"name\":\"", cap); jesc(out, cap, name);
+    s_cat(out, "\"}", cap);
+    n++;
+  }
+  return n;
+}
+
 void room_render_tree_with(const char *extra_items) {
   g_rail[0] = 0;
   s_cat(g_rail, "{\"type\":\"ui.rooms.set\",\"field\":\"rooms\",\"rooms\":[", sizeof(g_rail));

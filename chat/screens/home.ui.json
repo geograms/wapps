@@ -13,6 +13,17 @@
   },
   {
     "$": "screen",
+    "name": "Search",
+    "hidden": true,
+    "toolbar": true,
+    "search": true,
+    "tip": "Find a room, a channel, a conversation or a person.",
+    "children": [
+      { "$": "field", "name": "searchall", "$type": "people", "empty": "Search rooms, channels, your conversations and people on the mesh.\nType a name, callsign, npub or LXMF address.", "tip": "Tap a result to open it. A room or channel you have not joined is joined on the way in; a person starts a conversation." }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "New chat",
     "hidden": true,
     "toolbar": true,

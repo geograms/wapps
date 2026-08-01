@@ -3883,10 +3883,22 @@ static void render_rail(void) {
   for (int i = 0; i < g_convo_n; i++) {
     const char *id = g_convo_ids[i];
     int lx = is_lxmf(id);
-    if (id[0] != '#' && !lx) continue;
+    char title[80];
+    if (id[0] != '#' && !lx) {
+      /* A room joined from Search that hangs outside the main tree: the rail
+       * draws that tree, so without this the room opens and then cannot be
+       * found again. */
+      if (!room_is_room(id) || room_on_main_tree(id)) continue;
+      room_name_of(id, title, sizeof(title));
+      if (!first) s_cat(extra, ",", sizeof(extra));
+      first = 0;
+      s_cat(extra, "{\"id\":\"", sizeof(extra)); jesc(extra, sizeof(extra), id);
+      s_cat(extra, "\",\"name\":\"", sizeof(extra)); jesc(extra, sizeof(extra), title);
+      s_cat(extra, "\",\"depth\":0}", sizeof(extra));
+      continue;
+    }
     if (room_is_room(id)) continue;          /* already on the tree */
     if (lx ? !g_chan_nomad : !chan_enabled(id)) continue; /* switched off */
-    char title[36];
     convo_title(id, title, sizeof(title));
     if (!first) s_cat(extra, ",", sizeof(extra));
     first = 0;
@@ -4154,6 +4166,193 @@ static void render_finduser(void) {
 
   s_cat(o, "]}]}", sz);
   fnd_changed_send(o, &g_find_hash);
+}
+
+/* ── Search: rooms, channels, open conversations and people, in one panel ──
+ * The rail is the whole navigation surface, and it only shows what you are
+ * already in. This finds the rest: a room you have not joined, a channel or
+ * conversation buried down the rail, or a person anywhere on the mesh. */
+static void do_finduser_tap(const char *buf);   /* defined below */
+static char g_sa_q[64] = "";
+static int g_sa_open = 0;
+static char g_sa_out[16384];
+static char g_sa_json[16384];
+static uint32_t g_sa_hash = 0;
+
+/* Case-insensitive substring. */
+static int ci_has(const char *hay, const char *needle) {
+  if (!needle[0]) return 1;
+  char h[200], n[80];
+  unsigned i = 0;
+  for (; hay[i] && i < sizeof(h) - 1; i++) {
+    char c = hay[i]; h[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  h[i] = 0;
+  for (i = 0; needle[i] && i < sizeof(n) - 1; i++) {
+    char c = needle[i]; n[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  n[i] = 0;
+  unsigned nl = s_len(n), hl = s_len(h);
+  for (unsigned k = 0; nl && k + nl <= hl; k++) {
+    unsigned j = 0;
+    for (; j < nl; j++) if (h[k + j] != n[j]) break;
+    if (j == nl) return 1;
+  }
+  return 0;
+}
+
+static void render_searchall(void) {
+  char *o = g_sa_out; const unsigned sz = sizeof(g_sa_out);
+  o[0] = 0;
+  s_cat(o, "{\"type\":\"ui.people.set\",\"field\":\"searchall\",\"sections\":[", sz);
+
+  /* ── Rooms (every room known, joined or not) ── */
+  s_cat(o, "{\"title\":\"Rooms\",\"items\":[", sz);
+  {
+    static char rooms[6000];
+    rooms[0] = 0;
+    room_search(g_sa_q, rooms, sizeof(rooms));
+    /* room_search yields {"id","name"}; re-tag each as a room row. */
+    char slice[400];
+    const char *p = fnd_next_obj(rooms, slice, sizeof(slice));
+    int first = 1;
+    while (p) {
+      char rid[80], name[80];
+      jstr(slice, "id", rid, sizeof(rid));
+      jstr(slice, "name", name, sizeof(name));
+      if (rid[0]) {
+        if (!first) s_cat(o, ",", sz);
+        first = 0;
+        s_cat(o, "{\"id\":\"go:", sz); jesc(o, sz, rid);
+        s_cat(o, "\",\"title\":\"", sz); jesc(o, sz, name[0] ? name : rid);
+        s_cat(o, "\",\"subtitle\":\"Room", sz);
+        if (convo_known(rid)) s_cat(o, " - joined", sz);
+        s_cat(o, "\",\"icon\":\"forum\"}", sz);
+      }
+      p = fnd_next_obj(p, slice, sizeof(slice));
+    }
+  }
+  s_cat(o, "]}", sz);
+
+  /* ── Channels and open conversations (what is on your rail) ── */
+  s_cat(o, ",{\"title\":\"Channels and conversations\",\"items\":[", sz);
+  {
+    int first = 1;
+    for (int i = 0; i < g_convo_n; i++) {
+      const char *id = g_convo_ids[i];
+      int lx = is_lxmf(id);
+      if (id[0] != '#' && !lx) continue;
+      if (room_is_room(id)) continue;   /* listed under Rooms */
+      char title[40];
+      convo_title(id, title, sizeof(title));
+      if (!ci_has(title, g_sa_q) && !ci_has(id, g_sa_q)) continue;
+      if (!first) s_cat(o, ",", sz);
+      first = 0;
+      s_cat(o, "{\"id\":\"go:", sz); jesc(o, sz, id);
+      s_cat(o, "\",\"title\":\"", sz); jesc(o, sz, title);
+      s_cat(o, "\",\"subtitle\":\"", sz);
+      if (lx) {
+        s_cat(o, "Direct chat - LXMF ", sz);
+        char sh[13]; s_cpy(sh, id + 5, sizeof(sh)); s_cat(o, sh, sz);
+        s_cat(o, "...", sz);
+      } else {
+        s_cat(o, "Channel", sz);
+      }
+      s_cat(o, "\",\"icon\":\"", sz);
+      s_cat(o, lx ? "person" : "campaign", sz);
+      s_cat(o, "\"}", sz);
+    }
+  }
+  s_cat(o, "]}", sz);
+
+  /* ── People (the same directory the New chat picker uses) ── */
+  s_cat(o, ",{\"title\":\"People\",\"items\":[", sz);
+  if (g_sa_q[0]) {
+    int32_t n = hal_people_directory(g_sa_q, s_len(g_sa_q),
+                                     g_sa_json, sizeof(g_sa_json) - 1);
+    if (n < 0) n = 0;
+    g_sa_json[n] = 0;
+    char slice[1200];
+    const char *p = fnd_next_obj(g_sa_json, slice, sizeof(slice));
+    int first = 1, rows = 0;
+    while (p && rows < 40) {
+      char kind[16], dest[70], name[40], call[24], npub[80];
+      jstr(slice, "kind", kind, sizeof(kind));
+      jstr(slice, "dest", dest, sizeof(dest));
+      jstr(slice, "name", name, sizeof(name));
+      jstr(slice, "callsign", call, sizeof(call));
+      jstr(slice, "npub", npub, sizeof(npub));
+      int live = jbool(slice, "live");
+      if (s_eq(kind, "lxmf") && dest[0]) {
+        const char *disp = name[0] ? name : (call[0] ? call : 0);
+        if (!first) s_cat(o, ",", sz);
+        first = 0; rows++;
+        s_cat(o, "{\"id\":\"lx:", sz); jesc(o, sz, dest);
+        s_cat(o, "\\u001f", sz); if (disp) jesc(o, sz, disp);
+        s_cat(o, "\",\"title\":\"", sz);
+        if (disp) jesc(o, sz, disp);
+        else { s_cat(o, "LXMF ", sz); char sh[9]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); }
+        s_cat(o, "\",\"subtitle\":\"", sz);
+        s_cat(o, jbool(slice, "geogram") ? "Geogram device" : "NomadNet", sz);
+        s_cat(o, live ? " - online now" : " - seen earlier", sz);
+        s_cat(o, "\",\"icon\":\"person\"}", sz);
+      } else if (s_eq(kind, "geogram")) {
+        const char *target = call[0] ? call : npub;
+        if (target[0]) {
+          if (!first) s_cat(o, ",", sz);
+          first = 0; rows++;
+          s_cat(o, "{\"id\":\"np:", sz); jesc(o, sz, target);
+          s_cat(o, "\",\"title\":\"", sz); jesc(o, sz, call[0] ? call : npub);
+          s_cat(o, "\",\"subtitle\":\"Geogram", sz);
+          s_cat(o, live ? " - online now" : "", sz);
+          s_cat(o, " - opens in Messages\",\"icon\":\"person\"}", sz);
+        }
+      }
+      p = fnd_next_obj(p, slice, sizeof(slice));
+    }
+  }
+  s_cat(o, "]}]}", sz);
+  fnd_changed_send(o, &g_sa_hash);
+}
+
+static void do_rooms_search(void) {
+  g_sa_q[0] = 0;
+  g_sa_open = 1;
+  fnd_field_set("searchall_query", "");
+  render_searchall();
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Search\"}";
+  hal_msg_send(m, s_len(m));
+}
+
+/* A result row: "go:<conversation or room id>" opens it, the lx:/np: forms
+ * behave exactly as they do in the New chat picker. */
+static void do_searchall_tap(const char *buf) {
+  char id[140] = "";
+  jstr(buf, "searchall_id", id, sizeof(id));
+  if (s_pre(id, "go:")) {
+    const char *target = id + 3;
+    /* Register it either way. A room found in Search is normally NOT on the
+     * main tree, and the rail draws that tree — without this the room opens
+     * once and can never be found again. (The earlier guard skipped exactly
+     * the rooms that needed the row.) */
+    if (!convo_known(target)) {
+      convo_ensure(target);
+      groups_save();
+      render_rail();
+    }
+    char m[220] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+    jesc(m, sizeof(m), target);
+    s_cat(m, "\",\"select\":true,\"bump\":true}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+    const char *c = "{\"type\":\"ui.screen.close\"}";
+    hal_msg_send(c, s_len(c));
+    return;
+  }
+  /* People rows share the picker's handler — same ids, same behaviour. */
+  char fwd[200] = "{\"finduser_id\":\"";
+  jesc(fwd, sizeof(fwd), id);
+  s_cat(fwd, "\"}", sizeof(fwd));
+  do_finduser_tap(fwd);
 }
 
 static void do_rooms_newchat(void) {
@@ -5783,8 +5982,9 @@ void module_tick(void) {
    * slow cadence. Diffed, so a quiet poll costs one HAL read and no rebuild. */
   {
     static unsigned find_tick = 0;
-    if (g_find_open && (++find_tick % 4) == 0 && hal_ui_attached()) {
-      render_finduser();
+    if ((++find_tick % 4) == 0 && hal_ui_attached()) {
+      if (g_find_open) render_finduser();
+      if (g_sa_open) render_searchall();
     }
   }
 
@@ -6011,6 +6211,12 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "rooms_send")) do_rooms_send(buf);
   else if (s_eq(cmd, "rooms_new")) do_rooms_new(buf);
   else if (s_eq(cmd, "rooms_newchat")) do_rooms_newchat();
+  else if (s_eq(cmd, "rooms_search")) do_rooms_search();
+  else if (s_eq(cmd, "searchall_search")) {
+    jstr(buf, "searchall_query", g_sa_q, sizeof(g_sa_q));
+    render_searchall();
+  }
+  else if (s_eq(cmd, "searchall_tap")) do_searchall_tap(buf);
   else if (s_eq(cmd, "finduser_search")) {
     jstr(buf, "finduser_query", g_find_q, sizeof(g_find_q));
     /* lowercase: registry matching is case-insensitive, hex is lowercase */

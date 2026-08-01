@@ -111,6 +111,18 @@ int room_newest_pending(char *id, unsigned idcap, char *name, unsigned namecap,
 /* Global reputation level 1..10 for [pub] (hex). */
 int room_rep_level(const char *pub);
 
+/* Rooms whose name or id matches [q] (case-insensitive substring; empty [q]
+ * matches all). Writes comma-separated JSON items {"id","name"} — no
+ * brackets — into [out]. Returns how many matched. */
+int room_search(const char *q, char *out, unsigned cap);
+
+/* Does [roomId] hang under the main room? The rail draws that tree, so a room
+ * joined from search that sits outside it needs listing separately. */
+int room_on_main_tree(const char *roomId);
+
+/* The room's display name (its id when unnamed). */
+void room_name_of(const char *roomId, char *out, unsigned cap);
+
 /* Render the room list (indented tree) into the conversations widget. */
 void room_render_tree(void);
 
