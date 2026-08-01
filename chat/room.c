@@ -587,6 +587,21 @@ int room_post(const char *roomId, const char *text) {
   return 1;
 }
 
+/* Publish a NIP-25 reaction on room message [mid]: "+" likes, "-" retracts.
+ * Tagged with the room (#h) so it rides the same subscription every member
+ * already holds, and with the target (#e) so any client can tally it. */
+int room_react(const char *roomId, const char *mid, int remove) {
+  if (!room_is_room(roomId) || !mid || !mid[0]) return 0;
+  char tags[300] = "[[\"e\",\"";
+  s_cat(tags, mid, sizeof(tags));
+  s_cat(tags, "\"],[\"h\",\"", sizeof(tags));
+  s_cat(tags, roomId, sizeof(tags));
+  s_cat(tags, "\"]]", sizeof(tags));
+  const char *content = remove ? "-" : "+";
+  hal_nostr_post(7, content, s_len(content), tags, s_len(tags));
+  return 1;
+}
+
 int room_moderate(const char *roomId, const char *op, const char *target_pub,
                   long until, int amount, const char *reason) {
   if (!room_is_room(roomId) || !op || !op[0]) return 0;
@@ -758,7 +773,8 @@ unsigned room_sub_filter(char *out, unsigned cap) {
   }
   out[0] = 0;
   s_cat(out, "[{\"kinds\":[34550,9078,9079,9080],\"limit\":500}", cap);
-  if (ids[0]) { s_cat(out, ",{\"kinds\":[1],\"#h\":[", cap); s_cat(out, ids, cap);
+  /* kind 7: NIP-25 reactions on room messages (the heart tally). */
+  if (ids[0]) { s_cat(out, ",{\"kinds\":[1,7],\"#h\":[", cap); s_cat(out, ids, cap);
                 s_cat(out, "],\"limit\":200}", cap); }
   s_cat(out, "]", cap);
   return s_len(out);
@@ -794,15 +810,23 @@ static void rail_children(const char *parentId, int depth) {
     const char *e = obj; for (; *e && *e != '}'; e++) {} q = (*e == '}') ? e + 1 : obj + 1;
   }
 }
-void room_render_tree(void) {
+void room_render_tree_with(const char *extra_items) {
   g_rail[0] = 0;
   s_cat(g_rail, "{\"type\":\"ui.rooms.set\",\"field\":\"rooms\",\"rooms\":[", sizeof(g_rail));
   g_rail_first = 1;
   rail_add(MAIN_ROOM_ID, 0);
   rail_children(MAIN_ROOM_ID, 1);
+  /* Channels (broadcast groups, NomadNet, …) the caller wants on the same
+   * rail, pre-built as JSON items — the rail is the whole navigation surface,
+   * so anything not on it is a conversation the user can never reach. */
+  if (extra_items && extra_items[0]) {
+    if (!g_rail_first) s_cat(g_rail, ",", sizeof(g_rail));
+    s_cat(g_rail, extra_items, sizeof(g_rail));
+  }
   s_cat(g_rail, "]}", sizeof(g_rail));
   hal_msg_send(g_rail, s_len(g_rail));
 }
+void room_render_tree(void) { room_render_tree_with(0); }
 
 /* Append one people-item {id,title,subtitle} for [pub] with role/status label. */
 static void member_item(char *m, unsigned cap, const char *roomId, const char *pub,

@@ -22,6 +22,9 @@ static unsigned s_len(const char *s) { unsigned n = 0; while (s[n]) n++; return 
 static int s_eq(const char *a, const char *b) {
   while (*a && *b && *a == *b) { a++; b++; } return *a == *b;
 }
+static int s_pre(const char *s, const char *pre) {
+  while (*pre) { if (*s != *pre) return 0; s++; pre++; } return 1;
+}
 static void s_cpy(char *d, const char *s, unsigned m) {
   unsigned i = 0; while (i < m - 1 && s[i]) { d[i] = s[i]; i++; } d[i] = 0;
 }
@@ -104,6 +107,39 @@ static int jbool_def(const char *buf, const char *key, int def) {
   return def;
 }
 static int jbool(const char *buf, const char *key) { return jbool_def(buf, key, 0); }
+/* read a JSON integer: "key":123 (bare number). 0 when absent. */
+static int jint(const char *buf, const char *key) {
+  char pat[80]; pat[0] = '"'; pat[1] = 0;
+  s_cat(pat, key, sizeof(pat)); s_cat(pat, "\":", sizeof(pat));
+  unsigned pl = s_len(pat);
+  for (const char *p = buf; *p; p++) {
+    int ok = 1;
+    for (unsigned i = 0; i < pl; i++) { if (p[i] != pat[i]) { ok = 0; break; } }
+    if (!ok) continue;
+    p += pl; while (*p == ' ') p++;
+    int v = 0; while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return v;
+  }
+  return 0;
+}
+/* First value of a NOSTR event tag ["<name>","<value>", …]. Returns 1 on hit. */
+static int evt_tag(const char *evt, const char *name, char *out, unsigned cap) {
+  out[0] = 0;
+  char pat[16] = "[\"";
+  s_cat(pat, name, sizeof(pat)); s_cat(pat, "\",\"", sizeof(pat));
+  unsigned pl = s_len(pat);
+  for (const char *p = evt; *p; p++) {
+    int ok = 1;
+    for (unsigned i = 0; i < pl; i++) { if (p[i] != pat[i]) { ok = 0; break; } }
+    if (!ok) continue;
+    p += pl;
+    unsigned i = 0;
+    while (*p && *p != '"' && i < cap - 1) out[i++] = *p++;
+    out[i] = 0;
+    return 1;
+  }
+  return 0;
+}
 static double to_dbl(const char *s) {
   int neg = 0; if (*s == '-') { neg = 1; s++; } else if (*s == '+') s++;
   double v = 0; while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
@@ -218,6 +254,35 @@ static uint64_t g_last_reconnect = 0;
  * both ways between BLE and APRS-IS (ON by default; persisted in KV "igate");
  * g_ble_started tracks whether we've told the HAL to scan. */
 static int g_ble_on = 1, g_ble_relay = 1, g_ble_started = 0;
+
+/* Which broadcast-channel classes this device listens to. All ON by default —
+ * the point is the OFF switch: a user who wants only the moderated rooms can
+ * silence the local chatter, the worldwide firehose, or the NomadNet bridge
+ * without blocking people one by one. Persisted in KV "chan" as 3 chars.
+ *   local  — nearby groups (BLE / local Reticulum, ids like "#NAME")
+ *   global — worldwide groups over internet Reticulum nodes ("#NAME*")
+ *   nomad  — the #NOMADNET bridge (LXMF messages from non-geogram nodes)  */
+static int g_chan_local = 1, g_chan_global = 1, g_chan_nomad = 1;
+static void chan_save(void) {
+  char b[4] = { g_chan_local ? '1' : '0', g_chan_global ? '1' : '0',
+                g_chan_nomad ? '1' : '0', 0 };
+  hal_kv_set("chan", 4, b, 3);
+}
+static void chan_load(void) {
+  char b[4];
+  if (hal_kv_get("chan", 4, b, 3) >= 3) {
+    g_chan_local = b[0] == '1';
+    g_chan_global = b[1] == '1';
+    g_chan_nomad = b[2] == '1';
+  }
+}
+/* Is channel [id] enabled under the current toggles? Rooms always are. */
+static int chan_enabled(const char *id) {
+  if (!id || id[0] != '#') return 1;
+  if (s_eq(id, "#NOMADNET")) return g_chan_nomad;
+  for (int i = 1; id[i]; i++) if (id[i] == '*') return g_chan_global;
+  return g_chan_local;
+}
 static uint64_t g_ble_last_beacon = 0;
 static uint64_t g_ble_last_hello = 0;   /* last lightweight BLE presence beacon */
 /* compact BLE senders, defined with the module entry points */
@@ -1085,11 +1150,12 @@ static void convo_msg(const char *id, const char *dir, const char *from,
                       double lat, double lon, const char *via,
                       const char *mid, const char *parent, const char *auth, int enc,
                       int priv) {
-  /* GROUPS ONLY. A 1:1 message still reaches this wapp over BLE/APRS (the radios
-   * do not know the difference), but rendering it here would rebuild the second
-   * inbox we just removed. The Messages wapp owns 1:1. Dropping the bubble does
-   * not drop the message: it arrives there as a NOSTR kind-4. */
-  if (!is_group(id) && !room_is_room(id)) return;
+  /* GROUPS ONLY (plus rooms, plus LXMF peers). A NOSTR 1:1 message still
+   * reaches this wapp over BLE/APRS (the radios do not know the difference),
+   * but rendering it here would rebuild the second inbox we just removed — the
+   * Messages wapp owns kind-4 1:1. LXMF peers are the exception: NomadNet
+   * users have no kind-4 inbox anywhere, so their DMs render here. */
+  if (!is_group(id) && !room_is_room(id) && !s_pre(id, "lxmf:")) return;
   char t[8]; fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
@@ -1431,7 +1497,9 @@ static void convo_react(const char *id, const char *mid, const char *from,
  * global (trailing '*') is conveyed by the row icon (campaign vs public/globe)
  * plus a " · global"/" · local" tag (ASCII — the host renders titles as latin1,
  * so no emoji). 1:1 chats keep the callsign. */
+static void lxmf_title(const char *id, char *out, unsigned osz);
 static void convo_title(const char *id, char *out, unsigned osz) {
+  if (s_pre(id, "lxmf:")) { lxmf_title(id, out, osz); return; }
   if (id[0] != '#') { s_cpy(out, id, osz); return; }
   char name[8]; int j = 0;
   for (int i = 1; id[i] && id[i] != '*' && j < 6; i++) name[j++] = id[i];
@@ -1450,8 +1518,86 @@ static void convo_title(const char *id, char *out, unsigned osz) {
  * guard in each is enough. */
 static int is_group(const char *id) { return id && id[0] == '#'; }
 
+/* An LXMF direct conversation with one NomadNet/Sideband peer:
+ * "lxmf:<32-hex delivery dest>". Sends go out with hal_lxmf_send; inbound DMs
+ * (hal_lxmf_recv, `from` = that same dest) land in the matching row. The
+ * NOSTR-1:1 exclusion above does not apply: LXMF peers have no kind-4 inbox
+ * anywhere — Chat IS their conversation surface. */
+static int is_lxmf(const char *id) { return id && s_pre(id, "lxmf:"); }
+
+/* dest(32hex) -> announced display name (from the New-chat picker / the
+ * announce registry at first contact). Persisted in KV "lxnames". */
+#define LXN_MAX 32
+static char g_lxn_dest[LXN_MAX][66];
+static char g_lxn_name[LXN_MAX][34];
+static int g_lxn_n = 0;
+static const char *lxname_get(const char *dest) {
+  for (int i = 0; i < g_lxn_n; i++)
+    if (s_eq(g_lxn_dest[i], dest)) return g_lxn_name[i];
+  return 0;
+}
+static void lxname_save(void) {
+  char b[LXN_MAX * 100]; b[0] = 0;
+  for (int i = 0; i < g_lxn_n; i++) {
+    s_cat(b, g_lxn_dest[i], sizeof(b)); s_cat(b, "=", sizeof(b));
+    s_cat(b, g_lxn_name[i], sizeof(b)); s_cat(b, ";", sizeof(b));
+  }
+  hal_kv_set("lxnames", 7, b, s_len(b));
+}
+static void lxname_set(const char *dest, const char *name) {
+  if (!dest[0] || !name || !name[0]) return;
+  for (int i = 0; i < g_lxn_n; i++) {
+    if (s_eq(g_lxn_dest[i], dest)) {
+      s_cpy(g_lxn_name[i], name, sizeof(g_lxn_name[i]));
+      lxname_save();
+      return;
+    }
+  }
+  if (g_lxn_n >= LXN_MAX) {   /* drop the oldest */
+    for (int i = 0; i < g_lxn_n - 1; i++) {
+      s_cpy(g_lxn_dest[i], g_lxn_dest[i + 1], sizeof(g_lxn_dest[i]));
+      s_cpy(g_lxn_name[i], g_lxn_name[i + 1], sizeof(g_lxn_name[i]));
+    }
+    g_lxn_n--;
+  }
+  s_cpy(g_lxn_dest[g_lxn_n], dest, sizeof(g_lxn_dest[0]));
+  s_cpy(g_lxn_name[g_lxn_n], name, sizeof(g_lxn_name[0]));
+  g_lxn_n++;
+  lxname_save();
+}
+static void lxname_load(void) {
+  char b[LXN_MAX * 100];
+  uint32_t n = hal_kv_get("lxnames", 7, b, sizeof(b) - 1);
+  if (n == 0) return;
+  b[n] = 0;
+  char dest[66], name[34]; int j = 0, in_name = 0;
+  dest[0] = 0; name[0] = 0;
+  for (unsigned i = 0; i <= n; i++) {
+    char ch = (i < n) ? b[i] : ';';
+    if (ch == '=') { dest[j] = 0; j = 0; in_name = 1; }
+    else if (ch == ';') {
+      if (in_name) { name[j] = 0; if (dest[0] && name[0] && g_lxn_n < LXN_MAX) {
+          s_cpy(g_lxn_dest[g_lxn_n], dest, sizeof(g_lxn_dest[0]));
+          s_cpy(g_lxn_name[g_lxn_n], name, sizeof(g_lxn_name[0]));
+          g_lxn_n++; } }
+      j = 0; in_name = 0; dest[0] = 0; name[0] = 0;
+    } else if (!in_name && j < 65) dest[j++] = ch;
+    else if (in_name && j < 33) name[j++] = ch;
+  }
+}
+/* Title for an lxmf: conversation — the peer's announced name, else a short
+ * address ("LXMF 89b4e176"). */
+static void lxmf_title(const char *id, char *out, unsigned osz) {
+  const char *dest = id + 5;
+  const char *nm = lxname_get(dest);
+  if (nm) { s_cpy(out, nm, osz); return; }
+  s_cpy(out, "LXMF ", osz);
+  char sh[9]; s_cpy(sh, dest, sizeof(sh));
+  s_cat(out, sh, osz);
+}
+
 static void convo_touch(const char *id, const char *preview, int select) {
-  if (!is_group(id)) return;
+  if (!is_group(id) && !is_lxmf(id)) return;
   convo_remember(id);
   int global = 0; for (int i = 1; id[i]; i++) if (id[i] == '*') global = 1;
   const char *icon = (id[0] == '#') ? (global ? "public" : "campaign") : "person";
@@ -2537,11 +2683,16 @@ static void resolve_drain(void) {
   }
 }
 
-static void do_convo_send(const char *buf) {
+/* The send pipeline, with the target and text supplied by the caller — the
+ * conversations layout parses them from its own field names, the rooms rail
+ * from its (a channel on the rail is the same group underneath). [buf] still
+ * carries the settings fields (read_config, include_location). */
+static void convo_send_core(const char *buf, const char *id_in,
+                            const char *text_in) {
   read_config(buf);
   char id[40] = "", text[400] = "";
-  jstr(buf, "conversations_convo", id, sizeof(id));
-  jstr(buf, "conversations_input", text, sizeof(text));
+  s_cpy(id, id_in, sizeof(id));
+  s_cpy(text, text_in, sizeof(text));
   if (!id[0] || !text[0]) return;
   /* A room message is a NIP-72 community post (kind-1 tagged to the room); it
    * does not ride APRS/BLE/encryption. Post it and echo locally. */
@@ -2742,6 +2893,14 @@ static void do_convo_send(const char *buf) {
   convo_deliver(id, "out", g_call, wire, text, "");
   g_send_rid[0] = 0; g_send_status[0] = 0;
   status(priv ? "TX (private/Reticulum)" : (loc ? "TX message + position" : "TX message"));
+}
+
+static void do_convo_send(const char *buf) {
+  char id[40] = "", text[400] = "";
+  jstr(buf, "conversations_convo", id, sizeof(id));
+  jstr(buf, "conversations_input", text, sizeof(text));
+  if (!id[0] || !text[0]) return;
+  convo_send_core(buf, id, text);
 }
 
 /* Toggle private (Reticulum-only) mode for the open 1:1 conversation. Requires the
@@ -3690,10 +3849,73 @@ static void prompt_pending_approval(void) {
   hal_msg_send(m, s_len(m));
 }
 
+/* "<hex mid>:like" / ":unlike" — the heart on a ROOM bubble comes through the
+ * ordinary send path as text (the host widget knows nothing about rooms).
+ * Room mids are full NOSTR event ids (64 hex), unlike the 4-hex group ids
+ * that like_parse handles; without this the vote was posted as a message and
+ * rendered as a bubble reading "<64 hex chars>:like". */
+static int roomlike_parse(const char *text, char mid[70], int *unlike) {
+  mid[0] = 0; *unlike = 0;
+  unsigned n = 0;
+  while (text[n] && text[n] != ':') {
+    char ch = text[n];
+    if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return 0;
+    n++;
+  }
+  if (n < 8 || n > 64 || text[n] != ':') return 0;
+  const char *v = text + n + 1;
+  if (s_eq(v, "like")) *unlike = 0;
+  else if (s_eq(v, "unlike")) *unlike = 1;
+  else return 0;
+  for (unsigned i = 0; i < n; i++) mid[i] = text[i];
+  mid[n] = 0;
+  return 1;
+}
+
+/* The rail = the moderated room tree PLUS this device's broadcast channels
+ * (subscribed groups, the NomadNet bridge). The channels were previously in
+ * the conversation store but on no screen at all — their unread counted on
+ * the launcher badge while nothing in the UI could show, open or clear them,
+ * which is exactly how "7 notifications from nowhere" happens. */
+static void render_rail(void) {
+  char extra[3000] = "";
+  int first = 1;
+  for (int i = 0; i < g_convo_n; i++) {
+    const char *id = g_convo_ids[i];
+    int lx = is_lxmf(id);
+    if (id[0] != '#' && !lx) continue;
+    if (room_is_room(id)) continue;          /* already on the tree */
+    if (lx ? !g_chan_nomad : !chan_enabled(id)) continue; /* switched off */
+    char title[36];
+    convo_title(id, title, sizeof(title));
+    if (!first) s_cat(extra, ",", sizeof(extra));
+    first = 0;
+    s_cat(extra, "{\"id\":\"", sizeof(extra)); jesc(extra, sizeof(extra), id);
+    s_cat(extra, "\",\"name\":\"", sizeof(extra)); jesc(extra, sizeof(extra), title);
+    s_cat(extra, "\",\"depth\":0}", sizeof(extra));
+  }
+  room_render_tree_with(extra);
+}
+
 static void room_event_ingest(const char *evt) {
+  /* kind-7 reaction on a room message: tally the heart, never a bubble. Our
+   * own federated-back copy is skipped (already tallied on send). */
+  if (jint(evt, "kind") == 7) {
+    char mid[70], pub[80], content[8], from[16];
+    if (!evt_tag(evt, "e", mid, sizeof(mid))) return;
+    jstr(evt, "pubkey", pub, sizeof(pub));
+    if (!pub[0] || room_is_self(pub)) return;
+    s_cpy(from, pub, 13);
+    if (is_blocked(from) || is_muted(from)) return;
+    char rid[80];
+    if (!evt_tag(evt, "h", rid, sizeof(rid)) || !room_is_room(rid)) return;
+    jstr(evt, "content", content, sizeof(content));
+    convo_react(rid, mid, from, content[0] == '-', 0);
+    return;
+  }
   int rc = room_ingest(evt);
   if (rc == 3) { prompt_pending_approval(); return; } /* a proposal I can approve */
-  if (rc == 2) { rooms_subscribe(); room_render_tree(); } /* room appeared/changed */
+  if (rc == 2) { rooms_subscribe(); render_rail(); } /* room appeared/changed */
   if (rc) return;
   char rid[80];
   if (!room_note_roomid(evt, rid, sizeof(rid))) return;   /* new msg, or 0 if dup */
@@ -3714,6 +3936,17 @@ static void room_event_ingest(const char *evt) {
 static void do_rooms_open(const char *buf) {
   char rid[80] = ""; jstr(buf, "rooms_convo", rid, sizeof(rid));
   if (!rid[0]) return;
+  /* An LXMF thread deep-linked from elsewhere (the Reticulum graph's "message
+   * this device"): adopt it as a real conversation so it persists and shows on
+   * the rail — otherwise the row vanishes on the next launch. */
+  if (is_lxmf(rid)) {
+    if (!convo_known(rid)) {
+      convo_ensure(rid);
+      groups_save();
+      render_rail();
+    }
+    return;
+  }
   s_cpy(g_cur_room, rid, sizeof(g_cur_room));
   room_render_members(rid);          /* populate the member panel for this room */
 }
@@ -3721,7 +3954,41 @@ static void do_rooms_send(const char *buf) {
   char rid[80] = "", text[400] = "";
   jstr(buf, "rooms_convo", rid, sizeof(rid));
   jstr(buf, "rooms_input", text, sizeof(text));
-  if (!rid[0] || !text[0] || !room_is_room(rid)) return;
+  if (!rid[0] || !text[0]) return;
+  if (!room_is_room(rid)) {
+    /* An LXMF direct conversation: one NomadNet/Sideband peer, addressed by
+     * its 32-hex delivery dest. Fire-and-forget (LXMF stores-and-forwards);
+     * the echo bubble appears now, delivery happens when a path exists. */
+    if (is_lxmf(rid)) {
+      const char *dest = rid + 5;
+      if (hal_lxmf_send(dest, s_len(dest), "", 0, text, s_len(text)) > 0) {
+        char from[16]; s_cpy(from, g_call, sizeof(from));
+        convo_msg(rid, "out", from, text, "", "", 0, 0, "LXM", "", "", "", 0, 0);
+        convo_touch(rid, text, 0);
+        status("TX (LXMF)");
+      } else {
+        notify("warning", "Couldn't queue the LXMF message");
+      }
+      return;
+    }
+    /* A broadcast CHANNEL on the same rail (#group / #NOMADNET): same target,
+     * different transport — route through the ordinary group send pipeline
+     * (Reticulum bulletin + BLE + optional APRS-IS), which also handles the
+     * 4-hex group like votes the heart button emits there. */
+    if (rid[0] == '#') convo_send_core(buf, rid, text);
+    return;
+  }
+  /* The heart button rides the send path: a like is a REACTION (kind 7 on the
+   * wire, a tally in the UI), never a message bubble. */
+  {
+    char mid[70]; int unlike;
+    if (roomlike_parse(text, mid, &unlike)) {
+      room_react(rid, mid, unlike);
+      char from[16]; s_cpy(from, g_pubkey[0] ? g_pubkey : g_call, 13);
+      convo_react(rid, mid, from, unlike, 1);   /* our vote lights the heart now */
+      return;
+    }
+  }
   if (!room_self_can_post(rid)) {
     notify("warning", "You can't post here right now (suspended, banned, or closed)");
     return;
@@ -3733,6 +4000,205 @@ static void do_rooms_send(const char *buf) {
     notify("warning", "Couldn't post to this room");
   }
 }
+/* ── New chat: find a PERSON and start a direct conversation ──────────────
+ * Full-screen picker over two worlds:
+ *   - NomadNet/LXMF peers from the live announce registry (hal_rns_nodes,
+ *     service "lxmf"): matched by announced name, identity hash or LXMF
+ *     delivery address; a pasted 32-hex address works even when unheard.
+ *   - Geogram/NOSTR people (hal_people_search): callsign / npub / nickname —
+ *     these open in the Messages wapp, which owns the one kind-4 inbox. */
+
+/* djb2 + diffed send: an unchanged people list is never re-sent (a re-sent
+ * list resets the scroll). */
+static uint32_t fnd_djb2(const char *s) {
+  uint32_t h = 5381;
+  for (; *s; s++) h = ((h << 5) + h) ^ (unsigned char)*s;
+  return h;
+}
+static int fnd_changed_send(const char *m, uint32_t *last) {
+  uint32_t h = fnd_djb2(m);
+  if (h == *last) return 0;
+  *last = h;
+  hal_msg_send(m, s_len(m));
+  return 1;
+}
+/* Prefill a host scalar field (the search box). */
+static void fnd_field_set(const char *field, const char *value) {
+  char m[300] = "{\"type\":\"ui.field.set\",\"field\":\"";
+  s_cat(m, field, sizeof(m));
+  s_cat(m, "\",\"value\":\"", sizeof(m));
+  jesc(m, sizeof(m), value);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
+/* Copy the next {...} object at/after [p] into [slice]; return cursor past it. */
+static const char *fnd_next_obj(const char *p, char *slice, unsigned m) {
+  if (!p) return 0;
+  while (*p && *p != '{') p++;
+  if (!*p) return 0;
+  int depth = 0; unsigned i = 0;
+  while (*p) {
+    if (*p == '{') depth++;
+    else if (*p == '}') depth--;
+    if (i < m - 1) slice[i++] = *p;
+    p++;
+    if (depth == 0) break;
+  }
+  slice[i] = 0;
+  return p;
+}
+static int is_hex32(const char *s) {
+  int n = 0;
+  for (; s[n]; n++) {
+    char c = s[n];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+  }
+  return n == 32;
+}
+
+static char g_find_q[64] = "";
+static char g_find_json[16384];
+static char g_find_out[16384];
+static uint32_t g_find_hash = 0;
+
+static void render_finduser(void) {
+  char *o = g_find_out; const unsigned sz = sizeof(g_find_out);
+  o[0] = 0;
+  s_cat(o, "{\"type\":\"ui.people.set\",\"field\":\"finduser\",\"sections\":[", sz);
+
+  /* ── NomadNet / LXMF peers heard on the mesh ── */
+  s_cat(o, "{\"title\":\"NomadNet (Reticulum mesh)\",\"items\":[", sz);
+  char flt[120] = "{\"service\":\"lxmf\",\"search\":\"";
+  jesc(flt, sizeof(flt), g_find_q);
+  s_cat(flt, "\"}", sizeof(flt));
+  int32_t n = hal_rns_nodes(flt, s_len(flt), g_find_json, sizeof(g_find_json) - 1);
+  if (n < 0) n = 0;
+  g_find_json[n] = 0;
+  int first = 1, matched_direct = 0;
+  /* Walk the "nodes" array only (edges follow). */
+  const char *nd = g_find_json;
+  while (*nd && !s_pre(nd, "\"nodes\":[")) nd++;
+  const char *endp = nd;
+  { int depth = 0; const char *p = nd;
+    for (; *p; p++) { if (*p == '[') depth++; else if (*p == ']' && --depth == 0) { endp = p; break; } } }
+  char slice[1600];
+  const char *p = *nd ? fnd_next_obj(nd, slice, sizeof(slice)) : 0;
+  while (p && p <= endp) {
+    char dest[70], name[40], call[24], idhex[70];
+    jstr(slice, "lxmfDest", dest, sizeof(dest));
+    jstr(slice, "name", name, sizeof(name));
+    jstr(slice, "callsign", call, sizeof(call));
+    jstr(slice, "id", idhex, sizeof(idhex));
+    if (dest[0] && !s_eq(idhex, "self")) {
+      if (g_find_q[0] && s_eq(dest, g_find_q)) matched_direct = 1;
+      const char *disp = name[0] ? name : (call[0] ? call : 0);
+      if (!first) s_cat(o, ",", sz);
+      first = 0;
+      s_cat(o, "{\"id\":\"lx:", sz); jesc(o, sz, dest);
+      s_cat(o, "\\t", sz); if (disp) jesc(o, sz, disp);
+      s_cat(o, "\",\"title\":\"", sz);
+      if (disp) jesc(o, sz, disp);
+      else { s_cat(o, "LXMF ", sz); char sh[9]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); }
+      s_cat(o, "\",\"subtitle\":\"NomadNet - ", sz);
+      { char sh[17]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
+      s_cat(o, "\",\"icon\":\"person\"}", sz);
+    }
+    p = fnd_next_obj(p, slice, sizeof(slice));
+  }
+  /* A pasted 32-hex LXMF address nobody has announced yet is still valid —
+   * LXMF stores-and-forwards, so the message waits for them. */
+  if (is_hex32(g_find_q) && !matched_direct) {
+    if (!first) s_cat(o, ",", sz);
+    first = 0;
+    s_cat(o, "{\"id\":\"lx:", sz); s_cat(o, g_find_q, sz);
+    s_cat(o, "\\t\",\"title\":\"Message ", sz);
+    { char sh[9]; s_cpy(sh, g_find_q, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
+    s_cat(o, "\",\"subtitle\":\"LXMF address (not heard yet - delivery waits for them)\","
+             "\"icon\":\"person_add\"}", sz);
+  }
+  s_cat(o, "]}", sz);
+
+  /* ── Geogram / NOSTR people (live in the Messages wapp) ── */
+  s_cat(o, ",{\"title\":\"Geogram (callsign / npub - opens in Messages)\",\"items\":[", sz);
+  first = 1;
+  if (g_find_q[0]) {
+    n = hal_people_search(g_find_q, s_len(g_find_q), g_find_json, sizeof(g_find_json) - 1);
+    if (n < 0) n = 0;
+    g_find_json[n] = 0;
+    const char *q2 = fnd_next_obj(g_find_json, slice, sizeof(slice));
+    while (q2) {
+      char callsign[24], nick[40], npub[80];
+      jstr(slice, "callsign", callsign, sizeof(callsign));
+      jstr(slice, "nick", nick, sizeof(nick));
+      jstr(slice, "npub", npub, sizeof(npub));
+      int devices = jint(slice, "devices");
+      const char *target = callsign[0] ? callsign : npub;
+      if (target[0]) {
+        if (!first) s_cat(o, ",", sz);
+        first = 0;
+        s_cat(o, "{\"id\":\"np:", sz); jesc(o, sz, target);
+        s_cat(o, "\",\"title\":\"", sz);
+        jesc(o, sz, callsign[0] ? callsign : npub);
+        if (nick[0]) { s_cat(o, " - ", sz); jesc(o, sz, nick); }
+        s_cat(o, "\",\"subtitle\":\"", sz);
+        if (jbool(slice, "online")) s_cat(o, "online - ", sz);
+        { char nb[12]; u_itoa((unsigned)(devices > 0 ? devices : 0), nb);
+          s_cat(o, nb, sz); s_cat(o, devices == 1 ? " device" : " devices", sz); }
+        s_cat(o, "\",\"icon\":\"person\"}", sz);
+      }
+      q2 = fnd_next_obj(q2, slice, sizeof(slice));
+    }
+  }
+  s_cat(o, "]}]}", sz);
+  fnd_changed_send(o, &g_find_hash);
+}
+
+static void do_rooms_newchat(void) {
+  g_find_q[0] = 0;
+  fnd_field_set("finduser_query", "");
+  render_finduser();
+  const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"New chat\"}";
+  hal_msg_send(m, s_len(m));
+}
+
+static void do_finduser_tap(const char *buf) {
+  char id[140] = "";
+  jstr(buf, "finduser_id", id, sizeof(id));
+  if (s_pre(id, "lx:")) {
+    /* "lx:<dest>\t<name>" — start (or reopen) the LXMF conversation. */
+    char dest[70] = "", name[40] = "";
+    const char *r = id + 3; unsigned i = 0;
+    while (*r && *r != '\t' && i < sizeof(dest) - 1) dest[i++] = *r++;
+    dest[i] = 0;
+    if (*r == '\t') r++;
+    i = 0;
+    while (*r && i < sizeof(name) - 1) name[i++] = *r++;
+    name[i] = 0;
+    if (!dest[0]) return;
+    if (name[0]) lxname_set(dest, name);
+    char cid[72] = "lxmf:";
+    s_cat(cid, dest, sizeof(cid));
+    convo_ensure(cid);
+    groups_save();
+    render_rail();
+    /* Open it: upsert with select so the host focuses the conversation. */
+    char m[220] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+    jesc(m, sizeof(m), cid);
+    s_cat(m, "\",\"select\":true,\"bump\":true}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+    const char *c = "{\"type\":\"ui.screen.close\"}";
+    hal_msg_send(c, s_len(c));
+  } else if (s_pre(id, "np:")) {
+    /* A NOSTR person: their 1:1 lives in the Messages wapp (the ONE kind-4
+     * inbox) — jump there instead of growing a second copy here. */
+    char m[200] = "{\"type\":\"messages.open\",\"target\":\"";
+    jesc(m, sizeof(m), id + 3);
+    s_cat(m, "\"}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+  }
+}
+
 static void do_rooms_new(const char *buf) {
   char parent[80] = ""; jstr(buf, "rooms_convo", parent, sizeof(parent));
   s_cpy(g_new_parent, parent[0] ? parent : MAIN_ROOM_ID, sizeof(g_new_parent));
@@ -3851,10 +4317,27 @@ static void lxmf_drain(void) {
     if (gseen_has(hash)) continue;
     gseen_add(hash);
 
-    char cid[16];
-    if (title[0] == '#') group_convo_id(title + 1, cid, sizeof(cid));
-    else s_cpy(cid, LXMF_GROUP, sizeof(cid));
-    if (!convo_known(cid)) convo_ensure(cid);   /* auto-join, or nobody sees it */
+    char cid[72];
+    if (title[0] == '#') {
+      /* A titled/group LXMF message: the shared bridge channel. */
+      group_convo_id(title + 1, cid, sizeof(cid));
+    } else {
+      /* A personal DM from one NomadNet peer: its own conversation, keyed by
+       * the sender's delivery dest — reply lands exactly where it came from.
+       * (These used to pile into the #NOMADNET channel, where answering a
+       * PERSON was impossible.) */
+      s_cpy(cid, "lxmf:", sizeof(cid));
+      s_cat(cid, from, sizeof(cid));
+    }
+    if (!g_chan_nomad) continue;        /* the user switched the bridge off */
+    if (cid[0] == '#' && !chan_enabled(cid)) continue;
+    if (!convo_known(cid)) {
+      convo_ensure(cid);   /* auto-join, or nobody sees it */
+      groups_save();       /* …and PERSIST the join — an unsaved auto-join was
+                            * gone after a restart while the host store kept
+                            * counting its unread: a badge pointing at nothing */
+      render_rail();
+    }
 
     char who[16]; s_cpy(who, from, 13);         /* LXMF dest prefix as the name */
     convo_msg(cid, "in", who, content, "", "", 0, 0, "LXM", hash, "", "", 0, 0);
@@ -3866,9 +4349,11 @@ static void lxmf_drain(void) {
 /* Subscribed groups persist in KV "groups" (";"-joined ids) so the APRS-IS
  * filter is correct immediately after a restart, before any row is reopened. */
 static void groups_save(void) {
-  char buf[600]; buf[0] = 0;
+  char buf[1200]; buf[0] = 0;
   for (int i = 0; i < g_convo_n; i++)
-    if (g_convo_ids[i][0] == '#') { s_cat(buf, g_convo_ids[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf)); }
+    if (g_convo_ids[i][0] == '#' || is_lxmf(g_convo_ids[i])) {
+      s_cat(buf, g_convo_ids[i], sizeof(buf)); s_cat(buf, ";", sizeof(buf));
+    }
   hal_kv_set("groups", 6, buf, s_len(buf));
 }
 /* Ensure a conversation ROW exists in the host's Messages list (without bumping
@@ -3936,7 +4421,11 @@ static void groups_load(void) {
     char ch = (i < n) ? buf[i] : ';';
     /* convo_ensure (not convo_remember): re-push each subscribed group so it
      * shows in the Messages list on every page open, not only the g/ filter. */
-    if (ch == ';') { id[j] = 0; if (id[0] == '#') convo_ensure(id); j = 0; }
+    if (ch == ';') {
+      id[j] = 0;
+      if (id[0] == '#' || is_lxmf(id)) convo_ensure(id);
+      j = 0;
+    }
     else if (j < 39) id[j++] = ch;
   }
   /* Existing install already has groups: mark seeded so a later "remove all"
@@ -3944,6 +4433,11 @@ static void groups_load(void) {
   char f[2];
   if (hal_kv_get("grpseed", 7, f, sizeof(f) - 1) == 0)
     hal_kv_set("grpseed", 7, "1", 1);
+  /* The NomadNet bridge channel exists whenever the bridge is on — messages
+   * from LXMF nodes land there, so it must be on the rail BEFORE the first
+   * one arrives, not only after. */
+  if (g_chan_nomad && !convo_known(LXMF_GROUP)) convo_ensure(LXMF_GROUP);
+  render_rail();   /* the restored channels belong on the rail immediately */
 }
 
 /* The public-key beacon on/off state persists in KV "pkbeacon" ("1"/"0"), so
@@ -4206,7 +4700,10 @@ static void deliver_bulletin(const char *gname, const char *from,
   }
   char lid[14]; lid[0] = '#'; s_cpy(lid + 1, nm, sizeof(lid) - 1);
   char gid[16]; s_cpy(gid, lid, sizeof(gid)); s_cat(gid, "*", sizeof(gid));
-  int has_g = convo_known(gid), has_l = convo_known(lid);
+  /* The channel-class switches gate delivery itself, not just the rail: a
+   * disabled class must not keep accumulating invisible unread. */
+  int has_g = convo_known(gid) && g_chan_global;
+  int has_l = convo_known(lid) && g_chan_local;
   if (!has_g && !has_l) return;            /* only listen to groups we subscribed */
   char preview[140] = ""; s_cpy(preview, from, sizeof(preview)); s_cat(preview, ": ", sizeof(preview));
   s_cat(preview, disp_body, sizeof(preview));
@@ -5139,6 +5636,8 @@ void module_init(void) {
   }
   sdev_load();     /* restore the seen-devices registry (store-and-forward) */
   gseen_load();    /* before groups_load: the LXMF cursor restarts at 0 per engine */
+  chan_load();     /* before groups_load: the rail render honours the switches */
+  lxname_load();   /* before groups_load: lxmf rows render with their names */
   groups_load();   /* restore subscribed groups so the g/ filter is correct now */
   /* Cache our public key (base64url) and the persisted pubkey-beacon pref. */
   { uint32_t pn = hal_identity_pubkey(g_pubkey, sizeof(g_pubkey) - 1);
@@ -5414,7 +5913,7 @@ void module_tick(void) {
     static int tree_drawn = 0;
     if (!g_sub_rooms[0]) rooms_subscribe();
     if (!tree_drawn && room_is_room(MAIN_ROOM_ID)) {
-      room_render_tree();
+      render_rail();
       s_cpy(g_cur_room, MAIN_ROOM_ID, sizeof(g_cur_room));
       room_render_members(MAIN_ROOM_ID);
       tree_drawn = 1;
@@ -5483,6 +5982,16 @@ void module_handle_event(void) {
   else if (s_eq(cmd, "rooms_open")) do_rooms_open(buf);
   else if (s_eq(cmd, "rooms_send")) do_rooms_send(buf);
   else if (s_eq(cmd, "rooms_new")) do_rooms_new(buf);
+  else if (s_eq(cmd, "rooms_newchat")) do_rooms_newchat();
+  else if (s_eq(cmd, "finduser_search")) {
+    jstr(buf, "finduser_query", g_find_q, sizeof(g_find_q));
+    /* lowercase: registry matching is case-insensitive, hex is lowercase */
+    for (int i = 0; g_find_q[i]; i++)
+      if (g_find_q[i] >= 'A' && g_find_q[i] <= 'Z')
+        g_find_q[i] = (char)(g_find_q[i] + 32);
+    render_finduser();
+  }
+  else if (s_eq(cmd, "finduser_tap")) do_finduser_tap(buf);
   else if (s_eq(cmd, "rooms_settings")) {
     const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"Settings\"}";
     hal_msg_send(m, s_len(m));
@@ -5534,6 +6043,28 @@ void module_handle_event(void) {
     ble_reconcile();
     status(g_ble_relay ? "iGate ON (bridging Bluetooth ↔ APRS-IS)"
                        : "iGate OFF");
+  }
+  else if (s_eq(cmd, "chan_apply")) {
+    /* Explicit apply (like ble_apply) so the on-by-default switches aren't
+     * clobbered by an unset checkbox serialised as false on other commands. */
+    g_chan_local = jbool_def(buf, "chan_local", 1);
+    g_chan_global = jbool_def(buf, "chan_global", 1);
+    g_chan_nomad = jbool_def(buf, "chan_nomad", 1);
+    chan_save();
+    /* A channel switched off must also stop counting: zero the unread on every
+     * hidden conversation, or the launcher badge keeps pointing at rows the
+     * rail no longer shows — the "7 notifications from nowhere" bug. */
+    for (int i = 0; i < g_convo_n; i++) {
+      const char *cid = g_convo_ids[i];
+      if (cid[0] != '#' || chan_enabled(cid)) continue;
+      char m[160] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+      jesc(m, sizeof(m), cid);
+      s_cat(m, "\",\"unread\":0}", sizeof(m));
+      hal_msg_send(m, s_len(m));
+    }
+    render_rail();
+    status("Channel switches applied");
+    notify("info", "Channels updated");
   }
   else if (s_eq(cmd, "pubkey_apply")) {
     /* Explicit apply (like ble_apply) so the on-by-default state isn't clobbered

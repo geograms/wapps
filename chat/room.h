@@ -66,6 +66,10 @@ int room_self_can_post(const char *roomId);
 /* Post [text] to room [roomId] as a NIP-72 community message. Returns 1 ok. */
 int room_post(const char *roomId, const char *text);
 
+/* Publish a NIP-25 reaction (kind 7) on room message [mid]: like, or retract
+ * when [remove]. Returns 1 if published. */
+int room_react(const char *roomId, const char *mid, int remove);
+
 /* Publish a moderation op if self has authority over [roomId]. [op] is one of
  * kick / suspend / unsuspend / ban / close / award / deduct / promote / demote.
  * [until] is a unix-seconds deadline (suspend), [amount] the points delta
@@ -109,6 +113,10 @@ int room_rep_level(const char *pub);
 
 /* Render the room list (indented tree) into the conversations widget. */
 void room_render_tree(void);
+
+/* Same, appending [extra_items] (pre-built JSON rail items — the caller's
+ * broadcast channels) after the room tree. NULL/empty = rooms only. */
+void room_render_tree_with(const char *extra_items);
 
 /* Render the member roster for [roomId] into the Members people-list field. */
 void room_render_members(const char *roomId);

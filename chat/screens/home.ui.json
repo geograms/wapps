@@ -13,6 +13,17 @@
   },
   {
     "$": "screen",
+    "name": "New chat",
+    "hidden": true,
+    "toolbar": true,
+    "search": true,
+    "tip": "Find a person and start a direct conversation.",
+    "children": [
+      { "$": "field", "name": "finduser", "$type": "people", "empty": "Type a name, callsign, npub, LXMF address or identity hash.\nNomadNet peers heard on the mesh appear as you type; a pasted LXMF address works even before they announce.", "tip": "Tap a person to start the conversation. NomadNet peers chat here over LXMF; Geogram people open in Messages." }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Settings",
     "hidden": true,
     "tip": "Station identity, position, Bluetooth and media.",
@@ -33,6 +44,16 @@
         "tip": "Exchange short messages directly over Bluetooth, off-grid.",
         "children": [
           { "$": "field", "name": "ble_enabled", "$type": "bool", "label": "Exchange over Bluetooth", "default": true, "apply": "ble_apply", "tip": "Scan for and broadcast chat frames over BLE." }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "channels",
+        "tip": "Which broadcast channels this device listens to. Rooms are always on; these are the open firehoses.",
+        "children": [
+          { "$": "field", "name": "chan_local", "$type": "bool", "label": "Local chat (nearby devices)", "default": true, "apply": "chan_apply", "tip": "Group chatter from devices around you, over Bluetooth and local Reticulum. Off = those channels leave the rail and stop counting as unread." },
+          { "$": "field", "name": "chan_global", "$type": "bool", "label": "Global chat (internet Reticulum)", "default": true, "apply": "chan_apply", "tip": "Worldwide group channels relayed by internet Reticulum nodes. Off = the worldwide firehose disappears from the rail." },
+          { "$": "field", "name": "chan_nomad", "$type": "bool", "label": "NomadNet bridge (#NOMADNET)", "default": true, "apply": "chan_apply", "tip": "Messages from non-geogram NomadNet/LXMF nodes. Off = they are dropped on arrival." }
         ]
       },
       {
