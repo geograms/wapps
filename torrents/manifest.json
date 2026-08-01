@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.torrents",
-  "version":         "0.5.11",
+  "version":         "0.6.1",
   "kind":            "app",
   "title":           "Torrents",
   "description":     "Folder torrents over Reticulum - create, share, download and seed.",

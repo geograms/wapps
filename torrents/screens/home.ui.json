@@ -6,10 +6,11 @@
     "toolbar": true,
     "tip": "Tap a torrent to open it, or a folder to go in. Organize with folders.",
     "children": [
+      { "$": "field", "name": "dash", "$type": "stats", "tip": "What this device holds and gives: folders you publish, pinned copies you seed, the library on disk, and how often others have downloaded from you." },
       { "$": "action", "name": "flt_all", "label": "All", "icon": "list", "style": "secondary", "tip": "Show every torrent." },
       { "$": "action", "name": "flt_mine", "label": "Mine", "icon": "person", "style": "secondary", "tip": "Show only the torrents you created." },
       { "$": "action", "name": "lib_newfolder", "label": "New folder", "icon": "create_new_folder", "style": "secondary", "tip": "Create a subfolder here to organize torrents." },
-      { "$": "field", "name": "torrents", "$type": "people", "empty": "Nothing here yet - tap + to open a link or share a folder.", "tip": "Tap a torrent to open it, or a folder to go in." }
+      { "$": "field", "name": "torrents", "$type": "people", "empty": "Nothing here yet.\nTap + to share a folder, or search the network for something to download.", "tip": "Tap a torrent to open it, or a folder to go in." }
     ]
   },
   {
@@ -34,11 +35,11 @@
     "toolbar": true,
     "search": true,
     "icon": "search",
-    "tip": "Find torrents by title, description or tags, or browse by category.",
+    "tip": "Search the whole network - every listing published to the mesh - by title, description or tags, or browse by category.",
     "children": [
       { "$": "action", "name": "srch_sort", "label": "Sort", "icon": "sort", "style": "secondary", "tip": "Cycle sort: seeders, recently updated, size (shown in the results header)." },
       { "$": "action", "name": "srch_cats", "label": "Categories", "icon": "category", "style": "secondary", "tip": "Browse torrents by category (only categories that have torrents are shown)." },
-      { "$": "field", "name": "results", "$type": "people", "empty": "No torrents here yet. Type above to search, or tap Categories to browse.", "tip": "Tap a category to browse it, or a torrent to open its listing." }
+      { "$": "field", "name": "results", "$type": "people", "empty": "Type above to search the network, or tap Categories to browse.\nResults marked 'on the network' come from other devices - open one to fetch its listing.", "tip": "Tap a category to browse it, or a torrent to open its listing." }
     ]
   },
   {
@@ -50,6 +51,7 @@
       { "$": "group", "$type": "header-actions", "children": [
         { "$": "group", "$type": "menu", "icon": "menu", "tip": "More", "children": [
           { "$": "action", "name": "listing_browse", "label": "Browse files", "icon": "folder_open", "tip": "Open the full-screen file browser." },
+          { "$": "action", "name": "listing_opendir", "label": "Open folder on disk", "icon": "folder_shared", "tip": "Show this torrent's real files in the system file manager (yours, or a pinned copy)." },
           { "$": "action", "name": "listing_move", "label": "Move to folder", "icon": "drive_file_move", "tip": "File this torrent under one of your organizing folders." },
           { "$": "action", "name": "listing_edit", "label": "Edit listing", "icon": "edit", "tip": "Describe what you share (publisher only)." },
           { "$": "action", "name": "listing_popularity", "label": "Popularity", "icon": "insights", "tip": "See how many peers seed and download this over the months (kept on your device)." },

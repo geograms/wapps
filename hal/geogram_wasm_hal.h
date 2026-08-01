@@ -338,6 +338,17 @@ __attribute__((import_module("hal"), import_name("folder_search")))
 uint32_t hal_folder_search(const char *query, uint32_t query_len,
                            char *out_buf, uint32_t out_len);
 
+/* Search folder listings across the MESH as well as the local index. Same
+ * query/result contract as folder_search, plus:
+ *   "busy": true   — the mesh fan-out is still in flight; poll again in a
+ *                    second or two and the results will have filled in.
+ *   per-row "where": "local" | "mesh" | "both" — where the listing was found.
+ * Mesh rows carry seeders/size 0 (a DHT walk per row would turn one search
+ * into fifty); they resolve the moment the torrent is opened. */
+__attribute__((import_module("hal"), import_name("folder_search_global")))
+uint32_t hal_folder_search_global(const char *query, uint32_t query_len,
+                                  char *out_buf, uint32_t out_len);
+
 /* Download library — real files on disk, organized in subfolders.
  *   folder_download_root: current download folder path (empty if unset).
  *   folder_set_download_root(path): choose it; adopts torrents already under it.
@@ -1364,6 +1375,14 @@ int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
 __attribute__((import_module("hal"), import_name("contacts_query")))
 int32_t hal_contacts_query(const char *query, uint32_t query_len,
                            char *out, uint32_t out_cap);
+
+/* People search across contacts AND the live announce registry, aggregated by
+ * callsign — the host's "find a user" search. Result: JSON array of
+ * {"npub","callsign","nick","online":bool,"devices":n}. Empty query → [].
+ * Returns bytes written, -1 on error, -2 if the buffer was too small. */
+__attribute__((import_module("hal"), import_name("people_search")))
+int32_t hal_people_search(const char *query, uint32_t query_len,
+                          char *out, uint32_t out_cap);
 
 #ifdef __cplusplus
 }

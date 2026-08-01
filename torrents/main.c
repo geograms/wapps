@@ -252,6 +252,12 @@ static char g_srch_q[80] = "";     /* free-text query */
 static char g_srch_cat[24] = "";   /* restrict to one category ("" = all) */
 static char g_srch_sort[12] = "seeders"; /* seeders | updated | size */
 static uint32_t g_srch_hash = 0;
+static int g_srch_busy = 0;        /* the mesh fan-out is still in flight */
+
+/* Dashboard (the hero stats over the list) state. */
+static uint32_t g_dash_hash = 0;
+static unsigned g_dash_at = 0;     /* tick of the last aggregate walk */
+static int g_dash_dirty = 1;       /* something changed: recount promptly */
 
 /* Library (main list) state: the download-folder tree we are navigating. */
 static char g_lib_path[512] = "";  /* current subfolder ("" = root) */
@@ -431,7 +437,7 @@ static unsigned g_sc_used = 0;
 
 /* Drop every cached row (after an edit/rescan/pin, where the numbers really did
  * change and the user is owed the truth immediately). */
-static void stats_cache_clear(void) { g_sc_used = 0; }
+static void stats_cache_clear(void) { g_sc_used = 0; g_dash_dirty = 1; }
 
 static void torrent_row(const char *fid, int owned, int pinned,
                         char *title, unsigned tm, char *sub, unsigned sm,
@@ -483,17 +489,17 @@ static void torrent_row(const char *fid, int owned, int pinned,
     if (cat[0]) {
       s_cat(sub, cat, sm);
       if (jbool_def(st, "adult", 0)) s_cat(sub, " +18", sm);
-      s_cat(sub, " - ", sm);
+      s_cat(sub, " · ", sm);
     } }
   s_cat(sub, owned ? "mine" : (pinned ? "pinned" : "following"), sm);
   { char nb[12]; u_itoa(files, nb);
-    s_cat(sub, " - ", sm); s_cat(sub, nb, sm);
+    s_cat(sub, " · ", sm); s_cat(sub, nb, sm);
     s_cat(sub, files == 1 ? " file" : " files", sm); }
   { char fs[24]; fmt_size(bytes, fs, sizeof(fs));
-    s_cat(sub, " - ", sm); s_cat(sub, fs, sm); }
+    s_cat(sub, " · ", sm); s_cat(sub, fs, sm); }
   if (serves) {
     char nb[12]; u_itoa(serves, nb);
-    s_cat(sub, " - served ", sm); s_cat(sub, nb, sm); s_cat(sub, "x", sm);
+    s_cat(sub, " · served ", sm); s_cat(sub, nb, sm); s_cat(sub, "x", sm);
   }
 
   /* Cache it. Reuse this folder's slot if it has one, else append; when the
@@ -603,6 +609,118 @@ static void render_list(void) {
   changed_send(g_out, &g_list_hash);
 }
 
+/* ── the dashboard: what this device holds and gives ─────────────────────────
+ *
+ * Four numbers over the list, so opening the wapp answers the questions a
+ * file-sharer actually has — what am I sharing, what am I seeding, how big is
+ * the library, is anyone taking from it — before a single row is read.
+ *
+ * The walk (owned + subs, one hal_folder_stats each) costs a HAL round trip per
+ * torrent, so it runs every ~30s and immediately after anything that changes
+ * the numbers (pin, rescan, edit — stats_cache_clear sets g_dash_dirty). */
+static void render_dash(void) {
+  g_dash_at = g_tick;
+  g_dash_dirty = 0;
+
+  unsigned owned = 0, pinned = 0, following = 0;
+  unsigned files = 0, serves = 0, serves7d = 0;
+  unsigned bytes_mb = 0; /* sum in MB so >4GB libraries don't wrap 32 bits */
+
+  char ids[48][80];
+  unsigned nids = 0;
+  char slice[1200];
+
+  /* Owned folders. */
+  uint32_t n = hal_folder_owned(g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+  const char *p = next_obj(g_json, slice, sizeof(slice));
+  while (p) {
+    char fid[80];
+    jstr(slice, "folderId", fid, sizeof(fid));
+    if (fid[0] && nids < 48) {
+      owned++;
+      s_cpy(ids[nids++], fid, sizeof(ids[0]));
+    }
+    p = next_obj(p, slice, sizeof(slice));
+  }
+
+  /* Followed folders (a pin is a follow with autoSync). */
+  n = hal_folder_subs(g_json, sizeof(g_json) - 1);
+  g_json[n] = 0;
+  p = next_obj(g_json, slice, sizeof(slice));
+  while (p) {
+    char fid[80];
+    jstr(slice, "folderId", fid, sizeof(fid));
+    if (fid[0]) {
+      int dup = 0;
+      for (unsigned i = 0; i < nids; i++) {
+        if (s_eq(ids[i], fid)) { dup = 1; break; }
+      }
+      if (!dup) {
+        if (jbool_def(slice, "autoSync", 0)) pinned++;
+        else following++;
+        if (nids < 48) s_cpy(ids[nids++], fid, sizeof(ids[0]));
+      }
+    }
+    p = next_obj(p, slice, sizeof(slice));
+  }
+
+  /* One stats pass over everything this device touches. */
+  for (unsigned i = 0; i < nids; i++) {
+    char st[4096];
+    uint32_t sn = hal_folder_stats(ids[i], s_len(ids[i]), st, sizeof(st) - 1);
+    st[sn] = 0;
+    files += (unsigned)jnum(st, "fileCount");
+    bytes_mb += (unsigned)jnum(st, "totalBytes") / (1024u * 1024u);
+    serves += (unsigned)jnum(st, "serves");
+    serves7d += (unsigned)jnum(st, "last7d");
+  }
+
+  char m[2048] = "{\"type\":\"ui.stats.set\",\"field\":\"dash\",\"tiles\":[";
+  char nb[16];
+
+  s_cat(m, "{\"id\":\"mine\",\"label\":\"Sharing\",\"value\":\"", sizeof(m));
+  u_itoa(owned, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, "\",\"hint\":\"folders you publish\",\"tap\":true},", sizeof(m));
+
+  s_cat(m, "{\"id\":\"seed\",\"label\":\"Seeding\",\"value\":\"", sizeof(m));
+  u_itoa(pinned, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, "\",\"hint\":\"", sizeof(m));
+  if (following) {
+    s_cat(m, "pinned copies · following ", sizeof(m));
+    u_itoa(following, nb); s_cat(m, nb, sizeof(m));
+    s_cat(m, " more", sizeof(m));
+  } else {
+    s_cat(m, "pinned full copies", sizeof(m));
+  }
+  s_cat(m, "\"},", sizeof(m));
+
+  s_cat(m, "{\"id\":\"lib\",\"label\":\"Library\",\"value\":\"", sizeof(m));
+  if (bytes_mb >= 1024u) {
+    u_itoa(bytes_mb / 1024u, nb); s_cat(m, nb, sizeof(m));
+    s_cat(m, "\",\"unit\":\"GB\"", sizeof(m));
+  } else {
+    u_itoa(bytes_mb, nb); s_cat(m, nb, sizeof(m));
+    s_cat(m, "\",\"unit\":\"MB\"", sizeof(m));
+  }
+  s_cat(m, ",\"hint\":\"", sizeof(m));
+  u_itoa(files, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, files == 1 ? " file across " : " files across ", sizeof(m));
+  u_itoa(nids, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, nids == 1 ? " torrent" : " torrents", sizeof(m));
+  s_cat(m, "\"},", sizeof(m));
+
+  s_cat(m, "{\"id\":\"served\",\"label\":\"Served\",\"value\":\"", sizeof(m));
+  u_itoa(serves, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, "\",\"unit\":\"files\",\"hint\":\"", sizeof(m));
+  u_itoa(serves7d, nb); s_cat(m, nb, sizeof(m));
+  s_cat(m, " in the last 7 days — downloads others took from this device",
+        sizeof(m));
+  s_cat(m, "\"}]}", sizeof(m));
+
+  changed_send(m, &g_dash_hash);
+}
+
 /* A human label for a fixed category id. */
 static const char *cat_label(const char *c) {
   if (s_eq(c, "film")) return "Film";
@@ -625,10 +743,18 @@ static const char *cat_label(const char *c) {
   return c;
 }
 
-/* The Search panel's results feed. With no query and no category, it lists the
- * non-empty categories (tap one to browse it); otherwise it lists matching
- * torrents, sorted by the host (seeders / recently updated / size). Everything
- * is host-side and generic (hal_folder_search); the wapp only lays it out. */
+/* The Search panel's results feed — the WHOLE network's, not this device's.
+ *
+ * hal_folder_search_global merges the local index with a mesh fan-out: every
+ * published listing is already replicated to the indexer mesh as a signed
+ * event, and a serve-node answers a full-text query against everything it
+ * holds. The fan-out takes seconds, so the HAL answers from its snapshot and
+ * says `busy` — the tick re-renders until the mesh has finished answering,
+ * and rows fill in as they arrive.
+ *
+ * With no query and no category, it lists the non-empty categories (tap one
+ * to browse); otherwise the matching torrents. Everything is host-side and
+ * generic; the wapp only lays it out. */
 static void render_search(void) {
   char q[240] = "{\"q\":\"";
   jesc(q, sizeof(q), g_srch_q);
@@ -638,8 +764,9 @@ static void render_search(void) {
   jesc(q, sizeof(q), g_srch_sort);
   s_cat(q, "\"}", sizeof(q));
 
-  uint32_t n = hal_folder_search(q, s_len(q), g_json, sizeof(g_json) - 1);
+  uint32_t n = hal_folder_search_global(q, s_len(q), g_json, sizeof(g_json) - 1);
   g_json[n] = 0;
+  g_srch_busy = jbool_def(g_json, "busy", 0);
 
   const int browsing = (!g_srch_q[0] && !g_srch_cat[0]);
   char slice[1200];
@@ -648,7 +775,8 @@ static void render_search(void) {
 
   if (browsing) {
     /* {"cats":[{"cat":"film","count":12}]} */
-    section_open("Browse categories");
+    section_open(g_srch_busy ? "Browse categories  ·  asking the network…"
+                             : "Browse categories");
     const char *c = g_json;
     while (*c && !s_pre(c, "\"cats\":[")) c++;
     if (*c) {
@@ -677,8 +805,12 @@ static void render_search(void) {
     } else {
       s_cpy(head, "Results", sizeof(head));
     }
-    s_cat(head, "  ·  by ", sizeof(head));
-    s_cat(head, g_srch_sort, sizeof(head));
+    if (g_srch_busy) {
+      s_cat(head, "  ·  asking the network…", sizeof(head));
+    } else {
+      s_cat(head, "  ·  by ", sizeof(head));
+      s_cat(head, g_srch_sort, sizeof(head));
+    }
     section_open(head);
 
     /* Skip the "cats" array so its objects are not read as results, then walk
@@ -689,20 +821,28 @@ static void render_search(void) {
       const char *p = next_obj(r, slice, sizeof(slice));
       int any = 0;
       while (p) {
-        char fid[80], title[160], cat[24], avatar[120];
+        char fid[80], title[160], cat[24], avatar[120], where[12];
         jstr(slice, "folderId", fid, sizeof(fid));
         jstr(slice, "title", title, sizeof(title));
         jstr(slice, "cat", cat, sizeof(cat));
         jstr(slice, "icon", avatar, sizeof(avatar));
+        jstr(slice, "where", where, sizeof(where));
         unsigned seeders = (unsigned)jnum(slice, "seeders");
         unsigned size = (unsigned)jnum(slice, "size");
         if (fid[0]) {
           any = 1;
-          char sub[120] = "";
-          { char nb[12]; u_itoa(seeders, nb); s_cat(sub, nb, sizeof(sub)); }
-          s_cat(sub, seeders == 1 ? " seeder" : " seeders", sizeof(sub));
-          if (size) { char fs[24]; fmt_size(size, fs, sizeof(fs));
-            s_cat(sub, "  ·  ", sizeof(sub)); s_cat(sub, fs, sizeof(sub)); }
+          char sub[140] = "";
+          if (s_eq(where, "mesh")) {
+            /* A listing only the network knows: seeders/size are unknown
+             * until it is opened, so say where it came from instead of
+             * quoting zeros that read as "dead torrent". */
+            s_cat(sub, "on the network", sizeof(sub));
+          } else {
+            { char nb[12]; u_itoa(seeders, nb); s_cat(sub, nb, sizeof(sub)); }
+            s_cat(sub, seeders == 1 ? " seeder" : " seeders", sizeof(sub));
+            if (size) { char fs[24]; fmt_size(size, fs, sizeof(fs));
+              s_cat(sub, "  ·  ", sizeof(sub)); s_cat(sub, fs, sizeof(sub)); }
+          }
           if (cat[0]) { s_cat(sub, "  ·  ", sizeof(sub));
             s_cat(sub, cat_label(cat), sizeof(sub)); }
           char rid[90] = "t:";
@@ -711,7 +851,7 @@ static void render_search(void) {
         }
         p = next_obj(p, slice, sizeof(slice));
       }
-      if (!any) section_open("No torrents match");
+      if (!any && !g_srch_busy) section_open("No torrents match");
     }
   }
 
@@ -1150,7 +1290,8 @@ static void prompt_manage(void) {
   s_cat(m, pinned ? "{\"label\":\"Unpin\",\"value\":\"unpin\"},"
                   : "{\"label\":\"Pin (keep + seed)\",\"value\":\"pin\"},",
         sizeof(m));
-  s_cat(m, "{\"label\":\"Copy link\",\"value\":\"link\"},"
+  s_cat(m, "{\"label\":\"Open folder\",\"value\":\"opendir\"},"
+           "{\"label\":\"Copy link\",\"value\":\"link\"},"
            "{\"label\":\"Rescan\",\"value\":\"rescan\"},"
            "{\"label\":\"Remove\",\"value\":\"remove\"}],"
            "\"confirm\":\"Cancel\"}", sizeof(m));
@@ -1315,7 +1456,12 @@ void module_init(void) {
    * time — which is exactly the 300ms stall this check removed. Seeding, which
    * is the reason this wapp runs in the background at all, is host-side and
    * needs no render. */
-  if (hal_ui_attached()) { render_list(); render_search(); render_settings(); }
+  if (hal_ui_attached()) {
+    render_dash();
+    render_list();
+    render_search();
+    render_settings();
+  }
   hal_log(1, "torrents: ready", 15);
 }
 
@@ -1329,6 +1475,15 @@ void module_tick(void) {
    * (docs/performance.md: "what does this cost per hour with the screen off,
    * and who is awake to see the result?") */
   if (g_tick % 6 == 0 && hal_ui_attached()) render_current();
+
+  /* The dashboard walks every torrent, so it refreshes on its own slower
+   * cadence — and promptly after anything that moved the numbers. */
+  if (hal_ui_attached() &&
+      (g_dash_dirty || g_tick - g_dash_at >= 30)) render_dash();
+
+  /* A mesh search is filling in: poll the snapshot until the fan-out lands.
+   * Diffed, so the quiet polls cost one HAL read and no UI rebuild. */
+  if (g_srch_busy && g_tick % 2 == 0 && hal_ui_attached()) render_search();
 
   /* Republish what changed on disk, so a torrent shared from a directory tracks
    * the directory. The host diffs it against the signed op-log and only writes
@@ -1483,6 +1638,9 @@ void module_handle_event(void) {
         hal_folder_pin(fid, s_len(fid), 0);
         stats_cache_clear();
         notify("info", "Unpinned: no longer keeping this in sync");
+      } else if (s_eq(val, "opendir")) {
+        if (!hal_folder_opendir(fid, s_len(fid)))
+          notify("info", "No local copy on disk yet - pin or download it first");
       } else if (s_eq(val, "link")) {
         do_copy_link();
       } else if (s_eq(val, "rescan")) {
@@ -1592,6 +1750,15 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "flt_mine")) {
     g_filter = 1;
     render_list();
+  } else if (s_eq(cmd, "dash_tap")) {
+    /* The Sharing tile filters the list to the folders this device publishes —
+     * the number and the list it counts should be one tap apart. */
+    char id[24] = "";
+    jstr(buf, "dash_id", id, sizeof(id));
+    if (s_eq(id, "mine")) {
+      g_filter = 1;
+      render_list();
+    }
   } else if (s_eq(cmd, "lib_newfolder")) {
     prompt_input("newfolder", "New folder", "folder name", 60);
   } else if (s_eq(cmd, "listing_move")) {
@@ -1643,6 +1810,12 @@ void module_handle_event(void) {
       const char *m = "{\"type\":\"ui.screen.close\"}";
       hal_msg_send(m, s_len(m));
     }
+  } else if (s_eq(cmd, "listing_opendir")) {
+    /* The shared folder as the OS sees it — for an owned torrent that is the
+     * directory being published; for a pinned one, its materialized copy. */
+    if (!g_cur[0]) { notify("info", "Open a torrent first"); return; }
+    if (!hal_folder_opendir(g_cur, s_len(g_cur)))
+      notify("info", "No local copy on disk yet - pin or download it first");
   } else if (s_eq(cmd, "listing_popularity")) {
     show_popularity();
   } else if (s_eq(cmd, "listing_updates")) {
@@ -1653,9 +1826,11 @@ void module_handle_event(void) {
     g_srch_cat[0] = 0;
     render_search();
   } else if (s_eq(cmd, "srch_cats")) {
-    /* back to the category browser */
+    /* back to the category browser — clear the host's search box too, or the
+     * old query sits there contradicting the category list below it */
     g_srch_q[0] = 0;
     g_srch_cat[0] = 0;
+    field_set("results_query", "");
     render_search();
   } else if (s_eq(cmd, "srch_sort")) {
     /* cycle seeders -> updated -> size */

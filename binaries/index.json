@@ -93,6 +93,10 @@
   {"file":"chat/chat-0.2.97.wapp","id":"tools.geogram.chat","version":"0.2.97","size":178489,"title":"Chat","description":"Chat - messaging, live map and beacons over the APRS network."},
   {"file":"chat/chat-0.2.98.wapp","id":"tools.geogram.chat","version":"0.2.98","size":177989,"title":"Chat","description":"Chat - messaging, live map and beacons over the APRS network."},
   {"file":"chat/chat-0.2.99.wapp","id":"tools.geogram.chat","version":"0.2.99","size":178201,"title":"Chat","description":"Chat - messaging, live map and beacons over the APRS network."},
+  {"file":"chat/chat-0.3.0.wapp","id":"tools.geogram.chat","version":"0.3.0","size":216365,"title":"Chat","description":"Chat - encrypted messaging, live map and beacons over Reticulum, Bluetooth mesh and NOSTR relays (legacy APRS-IS optional)."},
+  {"file":"chat/chat-0.3.1.wapp","id":"tools.geogram.chat","version":"0.3.1","size":216588,"title":"Chat","description":"Chat - encrypted messaging, live map and beacons over Reticulum, Bluetooth mesh and NOSTR relays (legacy APRS-IS optional)."},
+  {"file":"chat/chat-0.3.2.wapp","id":"tools.geogram.chat","version":"0.3.2","size":226589,"title":"Chat","description":"Chat - encrypted messaging, live map and beacons over Reticulum, Bluetooth mesh and NOSTR relays (legacy APRS-IS optional)."},
+  {"file":"chat/chat-0.3.3.wapp","id":"tools.geogram.chat","version":"0.3.3","size":226737,"title":"Chat","description":"Chat - encrypted messaging, live map and beacons over Reticulum, Bluetooth mesh and NOSTR relays (legacy APRS-IS optional)."},
   {"file":"circles/circles-0.1.0.wapp","id":"tools.geogram.circles","version":"0.1.0","size":46172,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},
   {"file":"circles/circles-0.10.0.wapp","id":"tools.geogram.circles","version":"0.10.0","size":82551,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},
   {"file":"circles/circles-0.11.0.wapp","id":"tools.geogram.circles","version":"0.11.0","size":86688,"title":"Circles","description":"Private, encrypted group chat over Reticulum."},
@@ -271,5 +275,7 @@
   {"file":"torrents/torrents-0.5.7.wapp","id":"tools.geogram.torrents","version":"0.5.7","size":46324,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.5.8.wapp","id":"tools.geogram.torrents","version":"0.5.8","size":46577,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.5.9.wapp","id":"tools.geogram.torrents","version":"0.5.9","size":47994,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.6.0.wapp","id":"tools.geogram.torrents","version":"0.6.0","size":55208,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
+  {"file":"torrents/torrents-0.6.1.wapp","id":"tools.geogram.torrents","version":"0.6.1","size":55208,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."}
 ]
