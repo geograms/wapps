@@ -13,6 +13,42 @@
   },
   {
     "$": "screen",
+    "name": "Start a chat",
+    "menu": true,
+    "appbar": true,
+    "popup": true,
+    "icon": "person_add",
+    "tip": "Message a person: a NomadNet peer, a callsign or an npub.",
+    "children": [
+      { "$": "action", "name": "rooms_newchat", "label": "New chat", "icon": "person_add", "tip": "Find someone and start a direct conversation." }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Create a room",
+    "menu": true,
+    "appbar": true,
+    "popup": true,
+    "icon": "add",
+    "tip": "Create a room under the one you have open.",
+    "children": [
+      { "$": "action", "name": "rooms_new", "label": "New room", "icon": "add", "tip": "Create a sub-room. A moderator approves it when you are not one." }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Find",
+    "menu": true,
+    "appbar": true,
+    "popup": true,
+    "icon": "search",
+    "tip": "Search rooms, channels, conversations and people.",
+    "children": [
+      { "$": "action", "name": "rooms_search", "label": "Search", "icon": "search", "tip": "Find a room, a channel, a conversation or a person." }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Search",
     "hidden": true,
     "toolbar": true,

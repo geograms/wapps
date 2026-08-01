@@ -6487,7 +6487,14 @@ void module_handle_event(void) {
   buf[n] = 0;
 
   char cmd[40];
-  if (!jstr(buf, "command", cmd, sizeof(cmd))) return;
+  /* An app-bar / popup-menu item arrives as {type:"action",action:name} rather
+   * than {command:name}. Fold it into cmd so the handlers below fire for it —
+   * without this, every app-bar action was silently dropped. */
+  if (!jstr(buf, "command", cmd, sizeof(cmd))) {
+    char typ[24] = "";
+    jstr(buf, "type", typ, sizeof(typ));
+    if (!s_eq(typ, "action") || !jstr(buf, "action", cmd, sizeof(cmd))) return;
+  }
   if (s_eq(cmd, "connect")) do_connect(buf);
   else if (s_eq(cmd, "disconnect")) {
     g_want_connect = 0;            /* stop auto-reconnect */
