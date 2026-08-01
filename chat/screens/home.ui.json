@@ -19,7 +19,7 @@
     "search": true,
     "tip": "Find a person and start a direct conversation.",
     "children": [
-      { "$": "field", "name": "finduser", "$type": "people", "empty": "Type a name, callsign, npub, LXMF address or identity hash.\nNomadNet peers heard on the mesh appear as you type; a pasted LXMF address works even before they announce.", "tip": "Tap a person to start the conversation. NomadNet peers chat here over LXMF; Geogram people open in Messages." }
+      { "$": "field", "name": "finduser", "$type": "people", "empty": "Nobody heard yet.\nNomadNet and Geogram people appear here as their announces arrive — or paste an LXMF address to message someone straight away.", "tip": "Everyone you can message, in one list. Each row says where they are from. NomadNet peers chat here over LXMF; Geogram people open in Messages." }
     ]
   },
   {

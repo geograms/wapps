@@ -1384,6 +1384,22 @@ __attribute__((import_module("hal"), import_name("people_search")))
 int32_t hal_people_search(const char *query, uint32_t query_len,
                           char *out, uint32_t out_cap);
 
+/* Everyone this device could start a conversation with, in ONE list — LXMF
+ * peers heard on the Reticulum mesh (NomadNet, Sideband, other geogram
+ * devices) and geogram people (callsign / npub). JSON array of
+ *   {"kind":"lxmf","dest","name","callsign","identity","geogram":bool,
+ *    "hops","via","lastSeen","live":bool}
+ *   {"kind":"geogram","callsign","npub","nick","devices","live":bool}
+ * sorted live-first then newest-heard. An empty query returns everyone.
+ *
+ * NOT liveness-gated: LXMF stores and forwards, so a peer heard once is still
+ * messageable, and a hub's replayed announce table is exactly the population a
+ * NomadNet client lists. `live` reports the strict "online now" answer instead
+ * of hiding people. Returns bytes written, -1 error, -2 buffer too small. */
+__attribute__((import_module("hal"), import_name("people_directory")))
+int32_t hal_people_directory(const char *query, uint32_t query_len,
+                             char *out, uint32_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

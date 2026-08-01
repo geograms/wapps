@@ -4058,6 +4058,7 @@ static int is_hex32(const char *s) {
 }
 
 static char g_find_q[64] = "";
+static int g_find_open = 0;   /* the picker is on screen: keep it refreshed */
 static char g_find_json[16384];
 static char g_find_out[16384];
 static uint32_t g_find_hash = 0;
@@ -4065,91 +4066,92 @@ static uint32_t g_find_hash = 0;
 static void render_finduser(void) {
   char *o = g_find_out; const unsigned sz = sizeof(g_find_out);
   o[0] = 0;
-  s_cat(o, "{\"type\":\"ui.people.set\",\"field\":\"finduser\",\"sections\":[", sz);
+  /* ONE list. Splitting NomadNet and Geogram into two tabs made the user hunt
+   * for a person across tabs before knowing which network they were on — the
+   * thing they are least likely to know. Each row says where it came from
+   * instead. */
+  s_cat(o, "{\"type\":\"ui.people.set\",\"field\":\"finduser\",\"sections\":["
+           "{\"title\":\"People\",\"items\":[", sz);
 
-  /* ── NomadNet / LXMF peers heard on the mesh ── */
-  s_cat(o, "{\"title\":\"NomadNet (Reticulum mesh)\",\"items\":[", sz);
-  char flt[120] = "{\"service\":\"lxmf\",\"search\":\"";
-  jesc(flt, sizeof(flt), g_find_q);
-  s_cat(flt, "\"}", sizeof(flt));
-  int32_t n = hal_rns_nodes(flt, s_len(flt), g_find_json, sizeof(g_find_json) - 1);
+  int32_t n = hal_people_directory(g_find_q, s_len(g_find_q),
+                                   g_find_json, sizeof(g_find_json) - 1);
   if (n < 0) n = 0;
   g_find_json[n] = 0;
+
   int first = 1, matched_direct = 0;
-  /* Walk the "nodes" array only (edges follow). */
-  const char *nd = g_find_json;
-  while (*nd && !s_pre(nd, "\"nodes\":[")) nd++;
-  const char *endp = nd;
-  { int depth = 0; const char *p = nd;
-    for (; *p; p++) { if (*p == '[') depth++; else if (*p == ']' && --depth == 0) { endp = p; break; } } }
-  char slice[1600];
-  const char *p = *nd ? fnd_next_obj(nd, slice, sizeof(slice)) : 0;
-  while (p && p <= endp) {
-    char dest[70], name[40], call[24], idhex[70];
-    jstr(slice, "lxmfDest", dest, sizeof(dest));
+  char slice[1200];
+  const char *p = fnd_next_obj(g_find_json, slice, sizeof(slice));
+  while (p) {
+    char kind[16], dest[70], name[40], call[24], npub[80], nick[40], via[16];
+    jstr(slice, "kind", kind, sizeof(kind));
+    jstr(slice, "dest", dest, sizeof(dest));
     jstr(slice, "name", name, sizeof(name));
     jstr(slice, "callsign", call, sizeof(call));
-    jstr(slice, "id", idhex, sizeof(idhex));
-    if (dest[0] && !s_eq(idhex, "self")) {
+    jstr(slice, "npub", npub, sizeof(npub));
+    jstr(slice, "nick", nick, sizeof(nick));
+    jstr(slice, "via", via, sizeof(via));
+    int live = jbool(slice, "live");
+    int hops = jint(slice, "hops");
+
+    if (s_eq(kind, "lxmf") && dest[0]) {
       if (g_find_q[0] && s_eq(dest, g_find_q)) matched_direct = 1;
       const char *disp = name[0] ? name : (call[0] ? call : 0);
       if (!first) s_cat(o, ",", sz);
       first = 0;
+      /* Field separator: , NOT \t. jstr() copies an unknown escape's
+       * letter verbatim, so a "\t" separator arrived as the letter 't' and
+       * welded the name onto the address. */
       s_cat(o, "{\"id\":\"lx:", sz); jesc(o, sz, dest);
-      s_cat(o, "\\t", sz); if (disp) jesc(o, sz, disp);
+      s_cat(o, "\\u001f", sz); if (disp) jesc(o, sz, disp);
       s_cat(o, "\",\"title\":\"", sz);
       if (disp) jesc(o, sz, disp);
       else { s_cat(o, "LXMF ", sz); char sh[9]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); }
-      s_cat(o, "\",\"subtitle\":\"NomadNet - ", sz);
-      { char sh[17]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
+      /* Where they are from + how we reach them. */
+      s_cat(o, "\",\"subtitle\":\"", sz);
+      s_cat(o, jbool(slice, "geogram") ? "Geogram device" : "NomadNet", sz);
+      s_cat(o, live ? " - online now" : " - seen earlier", sz);
+      if (hops > 0) {
+        char nb[12]; u_itoa((unsigned)hops, nb);
+        s_cat(o, " - ", sz); s_cat(o, nb, sz);
+        s_cat(o, hops == 1 ? " hop" : " hops", sz);
+      }
+      if (via[0]) { s_cat(o, " via ", sz); jesc(o, sz, via); }
+      s_cat(o, " - ", sz);
+      { char sh[13]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
       s_cat(o, "\",\"icon\":\"person\"}", sz);
+    } else if (s_eq(kind, "geogram")) {
+      const char *target = call[0] ? call : npub;
+      if (target[0]) {
+        if (!first) s_cat(o, ",", sz);
+        first = 0;
+        s_cat(o, "{\"id\":\"np:", sz); jesc(o, sz, target);
+        s_cat(o, "\",\"title\":\"", sz);
+        jesc(o, sz, call[0] ? call : npub);
+        if (nick[0]) { s_cat(o, " - ", sz); jesc(o, sz, nick); }
+        s_cat(o, "\",\"subtitle\":\"Geogram", sz);
+        s_cat(o, live ? " - online now" : "", sz);
+        { int devices = jint(slice, "devices");
+          if (devices > 0) { char nb[12]; u_itoa((unsigned)devices, nb);
+            s_cat(o, " - ", sz); s_cat(o, nb, sz);
+            s_cat(o, devices == 1 ? " device" : " devices", sz); } }
+        s_cat(o, " - opens in Messages\",\"icon\":\"person\"}", sz);
+      }
     }
     p = fnd_next_obj(p, slice, sizeof(slice));
   }
+
   /* A pasted 32-hex LXMF address nobody has announced yet is still valid —
    * LXMF stores-and-forwards, so the message waits for them. */
   if (is_hex32(g_find_q) && !matched_direct) {
     if (!first) s_cat(o, ",", sz);
     first = 0;
     s_cat(o, "{\"id\":\"lx:", sz); s_cat(o, g_find_q, sz);
-    s_cat(o, "\\t\",\"title\":\"Message ", sz);
+    s_cat(o, "\\u001f\",\"title\":\"Message ", sz);
     { char sh[9]; s_cpy(sh, g_find_q, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
-    s_cat(o, "\",\"subtitle\":\"LXMF address (not heard yet - delivery waits for them)\","
+    s_cat(o, "\",\"subtitle\":\"LXMF address - not heard yet, delivery waits for them\","
              "\"icon\":\"person_add\"}", sz);
   }
-  s_cat(o, "]}", sz);
 
-  /* ── Geogram / NOSTR people (live in the Messages wapp) ── */
-  s_cat(o, ",{\"title\":\"Geogram (callsign / npub - opens in Messages)\",\"items\":[", sz);
-  first = 1;
-  if (g_find_q[0]) {
-    n = hal_people_search(g_find_q, s_len(g_find_q), g_find_json, sizeof(g_find_json) - 1);
-    if (n < 0) n = 0;
-    g_find_json[n] = 0;
-    const char *q2 = fnd_next_obj(g_find_json, slice, sizeof(slice));
-    while (q2) {
-      char callsign[24], nick[40], npub[80];
-      jstr(slice, "callsign", callsign, sizeof(callsign));
-      jstr(slice, "nick", nick, sizeof(nick));
-      jstr(slice, "npub", npub, sizeof(npub));
-      int devices = jint(slice, "devices");
-      const char *target = callsign[0] ? callsign : npub;
-      if (target[0]) {
-        if (!first) s_cat(o, ",", sz);
-        first = 0;
-        s_cat(o, "{\"id\":\"np:", sz); jesc(o, sz, target);
-        s_cat(o, "\",\"title\":\"", sz);
-        jesc(o, sz, callsign[0] ? callsign : npub);
-        if (nick[0]) { s_cat(o, " - ", sz); jesc(o, sz, nick); }
-        s_cat(o, "\",\"subtitle\":\"", sz);
-        if (jbool(slice, "online")) s_cat(o, "online - ", sz);
-        { char nb[12]; u_itoa((unsigned)(devices > 0 ? devices : 0), nb);
-          s_cat(o, nb, sz); s_cat(o, devices == 1 ? " device" : " devices", sz); }
-        s_cat(o, "\",\"icon\":\"person\"}", sz);
-      }
-      q2 = fnd_next_obj(q2, slice, sizeof(slice));
-    }
-  }
   s_cat(o, "]}]}", sz);
   fnd_changed_send(o, &g_find_hash);
 }
@@ -4157,6 +4159,7 @@ static void render_finduser(void) {
 static void do_rooms_newchat(void) {
   g_find_q[0] = 0;
   fnd_field_set("finduser_query", "");
+  g_find_open = 1;   /* keep refreshing: announces arrive while it is on screen */
   render_finduser();
   const char *m = "{\"type\":\"ui.screen.open\",\"name\":\"New chat\"}";
   hal_msg_send(m, s_len(m));
@@ -4166,16 +4169,19 @@ static void do_finduser_tap(const char *buf) {
   char id[140] = "";
   jstr(buf, "finduser_id", id, sizeof(id));
   if (s_pre(id, "lx:")) {
-    /* "lx:<dest>\t<name>" — start (or reopen) the LXMF conversation. */
+    /* "lx:<dest><0x1f><name>" — start (or reopen) the LXMF conversation. */
     char dest[70] = "", name[40] = "";
     const char *r = id + 3; unsigned i = 0;
-    while (*r && *r != '\t' && i < sizeof(dest) - 1) dest[i++] = *r++;
+    while (*r && *r != 0x1f && i < sizeof(dest) - 1) dest[i++] = *r++;
     dest[i] = 0;
-    if (*r == '\t') r++;
+    if (*r == 0x1f) r++;
     i = 0;
     while (*r && i < sizeof(name) - 1) name[i++] = *r++;
     name[i] = 0;
-    if (!dest[0]) return;
+    /* A conversation id is exactly "lxmf:" + 32 hex. Anything else is a
+     * parsing accident, and one such row poisons the rail and the saved
+     * subscription list — refuse it here rather than persist it. */
+    if (!is_hex32(dest)) return;
     if (name[0]) lxname_set(dest, name);
     char cid[72] = "lxmf:";
     s_cat(cid, dest, sizeof(cid));
@@ -4423,6 +4429,18 @@ static void groups_load(void) {
      * shows in the Messages list on every page open, not only the g/ filter. */
     if (ch == ';') {
       id[j] = 0;
+      /* Drop malformed lxmf rows written by an earlier build (the separator
+       * bug welded the peer's name onto the address). They are unopenable and
+       * un-messageable; removing the row also removes its phantom unread. */
+      if (is_lxmf(id) && !is_hex32(id + 5)) {
+        const char *rm = "{\"type\":\"ui.convo.remove\",\"id\":\"";
+        char m[160]; s_cpy(m, rm, sizeof(m));
+        jesc(m, sizeof(m), id);
+        s_cat(m, "\"}", sizeof(m));
+        hal_msg_send(m, s_len(m));
+        j = 0;
+        continue;
+      }
       if (id[0] == '#' || is_lxmf(id)) convo_ensure(id);
       j = 0;
     }
@@ -5759,6 +5777,16 @@ void module_tick(void) {
    * scan/advertise state, drain inbound frames, and beacon our position. */
   ble_reconcile();
   push_status();   /* refresh APRS-IS / BLE indicators (only on change) */
+
+  /* The people picker is open: announces keep arriving (a hub replays its
+   * whole cached table over the first minutes of a link), so re-render on a
+   * slow cadence. Diffed, so a quiet poll costs one HAL read and no rebuild. */
+  {
+    static unsigned find_tick = 0;
+    if (g_find_open && (++find_tick % 4) == 0 && hal_ui_attached()) {
+      render_finduser();
+    }
+  }
 
   /* Flush any digipeat rebroadcasts whose staggered delay is now due. */
   rq_flush(hal_time_epoch());
