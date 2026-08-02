@@ -1,5 +1,5 @@
 /*
- * messages — one inbox.
+ * mail — one inbox.
  *
  * Merges the messaging that used to live twice: in the Chat wapp (callsign-keyed,
  * its own ECDH+AES envelope, riding APRS/BLE/Reticulum) and in the Social wapp
@@ -15,7 +15,7 @@
  * you are in, and a second tab listing the same people you can already see is
  * noise. (Status lives in the overflow menu, not as a tab.)
  *
- *   Messages  ($type:"conversations")  per-peer encrypted threads
+ *   Mail      ($type:"conversations")  per-peer encrypted threads
  *   Status    ($type:"log", menu)      where messages went, and what came back
  *
  * TWO LANES, ONE MESSAGE
@@ -49,7 +49,7 @@
  *
  * All crypto is host-side — the nsec never enters this sandbox.
  *
- * Build: cd wapps/messages && WASI_SDK_PATH=~/wasi-sdk make
+ * Build: cd wapps/mail && WASI_SDK_PATH=~/wasi-sdk make
  */
 #include "../hal/geogram_wasm_hal.h"
 
@@ -338,6 +338,8 @@ static int key_to_hex(const char *in, char *out, unsigned m) {
 /* ── State ───────────────────────────────────────────────────────────── */
 #define SEEN_MAX 192          /* dedup ring (rmid / event id)             */
 #define PEER_MAX 64           /* known peers                              */
+#define BLOCK_MAX 64          /* blocked keys                             */
+#define CLOSED_MAX 64         /* closed (muted) conversations             */
 #define RELAY_POLL_SEC 60     /* store-and-forward pull cadence           */
 #define NAME_REFRESH_SEC 60   /* kind-0 name lookups: cosmetic, so throttle */
 
@@ -351,9 +353,20 @@ static int  g_seen_w = 0;           /* ring write cursor                  */
 
 static char g_peer[PEER_MAX][68];   /* peer pubkey (hex)                  */
 static char g_pname[PEER_MAX][40];  /* display name (kind-0), if known    */
-static char g_pcall[PEER_MAX][16];  /* callsign alias, if known           */
+static char g_pcall[PEER_MAX][48];  /* callsign or email alias, if known  */
 static int  g_peer_unread[PEER_MAX];
 static int  g_peer_n = 0;
+
+static char g_block[BLOCK_MAX][68]; /* blocked peer pubkeys (hex)         */
+static int  g_block_n = 0;
+
+static char g_closed[CLOSED_MAX][68]; /* closed (muted) peer pubkeys      */
+static int  g_closed_n = 0;
+
+static char g_email[96]  = "";      /* my email identity (Email screen)   */
+static char g_verify[96] = "";      /* address being self-verified, if any */
+static unsigned long long g_verify_t0 = 0;
+static int  g_email_shown = 0;      /* re-render once g_self is known     */
 
 static unsigned long long g_last_fetch = 0;
 static unsigned long long g_last_names = 0;
@@ -416,7 +429,7 @@ static int peer_idx(const char *hex) {
     return -1;
 }
 static void peers_save(void) {
-    char buf[PEER_MAX * 90];
+    char buf[PEER_MAX * 120];
     buf[0] = '\0';
     for (int i = 0; i < g_peer_n; i++) {
         str_cat(buf, g_peer[i], sizeof(buf));
@@ -439,23 +452,23 @@ static int peer_add(const char *hex) {
     return i;
 }
 static void peers_load(void) {
-    char buf[PEER_MAX * 90];
+    char buf[PEER_MAX * 120];
     unsigned n = hal_kv_get("peers", 5, buf, sizeof(buf) - 1);
     if (n == 0 || n >= sizeof(buf)) return;
     buf[n] = '\0';
-    char cur[96];
+    char cur[128];
     unsigned c = 0;
     for (unsigned i = 0; buf[i]; i++) {
         if (buf[i] == ';') {
             cur[c] = '\0';
             if (c > 0) {
-                char hex[68] = "", call[16] = "";
+                char hex[68] = "", call[48] = "";
                 unsigned j = 0;
                 for (; cur[j] && cur[j] != '=' && j < 67; j++) hex[j] = cur[j];
                 hex[j] = '\0';
                 if (cur[j] == '=') {
                     unsigned k = 0;
-                    for (unsigned q = j + 1; cur[q] && k < 15; q++) call[k++] = cur[q];
+                    for (unsigned q = j + 1; cur[q] && k < 47; q++) call[k++] = cur[q];
                     call[k] = '\0';
                 }
                 int idx = peer_add(hex);
@@ -510,26 +523,32 @@ static void convo_msg(const char *peer, const char *dir, const char *from,
     send_msg(g_msg);
 }
 
-/* Total unread, tagged with the `messages` intent — this is what lights the
- * launcher's Messages icon. The host's own conversation-store count is not
+/* Total unread, tagged with the `mail` intent — this is what lights the
+ * launcher's Mail icon. The host's own conversation-store count is not
  * intent-keyed, so without this the header icon stays dark. */
 static void unread_emit(void) {
     int total = 0;
     for (int i = 0; i < g_peer_n; i++) total += g_peer_unread[i];
     char n[16];
     u64_str((unsigned long long)total, n);
-    str_copy(g_msg, "{\"type\":\"unread\",\"intent\":\"messages\",\"count\":", sizeof(g_msg));
+    str_copy(g_msg, "{\"type\":\"unread\",\"intent\":\"mail\",\"count\":", sizeof(g_msg));
     str_cat(g_msg, n, sizeof(g_msg));
     str_cat(g_msg, "}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
-static void notify_new(const char *title, const char *body) {
-    str_copy(g_msg, "{\"type\":\"notify\",\"level\":\"info\",\"intent\":\"messages\",\"title\":\"", sizeof(g_msg));
+/* One tag PER MESSAGE (the envelope id / event id), namespaced "mail:". A
+ * constant tag collapsed every mail into one notification row AND suppressed
+ * the 2nd..Nth mail of a session (the host announces a tag once, ever —
+ * persisted across restarts). */
+static void notify_new(const char *title, const char *body, const char *key) {
+    str_copy(g_msg, "{\"type\":\"notify\",\"level\":\"info\",\"intent\":\"mail\",\"title\":\"", sizeof(g_msg));
     json_escape_cat(g_msg, title, sizeof(g_msg));
     str_cat(g_msg, "\",\"body\":\"", sizeof(g_msg));
     json_escape_cat(g_msg, body, sizeof(g_msg));
-    str_cat(g_msg, "\",\"tag\":\"msg\"}", sizeof(g_msg));
+    str_cat(g_msg, "\",\"tag\":\"mail:", sizeof(g_msg));
+    json_escape_cat(g_msg, key, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
@@ -537,6 +556,266 @@ static void status_line(const char *s) {
     str_copy(g_msg, "{\"type\":\"ui.log.append\",\"field\":\"status\",\"line\":\"", sizeof(g_msg));
     json_escape_cat(g_msg, s, sizeof(g_msg));
     str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
+/* ── Block list ──────────────────────────────────────────────────────────
+ * An inbox that anyone can write to needs a way to say NO: a spammer knows
+ * your key, so the only defence is to drop what arrives from theirs.
+ *
+ * Blocking is keyed on the peer's 64-char hex PUBKEY, never on the display
+ * name — the name is a nickname (kind-0) or a truncated key, and both are
+ * things a spammer picks. It is purely local: nothing is transmitted, so the
+ * sender is not told, and there is no list to leak.
+ *
+ * Persisted in KV "blocked" (";"-joined) so it survives restarts — a block
+ * that forgets itself on reboot is not a block. */
+static int is_blocked(const char *hex) {
+    if (!hex[0]) return 0;
+    for (int i = 0; i < g_block_n; i++) if (str_eq(g_block[i], hex)) return 1;
+    return 0;
+}
+static void block_save(void) {
+    char buf[BLOCK_MAX * 70];
+    buf[0] = '\0';
+    for (int i = 0; i < g_block_n; i++) {
+        str_cat(buf, g_block[i], sizeof(buf));
+        str_cat(buf, ";", sizeof(buf));
+    }
+    hal_kv_set("blocked", 7, buf, str_len(buf));
+}
+static void block_load(void) {
+    char buf[BLOCK_MAX * 70];
+    unsigned n = hal_kv_get("blocked", 7, buf, sizeof(buf) - 1);
+    if (n == 0 || n >= sizeof(buf)) return;
+    buf[n] = '\0';
+    char cur[68];
+    unsigned c = 0;
+    for (unsigned i = 0; buf[i]; i++) {
+        if (buf[i] == ';') {
+            cur[c] = '\0';
+            if (c > 0 && g_block_n < BLOCK_MAX && !is_blocked(cur)) {
+                str_copy(g_block[g_block_n], cur, sizeof(g_block[0]));
+                g_block_n++;
+            }
+            c = 0;
+        } else if (c < sizeof(cur) - 1) {
+            cur[c++] = buf[i];
+        }
+    }
+}
+static int block_add(const char *hex) {
+    if (!is_hex64(hex) || is_blocked(hex)) return 0;
+    if (str_eq(hex, g_self)) return 0;        /* blocking yourself is a bug */
+    if (g_block_n >= BLOCK_MAX) {
+        status_line("block list is full");
+        return 0;
+    }
+    str_copy(g_block[g_block_n++], hex, sizeof(g_block[0]));
+    block_save();
+    return 1;
+}
+static int block_remove(const char *hex) {
+    for (int i = 0; i < g_block_n; i++) {
+        if (!str_eq(g_block[i], hex)) continue;
+        for (int k = i; k < g_block_n - 1; k++)
+            str_copy(g_block[k], g_block[k + 1], sizeof(g_block[0]));
+        g_block_n--;
+        block_save();
+        return 1;
+    }
+    return 0;
+}
+
+/* ── Closed list ─────────────────────────────────────────────────────────
+ * Close = mute. Softer than a block: the conversation disappears and new
+ * incoming messages are dropped WITHOUT a notification (a closed spammer must
+ * stay invisible), but the peer is not on the block list and the user
+ * re-engaging — opening the thread, writing to them, or a New message to
+ * their key — quietly uncloses it. Persisted in KV "closed" like "blocked". */
+static int is_closed(const char *hex) {
+    if (!hex[0]) return 0;
+    for (int i = 0; i < g_closed_n; i++) if (str_eq(g_closed[i], hex)) return 1;
+    return 0;
+}
+static void closed_save(void) {
+    char buf[CLOSED_MAX * 70];
+    buf[0] = '\0';
+    for (int i = 0; i < g_closed_n; i++) {
+        str_cat(buf, g_closed[i], sizeof(buf));
+        str_cat(buf, ";", sizeof(buf));
+    }
+    hal_kv_set("closed", 6, buf, str_len(buf));
+}
+static void closed_load(void) {
+    char buf[CLOSED_MAX * 70];
+    unsigned n = hal_kv_get("closed", 6, buf, sizeof(buf) - 1);
+    if (n == 0 || n >= sizeof(buf)) return;
+    buf[n] = '\0';
+    char cur[68];
+    unsigned c = 0;
+    for (unsigned i = 0; buf[i]; i++) {
+        if (buf[i] == ';') {
+            cur[c] = '\0';
+            if (c > 0 && g_closed_n < CLOSED_MAX && !is_closed(cur)) {
+                str_copy(g_closed[g_closed_n], cur, sizeof(g_closed[0]));
+                g_closed_n++;
+            }
+            c = 0;
+        } else if (c < sizeof(cur) - 1) {
+            cur[c++] = buf[i];
+        }
+    }
+}
+static void closed_add(const char *hex) {
+    if (!is_hex64(hex) || is_closed(hex)) return;
+    if (g_closed_n >= CLOSED_MAX) {
+        /* Full: forget the oldest close rather than refusing the newest. */
+        for (int k = 0; k < g_closed_n - 1; k++)
+            str_copy(g_closed[k], g_closed[k + 1], sizeof(g_closed[0]));
+        g_closed_n--;
+    }
+    str_copy(g_closed[g_closed_n++], hex, sizeof(g_closed[0]));
+    closed_save();
+}
+/* Re-engagement: drop the peer from the closed list and tell the host store
+ * (which persisted closed:true) that the conversation is live again. */
+static void unclose(const char *hex) {
+    for (int i = 0; i < g_closed_n; i++) {
+        if (!str_eq(g_closed[i], hex)) continue;
+        for (int k = i; k < g_closed_n - 1; k++)
+            str_copy(g_closed[k], g_closed[k + 1], sizeof(g_closed[0]));
+        g_closed_n--;
+        closed_save();
+        str_copy(g_msg, "{\"type\":\"ui.convo.upsert\",\"id\":\"", sizeof(g_msg));
+        json_escape_cat(g_msg, hex, sizeof(g_msg));
+        str_cat(g_msg, "\",\"closed\":false}", sizeof(g_msg));
+        send_msg(g_msg);
+        return;
+    }
+}
+
+/* The Blocked screen: a plain list, rebuilt from scratch each time so an
+ * unblock is visible immediately. */
+static void blocked_render(void) {
+    send_msg("{\"type\":\"ui.log.clear\",\"field\":\"blocked\"}");
+    if (g_block_n == 0) {
+        str_copy(g_msg, "{\"type\":\"ui.log.append\",\"field\":\"blocked\","
+                        "\"line\":\"nobody is blocked\"}", sizeof(g_msg));
+        send_msg(g_msg);
+        return;
+    }
+    for (int i = 0; i < g_block_n; i++) {
+        /* name + the FULL key: the key is the thing you would paste back into
+         * "Block a key", so truncating it makes the list decorative. */
+        char line[128], name[40];
+        int p = peer_idx(g_block[i]);
+        peer_title(p, name, sizeof(name));
+        line[0] = '\0';
+        if (name[0] && !str_eq(name, g_block[i])) {
+            str_cat(line, name, sizeof(line));
+            str_cat(line, "  ", sizeof(line));
+        }
+        str_cat(line, g_block[i], sizeof(line));
+        str_copy(g_msg, "{\"type\":\"ui.log.append\",\"field\":\"blocked\",\"line\":\"", sizeof(g_msg));
+        json_escape_cat(g_msg, line, sizeof(g_msg));
+        str_cat(g_msg, "\"}", sizeof(g_msg));
+        send_msg(g_msg);
+    }
+}
+
+/* ── Email identity (the Email screen) ─────────────────────────────────
+ * The user's email address is only a public POINTER to this device's key:
+ * valid when the domain's /.well-known/nostr.json lists our key under the
+ * local part (NIP-05). Verification runs through the SAME resolver senders
+ * use (hal_relay_resolve on an '@' target), so "verified" here means
+ * "anyone resolving this address reaches this device". */
+static void email_line(const char *s) {
+    str_copy(g_msg, "{\"type\":\"ui.log.append\",\"field\":\"email_status\",\"line\":\"",
+             sizeof(g_msg));
+    json_escape_cat(g_msg, s, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+static void email_render(void) {
+    send_msg("{\"type\":\"ui.log.clear\",\"field\":\"email_status\"}");
+    char line[192];
+    str_copy(line, "address: ", sizeof(line));
+    str_cat(line, g_email[0] ? g_email : "(not set)", sizeof(line));
+    email_line(line);
+    if (g_self[0]) {
+        email_line("your key — list it under your name in the domain's "
+                   "/.well-known/nostr.json:");
+        email_line(g_self);
+    }
+    if (g_email[0]) email_line("tap Verify to check the listing and routing");
+}
+static void email_load(void) {
+    unsigned n = hal_kv_get("email", 5, g_email, sizeof(g_email) - 1);
+    if (n == 0 || n >= sizeof(g_email)) { g_email[0] = '\0'; return; }
+    g_email[n] = '\0';
+}
+static void email_set(const char *addr) {
+    char t[96];
+    str_copy(t, addr, sizeof(t));
+    str_lower(t);
+    int at = 0;
+    for (unsigned i = 0; t[i]; i++) if (t[i] == '@' && i > 0 && t[i + 1]) at = 1;
+    if (!at) { email_line("that is not an email address (name@domain)"); return; }
+    str_copy(g_email, t, sizeof(g_email));
+    hal_kv_set("email", 5, g_email, str_len(g_email));
+    email_render();
+}
+
+/* Block the peer behind an open conversation, and take their thread off the
+ * screen along with it: the point of blocking a spammer is to stop seeing the
+ * spam that already arrived, not only the next one. */
+static void block_convo(const char *raw_id) {
+    char hex[80];
+    if (!key_to_hex(raw_id, hex, sizeof(hex))) return;
+    if (!block_add(hex)) return;
+
+    /* Drop the conversation row (and its messages) from the host store. */
+    str_copy(g_msg, "{\"type\":\"ui.convo.remove\",\"id\":\"", sizeof(g_msg));
+    json_escape_cat(g_msg, hex, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
+
+    int i = peer_idx(hex);
+    char title[40];
+    peer_title(i, title, sizeof(title));
+    if (i >= 0) g_peer_unread[i] = 0;
+    if (str_eq(g_open, hex)) g_open[0] = '\0';
+    unread_emit();
+
+    char line[128];
+    str_copy(line, "blocked ", sizeof(line));
+    str_cat(line, title[0] ? title : hex, sizeof(line));
+    status_line(line);
+    blocked_render();
+}
+
+/* Unblock prompt: the blocked keys as one-tap chips. Nobody retypes a 64-char
+ * key to undo a mistap. */
+static void prompt_unblock(void) {
+    if (g_block_n == 0) { status_line("nobody is blocked"); return; }
+    str_copy(g_msg,
+        "{\"type\":\"ui.prompt\",\"id\":\"unblock\",\"title\":\"Unblock\","
+        "\"body\":\"Pick someone to unblock — their messages start arriving "
+        "again.\",\"chips\":[", sizeof(g_msg));
+    for (int i = 0; i < g_block_n; i++) {
+        char title[40];
+        int p = peer_idx(g_block[i]);
+        peer_title(p, title, sizeof(title));
+        if (!title[0]) str_copy(title, g_block[i], sizeof(title));
+        if (i) str_cat(g_msg, ",", sizeof(g_msg));
+        str_cat(g_msg, "{\"label\":\"", sizeof(g_msg));
+        json_escape_cat(g_msg, title, sizeof(g_msg));
+        str_cat(g_msg, "\",\"value\":\"", sizeof(g_msg));
+        json_escape_cat(g_msg, g_block[i], sizeof(g_msg));
+        str_cat(g_msg, "\"}", sizeof(g_msg));
+    }
+    str_cat(g_msg, "]}", sizeof(g_msg));
     send_msg(g_msg);
 }
 
@@ -567,7 +846,7 @@ static void purge_pre_envelope_history(void) {
     }
     send_msg("{\"type\":\"ui.convo.clear\",\"field\":\"conversations\"}");
     hal_kv_set("fmt", 3, "3", 1);
-    hal_log(1, "[messages] cleared pre-envelope history (one-time)", 48);
+    hal_log(1, "[mail] cleared pre-envelope history (one-time)", 46);
 }
 
 /* ── The dedup envelope ──────────────────────────────────────────────────
@@ -619,11 +898,54 @@ static void relays_for(const char *peer_hex) {
     else str_copy(g_relays, "[]", sizeof(g_relays));
 }
 
+/* Entries in the g_relays JSON array (each is a quoted hash). */
+static int relays_count(void) {
+    int q = 0;
+    for (unsigned i = 0; g_relays[i]; i++) if (g_relays[i] == '"') q++;
+    return q / 2;
+}
+
+/* Ask the resolver for OUR OWN address; the answer is intercepted in
+ * resolve_drain and compared against g_self instead of opening a thread. */
+static void email_verify_start(void) {
+    if (!g_email[0]) { email_line("set your email address first"); return; }
+    if (!g_self[0])  { email_line("no profile key yet — try again shortly"); return; }
+    str_copy(g_verify, g_email, sizeof(g_verify));
+    g_verify_t0 = hal_time_epoch();
+    char line[192];
+    str_copy(line, "checking that ", sizeof(line));
+    str_cat(line, g_email, sizeof(line));
+    str_cat(line, " points at this device …", sizeof(line));
+    email_line(line);
+    relays_for(g_self);
+    /* nip05: prefix = check the DOMAIN live, not a cached/mesh mapping — a
+     * just-fixed nostr.json must verify immediately. */
+    char q[112];
+    str_copy(q, "nip05:", sizeof(q));
+    str_cat(q, g_email, sizeof(q));
+    hal_relay_resolve(q, str_len(q), g_relays, str_len(g_relays));
+}
+
 /* ── Ingest ──────────────────────────────────────────────────────────────
  * One funnel for BOTH lanes. Everything above it converts to: peer (hex),
  * plaintext, mine, lane id, ts. */
 static void ingest(const char *peer_hex, const char *plaintext, int mine,
                    const char *lane_id, const char *ts) {
+    /* Blocked sender: drop it here, before the dedup ring, the store and the
+     * notification. Dropping it earlier than the ring is deliberate — an
+     * unblock later should not find the message already marked "seen" by a
+     * copy we never showed. */
+    if (is_blocked(peer_hex)) {
+        /* Say it out loud: a message that vanishes with no trace is
+         * indistinguishable from a delivery bug. */
+        char l[96];
+        str_copy(l, "[mail] blocked drop from ", sizeof(l));
+        str_cat(l, peer_hex, sizeof(l));
+        if (str_len(l) > 37) l[37] = '\0';
+        hal_log(1, l, str_len(l));
+        return;
+    }
+
     char rmid[20];
     const char *text = env_split(plaintext, rmid, sizeof(rmid));
 
@@ -634,13 +956,29 @@ static void ingest(const char *peer_hex, const char *plaintext, int mine,
     {   /* Which key a copy dedups on is the difference between one bubble and
          * four, and it is invisible from outside — so say it out loud. */
         char l[96];
-        str_copy(l, dup ? "[messages] fold key=" : "[messages] recv key=", sizeof(l));
+        str_copy(l, dup ? "[mail] fold key=" : "[mail] recv key=", sizeof(l));
         str_cat(l, key, sizeof(l));
         str_cat(l, rmid[0] ? " (envelope)" : " (event-id)", sizeof(l));
         hal_log(1, l, str_len(l));
     }
     if (dup) { g_dupes++; return; }
     seen_add(key);
+
+    /* Closed (muted) conversation: an incoming message is dropped AFTER the
+     * dedup ring (so a later unclose does not resurrect it via a replay) and
+     * WITHOUT a notification — that is what Close promises. Our own copy from
+     * another device means the user re-engaged: unclose and carry on. */
+    if (is_closed(peer_hex)) {
+        if (!mine) {
+            char l[96];
+            str_copy(l, "[mail] closed drop from ", sizeof(l));
+            str_cat(l, peer_hex, sizeof(l));
+            if (str_len(l) > 36) l[36] = '\0';
+            hal_log(1, l, str_len(l));
+            return;
+        }
+        unclose(peer_hex);
+    }
 
     int i = peer_add(peer_hex);
     if (i < 0) return;
@@ -656,7 +994,7 @@ static void ingest(const char *peer_hex, const char *plaintext, int mine,
         if (!str_eq(g_open, peer_hex)) {
             g_peer_unread[i]++;
             unread_emit();
-            notify_new(title, text);
+            notify_new(title, text, key);
         }
     }
 }
@@ -717,6 +1055,8 @@ static void relay_ingest(const char *js) {
 static void do_send(const char *peer_hex, const char *text) {
     if (!is_hex64(peer_hex) || !text[0]) return;
 
+    unclose(peer_hex); /* writing to a closed peer re-engages the thread */
+
     char rmid[20];
     rmid_new(rmid);
 
@@ -749,17 +1089,21 @@ static void do_send(const char *peer_hex, const char *text) {
 
     if (lane1 <= 0 && lane2 <= 0) {
         status_line("send FAILED: no relay reachable on either lane");
-        notify_new("Not sent", "No relay reachable — the message was not sent.");
+        notify_new("Not sent", "No relay reachable — the message was not sent.",
+                   rmid);
     }
 }
 
 /* ── Commands ────────────────────────────────────────────────────────── */
 static void prompt_new_message(void) {
+    /* `input`, not `fields` — the host's ui.prompt takes ONE text input object
+     * and hands it back as prompt_input (a `fields` array is silently ignored,
+     * which left this prompt with chips and no way to type a key). */
     str_copy(g_msg,
         "{\"type\":\"ui.prompt\",\"id\":\"newmsg\",\"title\":\"New message\","
-        "\"fullscreen\":true,\"fields\":[{\"name\":\"to\",\"type\":\"text\","
-        "\"label\":\"Person\",\"hint\":\"npub1… , hex key, or a callsign\","
-        "\"max\":80}],\"chips\":[", sizeof(g_msg));
+        "\"fullscreen\":true,\"confirm\":\"Open\","
+        "\"input\":{\"hint\":\"npub1… , hex key, callsign, or email\",\"max\":80},"
+        "\"chips\":[", sizeof(g_msg));
     /* Known people as one-tap chips — the common case is writing to someone you
      * already know, and nobody wants to paste a 64-char key for that. */
     for (int i = 0; i < g_peer_n && i < 12; i++) {
@@ -784,6 +1128,7 @@ static void open_target(const char *raw) {
     str_copy(in, raw, sizeof(in));
     char hex[80];
     if (key_to_hex(in, hex, sizeof(hex))) {
+        unclose(hex); /* a New message to a closed peer re-engages it */
         int i = peer_add(hex);
         char title[40];
         peer_title(i, title, sizeof(title));
@@ -793,6 +1138,22 @@ static void open_target(const char *raw) {
         json_escape_cat(g_msg, title, sizeof(g_msg));
         str_cat(g_msg, "\",\"icon\":\"person\",\"select\":true}", sizeof(g_msg));
         send_msg(g_msg);
+        return;
+    }
+    /* An email address? The host resolves it via NIP-05 (same HAL, same
+     * result shape — the address comes back in the callsign field). Emails
+     * are lowercase; callsigns are uppercase — don't cross the streams. */
+    int is_email = 0;
+    for (unsigned i = 0; in[i]; i++) if (in[i] == '@') { is_email = 1; break; }
+    if (is_email) {
+        str_lower(in);
+        relays_for(g_self);
+        hal_relay_resolve(in, str_len(in), g_relays, str_len(g_relays));
+        char line[160];
+        str_copy(line, "resolving ", sizeof(line));
+        str_cat(line, in, sizeof(line));
+        str_cat(line, " …", sizeof(line));
+        status_line(line);
         return;
     }
     /* Not a key — treat it as a callsign and ask the relay directory. */
@@ -815,16 +1176,44 @@ static void resolve_drain(void) {
         unsigned n = hal_relay_resolve_recv(js, sizeof(js) - 1);
         if (n == 0) break;
         js[n] = '\0';
-        char call[24] = "", npub[64] = "", hex[80] = "";
+        char call[96] = "", npub[64] = "", hex[80] = "", verified[8] = "";
         json_raw(js, "callsign", call, sizeof(call));
         json_raw(js, "npub", npub, sizeof(npub));
+        json_raw(js, "kind0_match", verified, sizeof(verified));
         if (!npub[0] || !b64url_to_hex(npub, hex, sizeof(hex))) continue;
+        /* Self-verification answer (the Email screen), NOT a new conversation:
+         * the address is valid only if it resolves to OUR OWN key. */
+        if (g_verify[0] && str_eq(call, g_verify)) {
+            g_verify[0] = '\0';
+            if (str_eq(hex, g_self)) {
+                email_line("VERIFIED — the domain lists this device's key; "
+                           "anyone resolving this address reaches you");
+                if (str_eq(verified, "false"))
+                    email_line("note: your kind-0 profile does not claim this "
+                               "address in its nip05 field yet, so others see "
+                               "it as unverified");
+                relays_for(g_self);
+                char line[96], n[16];
+                u64_str((unsigned long long)relays_count(), n);
+                str_copy(line, "routing: mapping published, ", sizeof(line));
+                str_cat(line, n, sizeof(line));
+                str_cat(line, " rendezvous relay(s) reachable for your key",
+                        sizeof(line));
+                email_line(line);
+            } else {
+                email_line("MISMATCH — the domain lists a DIFFERENT key:");
+                email_line(hex);
+                email_line("mail to this address would reach that key, not "
+                           "this device — fix the domain's nostr.json");
+            }
+            continue;
+        }
         int idx = peer_add(hex);
         if (idx >= 0 && call[0]) {
             str_copy(g_pcall[idx], call, sizeof(g_pcall[0]));
             peers_save();
         }
-        char title[40];
+        char title[48];
         peer_title(idx, title, sizeof(title));
         str_copy(g_msg, "{\"type\":\"ui.convo.upsert\",\"id\":\"", sizeof(g_msg));
         json_escape_cat(g_msg, hex, sizeof(g_msg));
@@ -832,8 +1221,12 @@ static void resolve_drain(void) {
         json_escape_cat(g_msg, title, sizeof(g_msg));
         str_cat(g_msg, "\",\"icon\":\"person\",\"select\":true}", sizeof(g_msg));
         send_msg(g_msg);
-        char line[96];
-        str_copy(line, "found ", sizeof(line));
+        /* Email mappings carry kind0_match: false = the target's profile did
+         * NOT claim this address — say so instead of implying verification. */
+        char line[160];
+        line[0] = '\0';
+        if (str_eq(verified, "false")) str_copy(line, "unverified ", sizeof(line));
+        str_cat(line, "found ", sizeof(line));
         str_cat(line, call[0] ? call : "key", sizeof(line));
         status_line(line);
     }
@@ -928,9 +1321,14 @@ static int lane1_ready(void) {
 }
 
 void module_init(void) {
-    hal_log(1, "[messages] init", 15);
+    hal_log(1, "[mail] init", 11);
     seen_load();
     peers_load();
+    block_load();
+    closed_load();
+    blocked_render();
+    email_load();
+    email_render();
     purge_pre_envelope_history();
     lane1_ready(); /* usually too early; module_tick keeps trying */
     unread_emit();
@@ -966,6 +1364,17 @@ void module_tick(void) {
 
     resolve_drain();
     refresh_names();
+
+    /* Email screen housekeeping: show our key once the profile is up, and
+     * close out a verification the resolver never answered (not listed at the
+     * domain, or offline — the resolver stays silent on a miss). */
+    if (!g_email_shown && g_self[0]) { g_email_shown = 1; email_render(); }
+    if (g_verify[0] && now - g_verify_t0 > 45) {
+        g_verify[0] = '\0';
+        email_line("no listing found — the domain's /.well-known/nostr.json "
+                   "does not name this key (or the network is down); add your "
+                   "key there and Verify again");
+    }
 }
 
 void module_handle_event(void) {
@@ -992,6 +1401,7 @@ void module_handle_event(void) {
         char peer[80] = "";
         json_raw(buf, "conversations_convo", peer, sizeof(peer));
         str_lower(peer);
+        unclose(peer); /* opening a closed thread re-engages it */
         str_copy(g_open, peer, sizeof(g_open));
         int i = peer_idx(peer);
         if (i >= 0 && g_peer_unread[i] > 0) {
@@ -1000,19 +1410,89 @@ void module_handle_event(void) {
         }
         return;
     }
-    if (str_eq(cmd, "new_message")) { prompt_new_message(); return; }
-    if (str_eq(cmd, "refresh_status")) { status_refresh(); return; }
-
-    /* Result of the New-message prompt. */
-    char pid[24] = "";
-    json_raw(buf, "id", pid, sizeof(pid));
-    if (str_eq(cmd, "prompt") || str_eq(pid, "newmsg")) {
-        char to[128] = "";
-        if (!json_raw(buf, "to", to, sizeof(to))) json_raw(buf, "value", to, sizeof(to));
-        if (to[0]) open_target(to);
+    /* Close = mute (the host's Close action, both the long-press sheet and
+     * the app-bar menu): persist the peer on the closed list so ingest drops
+     * their future messages with no notification. */
+    if (str_eq(cmd, "conversations_close")) {
+        char peer[80] = "";
+        json_raw(buf, "conversations_convo", peer, sizeof(peer));
+        str_lower(peer);
+        if (peer[0]) {
+            closed_add(peer);
+            if (str_eq(g_open, peer)) g_open[0] = '\0';
+        }
         return;
     }
+    if (str_eq(cmd, "new_message")) { prompt_new_message(); return; }
+    if (str_eq(cmd, "refresh_status")) { status_refresh(); return; }
+    if (str_eq(cmd, "set_email")) {
+        send_msg("{\"type\":\"ui.prompt\",\"id\":\"setemail\",\"title\":\"My email "
+                 "address\",\"body\":\"The address people can reach you at. Its "
+                 "domain must list your key in /.well-known/nostr.json (NIP-05) "
+                 "— Verify checks that for you.\",\"confirm\":\"Save\","
+                 "\"input\":{\"hint\":\"you@yourdomain.com\",\"max\":80}}");
+        return;
+    }
+    if (str_eq(cmd, "verify_email")) { email_verify_start(); return; }
 
+    /* Block: the host's message menu (long-press a bubble → Block) sends the
+     * open conversation id plus the sender's display name. We block on the id
+     * — it IS the peer's pubkey. The display name is a fallback for a host
+     * build that only sends that. */
+    if (str_eq(cmd, "conversations_block")) {
+        char id[128] = "", who[80] = "";
+        json_raw(buf, "conversations_convo", id, sizeof(id));
+        json_raw(buf, "conversations_blockcall", who, sizeof(who));
+        str_lower(id);
+        if (!id[0] && who[0]) {
+            /* Name only: match it against what we show for each peer, and
+             * against a truncated-key title (peer_title cuts at 12 chars). */
+            for (int i = 0; i < g_peer_n; i++) {
+                char t[40];
+                peer_title(i, t, sizeof(t));
+                if (str_eq(t, who)) { str_copy(id, g_peer[i], sizeof(id)); break; }
+            }
+        }
+        if (id[0]) block_convo(id);
+        return;
+    }
+    if (str_eq(cmd, "unblock")) { prompt_unblock(); return; }
+    if (str_eq(cmd, "block_key")) {
+        send_msg("{\"type\":\"ui.prompt\",\"id\":\"blockkey\",\"title\":\"Block "
+                 "someone\",\"body\":\"Their messages are dropped on arrival. "
+                 "Nothing is sent — they are not told.\",\"confirm\":\"Block\","
+                 "\"input\":{\"hint\":\"npub1… or hex key\",\"max\":80}}");
+        return;
+    }
+    if (str_eq(cmd, "refresh_blocked")) { blocked_render(); return; }
+
+    /* Prompt results. The host answers every ui.prompt with the SAME command
+     * ("prompt") and identifies which one by prompt_id, so dispatch on that. */
+    if (str_eq(cmd, "prompt")) {
+        char pid[24] = "", val[128] = "", typed[128] = "";
+        json_raw(buf, "prompt_id", pid, sizeof(pid));
+        json_raw(buf, "prompt_value", val, sizeof(val));  /* a chip */
+        json_raw(buf, "prompt_input", typed, sizeof(typed)); /* typed text */
+        const char *answer = val[0] ? val : typed;
+        if (!answer[0]) return;
+        if (str_eq(pid, "setemail")) { email_set(answer); email_verify_start(); return; }
+        if (str_eq(pid, "blockkey")) { block_convo(answer); return; }
+        if (str_eq(pid, "unblock")) {
+            char hex[80];
+            if (key_to_hex(answer, hex, sizeof(hex)) && block_remove(hex)) {
+                char line[128];
+                str_copy(line, "unblocked ", sizeof(line));
+                str_cat(line, hex, sizeof(line));
+                if (str_len(line) > 34) line[34] = '\0';
+                status_line(line);
+                blocked_render();
+            }
+            return;
+        }
+        /* Default (newmsg): open or create that thread. */
+        open_target(answer);
+        return;
+    }
 }
 
 void module_destroy(void) { }

@@ -1,13 +1,13 @@
 {
-  "id":              "tools.geogram.messages",
-  "version":         "0.1.6",
+  "id":              "tools.geogram.mail",
+  "version":         "0.3.2",
   "kind":            "app",
-  "title":           "Messages",
-  "description":     "Messages — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh.",
+  "title":           "Mail",
+  "description":     "Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh.",
   "summary":         "The unified messenger: every private message is a NOSTR encrypted note (kind-4, NIP-04) addressed to a person's key, not to a network. The same message rides internet relays and the Reticulum mesh at once — whichever arrives first wins, and the duplicates are folded away — so a conversation keeps working when one of them is down. Conversations are keyed by identity, so a callsign is only a nickname for a key.",
-  "icon":            "media/icons/messages.svg",
+  "icon":            "media/icons/mail.svg",
   "color":           "#0B7C63",
-  "tags":            ["messages", "dm", "nostr", "reticulum", "encrypted", "mesh"],
+  "tags":            ["mail", "messages", "dm", "nostr", "reticulum", "encrypted", "mesh"],
   "entry_ui":        "screens/home.ui.json",
   "tick_interval_ms": 1500,
   "permissions":     ["network"],
@@ -18,7 +18,7 @@
     "events":          [],
     "variables":       [],
     "functionalities": [],
-    "intents":         ["messages"]
+    "intents":         ["mail"]
   },
   "requires": {
     "hal":       ["log", "msg", "kv", "time", "crypto", "nostr", "relay", "contacts"],

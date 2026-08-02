@@ -1,5 +1,5 @@
 /*
- * messages — unit tests.
+ * mail — unit tests.
  *
  * What is actually dangerous in this wapp is not the UI, it is the two places
  * where a mistake FAILS SILENTLY:
@@ -217,4 +217,72 @@ WAPP_TEST(seen_ring_ignores_an_empty_key) {
     seen_add("");
     WAPP_EXPECT_INT_EQ(g_seen_n, 0);
     WAPP_EXPECT_TRUE(!seen_has(""));
+}
+
+/* ── The block list ──────────────────────────────────────────────────────
+ * A spammer knows your key, so dropping their messages is the only defence.
+ * What must not break: the list is keyed on the 64-char pubkey (a display name
+ * is a nickname the spammer picks), it survives a restart, and unblocking
+ * actually undoes it. */
+
+#define SPAMMER "fa31ff61cfa7000000000000000000000000000000000000000000000000dead"
+
+WAPP_TEST(block_add_then_is_blocked) {
+    g_block_n = 0;
+    WAPP_EXPECT_TRUE(!is_blocked(SPAMMER));
+    WAPP_EXPECT_TRUE(block_add(SPAMMER));
+    WAPP_EXPECT_TRUE(is_blocked(SPAMMER));
+    /* Everybody else still gets through — a block is one key, not a mood. */
+    WAPP_EXPECT_TRUE(!is_blocked(K_HEX));
+}
+
+WAPP_TEST(block_is_not_added_twice) {
+    g_block_n = 0;
+    WAPP_EXPECT_TRUE(block_add(SPAMMER));
+    WAPP_EXPECT_TRUE(!block_add(SPAMMER));
+    WAPP_EXPECT_INT_EQ(g_block_n, 1);
+}
+
+WAPP_TEST(block_rejects_a_non_key) {
+    /* The host menu can hand us a display name; blocking it as if it were a key
+     * would put junk in the list and block nobody. */
+    g_block_n = 0;
+    WAPP_EXPECT_TRUE(!block_add("fa31ff61cfa7"));   /* truncated title */
+    WAPP_EXPECT_TRUE(!block_add("N0CALL"));
+    WAPP_EXPECT_TRUE(!block_add(""));
+    WAPP_EXPECT_INT_EQ(g_block_n, 0);
+}
+
+WAPP_TEST(block_refuses_to_block_yourself) {
+    g_block_n = 0;
+    str_copy(g_self, K_HEX, sizeof(g_self));
+    WAPP_EXPECT_TRUE(!block_add(K_HEX));
+    WAPP_EXPECT_INT_EQ(g_block_n, 0);
+    g_self[0] = '\0';
+}
+
+WAPP_TEST(unblock_removes_exactly_one) {
+    g_block_n = 0;
+    block_add(SPAMMER);
+    block_add(K_HEX);
+    WAPP_EXPECT_TRUE(block_remove(SPAMMER));
+    WAPP_EXPECT_TRUE(!is_blocked(SPAMMER));
+    WAPP_EXPECT_TRUE(is_blocked(K_HEX));      /* the other one is untouched */
+    WAPP_EXPECT_INT_EQ(g_block_n, 1);
+    WAPP_EXPECT_TRUE(!block_remove(SPAMMER)); /* already gone */
+}
+
+WAPP_TEST(block_list_survives_a_restart) {
+    /* Persisted in KV: a block that forgets itself on reboot is not a block. */
+    g_block_n = 0;
+    block_add(SPAMMER);
+    block_add(K_HEX);
+    g_block_n = 0;                 /* as if the wapp had just started */
+    block_load();
+    WAPP_EXPECT_INT_EQ(g_block_n, 2);
+    WAPP_EXPECT_TRUE(is_blocked(SPAMMER));
+    WAPP_EXPECT_TRUE(is_blocked(K_HEX));
+    /* Leave the store clean for the next run. */
+    g_block_n = 0;
+    block_save();
 }
