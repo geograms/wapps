@@ -5727,11 +5727,19 @@ static void follow_render(void) {
  * A mesh radio's first question is not "who exists" but "who can I touch from
  * here, right now". That answer lives in three places and nowhere together:
  *
- *   1. hal_people_directory — the Reticulum view: geogram people and LXMF
- *      peers, with the hop count and the interface (`via`) they were heard on.
+ *   1. hal_rns_nodes with {"localOnly":true} — THE SAME CALL the Reticulum
+ *      wapp makes for its graph, so the two can never disagree about who is
+ *      local. The host decides locality (see rns_iface_kind.dart): anything
+ *      heard on something other than the internet, geogram or not.
  *   2. hal_mesh_devices     — the BLE street mesh's own neighbour registry.
  *   3. the pubkey beacons this wapp already hears over BLE broadcast / APRS /
  *      RNS (g_pk_call + g_pk_ts) — the radio side, callsign-keyed.
+ *
+ * NOT hal_people_directory. That answers "who can I message" — deliberately
+ * not liveness-gated, and gated instead on having announced an LXMF delivery
+ * address — which is the wrong question here and is why a LAN device could sit
+ * on the graph and be missing from this list. It is still the right source for
+ * the New-chat picker and search.
  *
  * They are merged into ONE table keyed by identity (callsign, else key), each
  * row carrying the LATEST sighting and the union of the transports it arrived
@@ -5746,6 +5754,10 @@ static void follow_render(void) {
 #define NEAR_MAX 64
 #define NEAR_ACTIVE_SEC 600       /* "active" = heard within ten minutes */
 #define NEAR_KEEP_SEC (7 * 24 * 3600)  /* a week; older sightings are history */
+/* How long a local sighting keeps counting as "here". Longer than the active
+ * window on purpose: a neighbour stays audible through a hub after they leave
+ * the room, and a lost announce race must never move them out of it. */
+#define NEAR_LOCAL_STICKY_SEC 1800
 #define NEAR_SCAN_SEC 5           /* rescan cadence while the screen is open */
 #define TR_LAN   1
 #define TR_BLE   2
@@ -5756,7 +5768,12 @@ static void follow_render(void) {
 static char     g_near_call[NEAR_MAX][24];
 static char     g_near_key[NEAR_MAX][80];
 static char     g_near_name[NEAR_MAX][40];
+static char     g_near_id[NEAR_MAX][36];   /* RNS identity hex, when known    */
 static uint64_t g_near_ts[NEAR_MAX];
+/* Last sighting on a LOCAL path. Separate from g_near_ts because a neighbour
+ * stays audible through a hub after it leaves the room: "still reachable" and
+ * "still HERE" are different facts and the list means the second one. */
+static uint64_t g_near_lts[NEAR_MAX];
 static unsigned g_near_tr[NEAR_MAX];
 static int      g_near_hops[NEAR_MAX];
 static int      g_near_n = 0;
@@ -5766,7 +5783,7 @@ static int      g_near_open = 0;      /* screen on screen: keep it refreshed */
 static uint64_t g_near_scan_at = 0;
 static uint32_t g_near_hash = 0;
 static uint32_t g_near_stats_hash = 0;
-static char     g_near_json[16384];
+static char     g_near_json[51200];
 static char     g_near_out[16384];
 
 /* A JSON number as 64 bits: `lastSeen` is epoch MILLIseconds on the host side,
@@ -5803,14 +5820,23 @@ static void near_upper(const char *in, char *out, unsigned sz) {
  * (the human name for a person) and the key otherwise; a row learns its key or
  * callsign later without splitting in two. */
 static void near_touch(const char *call, const char *key, const char *name,
-                       uint64_t ts, unsigned tr, int hops) {
+                       uint64_t ts, unsigned tr, int hops, const char *idhex,
+                       uint64_t local_ts, const char *alias) {
   char uc[24]; near_upper(call ? call : "", uc, sizeof(uc));
-  if (!uc[0] && !(key && key[0])) return;
+  if (!uc[0] && !(key && key[0]) && !(idhex && idhex[0])) return;
   if (uc[0] && s_eq(uc, g_call)) return;            /* ourselves is not "nearby" */
   int idx = -1;
+  /* Callsign first: it is the PERSON, and it is what lets a row learned from
+   * the graph (identity-keyed) merge with one heard as a beacon (callsign
+   * only) instead of showing the same neighbour twice. */
   for (int i = 0; i < g_near_n; i++) {
     if (uc[0] && s_eq(g_near_call[i], uc)) { idx = i; break; }
     if (key && key[0] && s_eq(g_near_key[i], key)) { idx = i; break; }
+    if (idhex && idhex[0] && s_eq(g_near_id[i], idhex)) { idx = i; break; }
+    /* A device has several addresses (npub, LXMF dest, identity). A row we
+     * stored under one of them is the SAME device arriving under another —
+     * match on any of them or the user sees one neighbour twice. */
+    if (alias && alias[0] && s_eq(g_near_key[i], alias)) { idx = i; break; }
   }
   if (idx < 0) {
     if (g_near_n >= NEAR_MAX) {
@@ -5819,19 +5845,75 @@ static void near_touch(const char *call, const char *key, const char *name,
       for (int i = 1; i < g_near_n; i++) if (g_near_ts[i] < g_near_ts[oldest]) oldest = i;
       idx = oldest;
       g_near_call[idx][0] = 0; g_near_key[idx][0] = 0; g_near_name[idx][0] = 0;
-      g_near_ts[idx] = 0; g_near_tr[idx] = 0; g_near_hops[idx] = 0;
+      g_near_id[idx][0] = 0;
+      g_near_ts[idx] = 0; g_near_lts[idx] = 0; g_near_tr[idx] = 0;
+      g_near_hops[idx] = 0;
     } else {
       idx = g_near_n++;
       g_near_call[idx][0] = 0; g_near_key[idx][0] = 0; g_near_name[idx][0] = 0;
-      g_near_ts[idx] = 0; g_near_tr[idx] = 0; g_near_hops[idx] = 0;
+      g_near_id[idx][0] = 0;
+      g_near_ts[idx] = 0; g_near_lts[idx] = 0; g_near_tr[idx] = 0;
+      g_near_hops[idx] = 0;
     }
   }
   if (uc[0] && !g_near_call[idx][0]) s_cpy(g_near_call[idx], uc, sizeof(g_near_call[0]));
   if (key && key[0] && !g_near_key[idx][0]) s_cpy(g_near_key[idx], key, sizeof(g_near_key[0]));
   if (name && name[0] && !g_near_name[idx][0]) s_cpy(g_near_name[idx], name, sizeof(g_near_name[0]));
+  if (idhex && idhex[0] && !g_near_id[idx][0])
+    s_cpy(g_near_id[idx], idhex, sizeof(g_near_id[0]));
   if (ts > g_near_ts[idx]) g_near_ts[idx] = ts;
+  if (local_ts > g_near_lts[idx]) g_near_lts[idx] = local_ts;
   g_near_tr[idx] |= tr;
   if (hops > 0 && (g_near_hops[idx] == 0 || hops < g_near_hops[idx])) g_near_hops[idx] = hops;
+}
+
+/* Fold rows that turn out to be the same device.
+ *
+ * A row can be created before we know its callsign (identity-keyed, from the
+ * graph) and another after (callsign-keyed, from a beacon or an older build's
+ * saved table). Once both are present the duplicate is visible to the user —
+ * the same neighbour listed twice, one fresh and one stale — so collapse them
+ * here rather than hoping every source arrives in a lucky order. */
+static void near_dedupe(void) {
+  for (int i = 0; i < g_near_n; i++) {
+    for (int j = i + 1; j < g_near_n; j++) {
+      int same = 0;
+      if (g_near_call[i][0] && s_eq(g_near_call[i], g_near_call[j])) same = 1;
+      else if (g_near_key[i][0] && s_eq(g_near_key[i], g_near_key[j])) same = 1;
+      else if (g_near_id[i][0] && s_eq(g_near_id[i], g_near_id[j])) same = 1;
+      /* Legacy rows carry no callsign at all — only an LXMF dest and the name
+       * the peer announced, which IS its callsign. That is the only thread
+       * tying them to the row the graph now provides. */
+      else if (g_near_call[i][0] && s_eq(g_near_call[i], g_near_name[j])) same = 1;
+      else if (g_near_call[j][0] && s_eq(g_near_call[j], g_near_name[i])) same = 1;
+      if (!same) continue;
+      /* Keep i, absorb j: newest timestamps, union of transports, and any
+       * field the survivor is still missing. */
+      if (g_near_ts[j] > g_near_ts[i]) g_near_ts[i] = g_near_ts[j];
+      if (g_near_lts[j] > g_near_lts[i]) g_near_lts[i] = g_near_lts[j];
+      g_near_tr[i] |= g_near_tr[j];
+      if (!g_near_call[i][0]) s_cpy(g_near_call[i], g_near_call[j], sizeof(g_near_call[0]));
+      if (!g_near_key[i][0]) s_cpy(g_near_key[i], g_near_key[j], sizeof(g_near_key[0]));
+      if (!g_near_name[i][0]) s_cpy(g_near_name[i], g_near_name[j], sizeof(g_near_name[0]));
+      if (!g_near_id[i][0]) s_cpy(g_near_id[i], g_near_id[j], sizeof(g_near_id[0]));
+      if (g_near_hops[j] > 0 &&
+          (g_near_hops[i] == 0 || g_near_hops[j] < g_near_hops[i])) {
+        g_near_hops[i] = g_near_hops[j];
+      }
+      for (int k = j; k < g_near_n - 1; k++) {
+        s_cpy(g_near_call[k], g_near_call[k + 1], sizeof(g_near_call[0]));
+        s_cpy(g_near_key[k], g_near_key[k + 1], sizeof(g_near_key[0]));
+        s_cpy(g_near_name[k], g_near_name[k + 1], sizeof(g_near_name[0]));
+        s_cpy(g_near_id[k], g_near_id[k + 1], sizeof(g_near_id[0]));
+        g_near_ts[k] = g_near_ts[k + 1];
+        g_near_lts[k] = g_near_lts[k + 1];
+        g_near_tr[k] = g_near_tr[k + 1];
+        g_near_hops[k] = g_near_hops[k + 1];
+      }
+      g_near_n--;
+      j--;
+    }
+  }
 }
 
 /* Anything not heard for a week is not "seen before", it is history: drop it
@@ -5848,7 +5930,9 @@ static void near_expire(void) {
       s_cpy(g_near_call[w], g_near_call[i], sizeof(g_near_call[0]));
       s_cpy(g_near_key[w], g_near_key[i], sizeof(g_near_key[0]));
       s_cpy(g_near_name[w], g_near_name[i], sizeof(g_near_name[0]));
+      s_cpy(g_near_id[w], g_near_id[i], sizeof(g_near_id[0]));
       g_near_ts[w] = g_near_ts[i];
+      g_near_lts[w] = g_near_lts[i];
       g_near_tr[w] = g_near_tr[i];
       g_near_hops[w] = g_near_hops[i];
     }
@@ -5868,7 +5952,9 @@ static void near_save(void) {
     s_cat(buf, g_near_key[i], sizeof(buf));  s_cat(buf, "|", sizeof(buf));
     s_cat(buf, g_near_name[i], sizeof(buf)); s_cat(buf, "|", sizeof(buf));
     u_itoa((unsigned)g_near_ts[i], nb); s_cat(buf, nb, sizeof(buf)); s_cat(buf, "|", sizeof(buf));
-    u_itoa(g_near_tr[i], nb); s_cat(buf, nb, sizeof(buf));
+    u_itoa(g_near_tr[i], nb); s_cat(buf, nb, sizeof(buf)); s_cat(buf, "|", sizeof(buf));
+    s_cat(buf, g_near_id[i], sizeof(buf)); s_cat(buf, "|", sizeof(buf));
+    u_itoa((unsigned)g_near_lts[i], nb); s_cat(buf, nb, sizeof(buf));
     s_cat(buf, ";", sizeof(buf));
   }
   hal_kv_set("nearby", 6, buf, s_len(buf));
@@ -5885,20 +5971,29 @@ static void near_load(void) {
       rec[c] = 0;
       if (c > 2) {
         char call[24] = "", key[80] = "", name[40] = "", ts[24] = "", tr[16] = "";
-        char *dst[5]; unsigned cap[5];
+        char idh[36] = "", lts[24] = "";
+        char *dst[7]; unsigned cap[7];
         dst[0] = call; cap[0] = sizeof(call);
         dst[1] = key;  cap[1] = sizeof(key);
         dst[2] = name; cap[2] = sizeof(name);
         dst[3] = ts;   cap[3] = sizeof(ts);
         dst[4] = tr;   cap[4] = sizeof(tr);
+        dst[5] = idh;  cap[5] = sizeof(idh);
+        dst[6] = lts;  cap[6] = sizeof(lts);
         int f = 0; unsigned o = 0;
-        for (unsigned k = 0; rec[k] && f < 5; k++) {
+        for (unsigned k = 0; rec[k] && f < 7; k++) {
           if (rec[k] == '|') { dst[f][o] = 0; f++; o = 0; continue; }
           if (o < cap[f] - 1) dst[f][o++] = rec[k];
         }
-        if (f < 5) dst[f][o] = 0;
-        near_touch(call, key, name, (uint64_t)to_int(ts), (unsigned)to_int(tr), 0);
-      near_expire();
+        if (f < 7) dst[f][o] = 0;
+        uint64_t rts = (uint64_t)to_int(ts);
+        unsigned rtr = (unsigned)to_int(tr);
+        uint64_t rlts = (uint64_t)to_int(lts);
+        /* Rows written before locality was tracked: if they were heard on a
+         * local transport, that sighting WAS local. Without this every
+         * remembered device disappears on the first launch after the update. */
+        if (!rlts && (rtr & (TR_LAN | TR_BLE | TR_RADIO))) rlts = rts;
+        near_touch(call, key, name, rts, rtr, 0, idh, rlts, "");
       }
       c = 0;
     } else if (c < sizeof(rec) - 1) {
@@ -5907,11 +6002,50 @@ static void near_load(void) {
   }
 }
 
-/* Map Reticulum's interface name onto a transport the user recognises. */
-static unsigned near_via_bits(const char *via) {
-  if (ci_has(via, "ble") || ci_has(via, "bluetooth")) return TR_BLE;
-  if (ci_has(via, "lan") || ci_has(via, "udp") || ci_has(via, "local")) return TR_LAN;
-  if (ci_has(via, "lora") || ci_has(via, "rnode")) return TR_RADIO;
+/* Recover a callsign from a display name.
+ *
+ * A node whose announce carried no nostr pubkey has no meta.callsign — the
+ * host can only compose a label, e.g. "X1RD89" or "Nuno (X1RD89)". Without
+ * this the same device arrives keyed by identity, fails to match the row we
+ * already hold for that callsign, and the list shows one neighbour twice. */
+static void near_callsign_from(const char *name, char *out, unsigned osz) {
+  out[0] = 0;
+  if (!name || !name[0]) return;
+  const char *start = name;
+  const char *open = 0;
+  for (const char *p = name; *p; p++) if (*p == '(') open = p;
+  if (open) start = open + 1;
+  unsigned n = 0;
+  char buf[16];
+  for (const char *p = start; *p && *p != ')' && n < sizeof(buf) - 1; p++) {
+    char c = up(*p);
+    int alnum = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    if (!alnum) { n = 0; break; }          /* spaces etc: not a callsign */
+    buf[n++] = c;
+  }
+  buf[n] = 0;
+  if (n < 4 || n > 12 || buf[0] != 'X') return;
+  s_cpy(out, buf, osz);
+}
+
+/* First occurrence of [needle] in [hay], or NULL. (No libc here.) */
+static const char *s_find(const char *hay, const char *needle) {
+  if (!needle[0]) return hay;
+  for (const char *p = hay; *p; p++) {
+    unsigned i = 0;
+    while (needle[i] && p[i] == needle[i]) i++;
+    if (!needle[i]) return p;
+  }
+  return 0;
+}
+
+/* The host already decided which kind of interface this was (one rule, shared
+ * with the Reticulum graph — see rns_iface_kind.dart). Here we only pick the
+ * chip to show for it. */
+static unsigned near_iface_bits(const char *kind) {
+  if (s_eq(kind, "ble")) return TR_BLE;
+  if (s_eq(kind, "lan")) return TR_LAN;
+  if (s_eq(kind, "lora") || s_eq(kind, "radio")) return TR_RADIO;
   return TR_RNS;
 }
 
@@ -5920,35 +6054,67 @@ static unsigned near_via_bits(const char *via) {
 static void near_scan(void) {
   uint64_t now = hal_time_epoch();
 
-  /* 1. Reticulum: geogram people + LXMF peers. */
-  int32_t n = hal_people_directory("", 0, g_near_json, sizeof(g_near_json) - 1);
-  if (n > 0) {
-    g_near_json[n] = 0;
-    char slice[1200];
-    const char *p = fnd_next_obj(g_near_json, slice, sizeof(slice));
-    while (p) {
-      char kind[16], dest[70], name[40], call[24], npub[80], via[24];
-      jstr(slice, "kind", kind, sizeof(kind));
-      jstr(slice, "dest", dest, sizeof(dest));
-      jstr(slice, "name", name, sizeof(name));
-      jstr(slice, "callsign", call, sizeof(call));
-      jstr(slice, "npub", npub, sizeof(npub));
-      jstr(slice, "via", via, sizeof(via));
-      int live = jbool(slice, "live");
-      int hops = jint(slice, "hops");
-      uint64_t seen = near_secs(jint64(slice, "lastSeen"));
-      if (live && seen < now - NEAR_ACTIVE_SEC) seen = now;  /* live beats a stale stamp */
-      if (!seen && live) seen = now;
-      /* Multi-hop is not local reach: a peer three hops away is reachable
-       * THROUGH somebody, which is a different promise. */
-      if (hops > 1) { p = fnd_next_obj(p, slice, sizeof(slice)); continue; }
-      unsigned tr = via[0] ? near_via_bits(via) : TR_RNS;
-      if (s_eq(kind, "lxmf")) {
-        if (dest[0]) near_touch(call, dest, name, seen, tr | TR_LXMF, hops);
-      } else if (s_eq(kind, "geogram")) {
-        if (call[0] || npub[0]) near_touch(call, npub, name, seen, tr, hops);
+  /* 1. Reticulum: the SAME snapshot the Reticulum wapp graphs, asked for the
+   * local half of it. The host owns what "local" means (anything not reached
+   * over the internet) so the graph and this list cannot drift apart. */
+  {
+    static const char kFilter[] = "{\"localOnly\":true,\"limit\":64}";
+    int32_t n = hal_rns_nodes(kFilter, s_len(kFilter), g_near_json,
+                              sizeof(g_near_json) - 1);
+    if (n < 0) {
+      /* Negated required size: the snapshot did not fit. Say so once instead
+       * of silently losing every Reticulum row (the old `if (n > 0)` did). */
+      static int moaned = 0;
+      if (!moaned) {
+        moaned = 1;
+        hal_log(1, "[chat] nearby: rns snapshot too big for the buffer", 47);
       }
-      p = fnd_next_obj(p, slice, sizeof(slice));
+    } else if (n > 0) {
+      g_near_json[n] = 0;
+      /* Walk ONLY nodes[]. The snapshot is an object, so the first '{' is the
+       * whole document; and edges/stats are objects too. Cut the buffer at
+       * "edges" and start after "nodes":[ . Neither literal can appear inside
+       * a JSON string value — the host escapes quotes. */
+      char *ns = (char *)s_find(g_near_json, "\"nodes\":[");
+      if (ns) {
+        ns += 9;
+        char *ne = (char *)s_find(ns, "\"edges\":");
+        if (ne) *ne = 0;
+        /* meta{} is the LAST field of a node, and a short slice truncates it
+         * silently — taking callsign, npub and lastSeen with it. */
+        char slice[1536];
+        const char *p = fnd_next_obj(ns, slice, sizeof(slice));
+        while (p) {
+          char kind[12], id[40], label[48], call[24], nick[40], npub[80];
+          char dest[40], iface[12], dm[8];
+          jstr(slice, "kind", kind, sizeof(kind));
+          jstr(slice, "id", id, sizeof(id));
+          jstr(slice, "label", label, sizeof(label));
+          jstr(slice, "callsign", call, sizeof(call));
+          jstr(slice, "nickname", nick, sizeof(nick));
+          jstr(slice, "npub", npub, sizeof(npub));
+          jstr(slice, "lxmfDest", dest, sizeof(dest));
+          jstr(slice, "ifaceKind", iface, sizeof(iface));
+          jstr(slice, "dm", dm, sizeof(dm));
+          if (s_eq(kind, "self")) { p = fnd_next_obj(p, slice, sizeof(slice)); continue; }
+          uint64_t seen = near_secs(jint64(slice, "lastSeen"));
+          /* Being in the snapshot already means the host judged it fresh, so a
+           * missing stamp is a parse artefact, not an absent device. */
+          if (!seen) seen = now;
+          unsigned tr = near_iface_bits(iface);
+          if (s_eq(dm, "lxmf")) tr |= TR_LXMF;
+          /* The key is what we can ADDRESS them by: their npub, else their
+           * LXMF delivery dest. The identity hex is the fallback join. */
+          const char *key = npub[0] ? npub : (dest[0] ? dest : "");
+          const char *name = nick[0] ? nick : label;
+          /* No announced callsign? It is still in the label the host composed
+           * — and it is what merges this row with the one we already hold. */
+          if (!call[0]) near_callsign_from(name, call, sizeof(call));
+          near_touch(call, key, name, seen, tr, jint(slice, "hops"), id, seen,
+                     dest);
+          p = fnd_next_obj(p, slice, sizeof(slice));
+        }
+      }
     }
   }
 
@@ -5963,7 +6129,7 @@ static void near_scan(void) {
       char id[80], title[40];
       jstr(slice, "id", id, sizeof(id));
       jstr(slice, "title", title, sizeof(title));
-      if (id[0]) near_touch(title[0] ? title : id, id, title, now, TR_BLE, 1);
+      if (id[0]) near_touch(title[0] ? title : id, id, title, now, TR_BLE, 1, "", now, "");
       p = fnd_next_obj(p, slice, sizeof(slice));
     }
   }
@@ -5972,9 +6138,12 @@ static void near_scan(void) {
    * the time we last heard it, over BLE broadcast / APRS / RNS alike. */
   for (int i = 0; i < g_pk_n; i++) {
     if (!g_pk_ts[i]) continue;
-    near_touch(g_pk_call[i], "", "", g_pk_ts[i], TR_RADIO, 1);
+    /* A beacon we heard OURSELVES is local by definition — that is what
+     * hearing it means. */
+    near_touch(g_pk_call[i], "", "", g_pk_ts[i], TR_RADIO, 1, "", g_pk_ts[i], "");
   }
 
+  near_dedupe();
   near_expire();
   near_save();
 }
@@ -6031,7 +6200,10 @@ static void render_nearby(void) {
 
   int active = 0;
   for (int i = 0; i < g_near_n; i++)
-    if (g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC) active++;
+    if (g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC &&
+        g_near_lts[i] && now - g_near_lts[i] <= NEAR_LOCAL_STICKY_SEC) {
+      active++;
+    }
 
   char *o = g_near_out; const unsigned sz = sizeof(g_near_out);
   o[0] = 0;
@@ -6045,7 +6217,9 @@ static void render_nearby(void) {
   for (int pass = 0; pass < 2; pass++) {
     for (int k = 0; k < g_near_n; k++) {
       int i = idx[k];
-      const int fresh = g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC;
+      const int fresh = g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC &&
+                        g_near_lts[i] &&
+                        now - g_near_lts[i] <= NEAR_LOCAL_STICKY_SEC;
       if ((pass == 0) != (fresh != 0)) continue;
       if (g_near_q[0]) {
         /* Search across every name we hold for them, and the key — you may
@@ -6103,12 +6277,17 @@ static void near_clear_old(void) {
   uint64_t now = hal_time_epoch();
   int w = 0;
   for (int i = 0; i < g_near_n; i++) {
-    if (!(g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC)) continue;
+    if (!(g_near_ts[i] && now - g_near_ts[i] <= NEAR_ACTIVE_SEC &&
+          g_near_lts[i] && now - g_near_lts[i] <= NEAR_LOCAL_STICKY_SEC)) {
+      continue;
+    }
     if (w != i) {
       s_cpy(g_near_call[w], g_near_call[i], sizeof(g_near_call[0]));
       s_cpy(g_near_key[w], g_near_key[i], sizeof(g_near_key[0]));
       s_cpy(g_near_name[w], g_near_name[i], sizeof(g_near_name[0]));
+      s_cpy(g_near_id[w], g_near_id[i], sizeof(g_near_id[0]));
       g_near_ts[w] = g_near_ts[i];
+      g_near_lts[w] = g_near_lts[i];
       g_near_tr[w] = g_near_tr[i];
       g_near_hops[w] = g_near_hops[i];
     }
@@ -6137,27 +6316,56 @@ static void do_nearby_tap(const char *buf) {
   int idx = -1;
   for (int i = 0; i < g_near_n; i++) {
     if ((g_near_call[i][0] && s_eq(g_near_call[i], id)) ||
-        (g_near_key[i][0] && s_eq(g_near_key[i], id))) { idx = i; break; }
+        (g_near_key[i][0] && s_eq(g_near_key[i], id)) ||
+        (g_near_id[i][0] && s_eq(g_near_id[i], id))) { idx = i; break; }
   }
   if (idx < 0) return;
   const char *disp = g_near_call[idx][0] ? g_near_call[idx]
                    : (g_near_name[idx][0] ? g_near_name[idx] : g_near_key[idx]);
-  char m[300] = "{\"type\":\"ui.profile.open\",\"callsign\":\"";
-  jesc(m, sizeof(m), disp);
-  s_cat(m, "\",\"npub\":\"", sizeof(m));
-  /* Only a real key: an LXMF destination is not an npub, and passing one would
-   * have the profile screen resolve a person who does not exist. */
-  if (s_pre(g_near_key[idx], "npub1")) jesc(m, sizeof(m), g_near_key[idx]);
-  else {
-    const char *pk = g_near_call[idx][0] ? pk_get(g_near_call[idx]) : 0;
-    if (pk) {
-      char npub[72];
-      uint32_t nn = hal_npub(pk, s_len(pk), npub, sizeof(npub) - 1);
-      if (nn > 0 && nn < sizeof(npub)) { npub[nn] = 0; jesc(m, sizeof(m), npub); }
-    }
+
+  /* A row is one of three things, and each wants a different door.
+   *
+   * 1. Somebody with a key — open their profile, where Chat and Mail live.
+   * 2. A NomadNet/Sideband peer, addressable only by its LXMF destination —
+   *    open that conversation. A profile page for them would be blank.
+   * 3. A plain Reticulum device that announced no way to message it — say so.
+   *    Doing nothing on tap reads as a broken row. */
+  const char *pk = g_near_call[idx][0] ? pk_get(g_near_call[idx]) : 0;
+  char npub[72] = "";
+  if (s_pre(g_near_key[idx], "npub1")) {
+    s_cpy(npub, g_near_key[idx], sizeof(npub));
+  } else if (pk) {
+    uint32_t nn = hal_npub(pk, s_len(pk), npub, sizeof(npub) - 1);
+    if (nn > 0 && nn < sizeof(npub)) npub[nn] = 0; else npub[0] = 0;
   }
-  s_cat(m, "\"}", sizeof(m));
-  hal_msg_send(m, s_len(m));
+
+  if (npub[0] || g_near_call[idx][0]) {
+    char m[300] = "{\"type\":\"ui.profile.open\",\"callsign\":\"";
+    jesc(m, sizeof(m), disp);
+    s_cat(m, "\",\"npub\":\"", sizeof(m));
+    if (npub[0]) jesc(m, sizeof(m), npub);
+    s_cat(m, "\"}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+    return;
+  }
+
+  if (is_hex32(g_near_key[idx])) {
+    /* Same path the New-chat picker uses for an LXMF address. */
+    if (g_near_name[idx][0]) lxname_set(g_near_key[idx], g_near_name[idx]);
+    char cid[72] = "lxmf:";
+    s_cat(cid, g_near_key[idx], sizeof(cid));
+    convo_ensure(cid);
+    groups_save();
+    render_rail();
+    char m[220] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
+    jesc(m, sizeof(m), cid);
+    s_cat(m, "\",\"select\":true,\"bump\":true}", sizeof(m));
+    hal_msg_send(m, s_len(m));
+    hal_msg_send("{\"type\":\"ui.screen.close\"}", 27);
+    return;
+  }
+
+  notify("info", "This device announced no messaging address yet");
 }
 
 static void profile_show(const char *call) {

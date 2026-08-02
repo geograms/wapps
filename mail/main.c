@@ -1167,6 +1167,29 @@ static void prompt_new_message(void) {
     send_msg(g_msg);
 }
 
+/* A thread opened under the wrong spelling of a key (an npub, say) becomes the
+ * hex thread it always was: drop the old row, create the right one, select it.
+ * The messages themselves are keyed by the peer's hex everywhere else, so the
+ * old row could only ever be empty. */
+static void rekey_convo(const char *from_id, const char *hex) {
+    if (!from_id[0] || !hex[0]) return;
+    str_copy(g_msg, "{\"type\":\"ui.convo.remove\",\"id\":\"", sizeof(g_msg));
+    json_escape_cat(g_msg, from_id, sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+    send_msg(g_msg);
+
+    int i = peer_add(hex);
+    char title[40];
+    peer_title(i, title, sizeof(title));
+    str_copy(g_msg, "{\"type\":\"ui.convo.upsert\",\"id\":\"", sizeof(g_msg));
+    json_escape_cat(g_msg, hex, sizeof(g_msg));
+    str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
+    json_escape_cat(g_msg, title, sizeof(g_msg));
+    str_cat(g_msg, "\",\"icon\":\"person\",\"select\":true}", sizeof(g_msg));
+    send_msg(g_msg);
+    if (str_eq(g_open, from_id)) str_copy(g_open, hex, sizeof(g_open));
+}
+
 /* Open (or create) the thread for whatever the user typed. A key opens straight
  * away; a callsign has to be resolved to a key first, so we ask the relays and
  * tell the user we are waiting rather than failing silently. */
@@ -1217,6 +1240,17 @@ static void open_target(const char *raw) {
 }
 
 /* A callsign→key resolution came back: file the alias and open the thread. */
+/* A message typed into a thread we only know by CALLSIGN.
+ *
+ * Mail encrypts to a KEY, so a conversation opened as "X1RD89" (all the
+ * profile knew) had nothing to send to. It used to fail silently; then it
+ * said "no usable key", which is true and useless. What the user meant is
+ * obvious: look the callsign up and send it. Held here until the relay
+ * directory answers — one slot, because a person types one message at a time
+ * and a queue that outlives the intent is worse than a retry. */
+static char g_pend_call[24] = "";
+static char g_pend_text[1024] = "";
+
 static void resolve_drain(void) {
     for (int i = 0; i < 8; i++) {
         char js[512];
@@ -1276,6 +1310,16 @@ static void resolve_drain(void) {
         str_cat(line, "found ", sizeof(line));
         str_cat(line, call[0] ? call : "key", sizeof(line));
         status_line(line);
+        /* The thread was keyed by the callsign while we looked it up: move it
+         * onto the key it turned out to be, then send what the user typed. */
+        if (g_pend_call[0] && call[0] && str_eq(call, g_pend_call)) {
+            rekey_convo(g_pend_call, hex);
+            char pending[1024];
+            str_copy(pending, g_pend_text, sizeof(pending));
+            g_pend_call[0] = '\0';
+            g_pend_text[0] = '\0';
+            if (pending[0]) do_send(hex, pending);
+        }
     }
 }
 
@@ -1434,21 +1478,59 @@ void module_handle_event(void) {
 
     char cmd[32] = "";
     json_raw(buf, "command", cmd, sizeof(cmd));
-
     if (str_eq(cmd, "conversations_send")) {
-        char peer[80] = "";
+        char peer[128] = "";
         static char text[4096];
         text[0] = '\0';
         json_raw(buf, "conversations_convo", peer, sizeof(peer));
         json_raw(buf, "conversations_input", text, sizeof(text));
         str_lower(peer);
-        if (peer[0] && text[0]) do_send(peer, text);
+        /* The thread id may be an npub or a base64url key — whatever the host
+         * (or another wapp) deep-linked us with. do_send only speaks hex, and
+         * it used to return silently on anything else: the user pressed send,
+         * the composer cleared, and the message went nowhere. Normalise, and
+         * say so if it really is unaddressable. */
+        char hex[80];
+        if (peer[0] && text[0]) {
+            if (key_to_hex(peer, hex, sizeof(hex))) {
+                if (!str_eq(hex, peer)) rekey_convo(peer, hex);
+                do_send(hex, text);
+            } else if (str_len(peer) < 20) {
+                /* Not a key — a callsign. Ask the relay directory who that is
+                 * and hold the message until it answers. */
+                char up_call[24];
+                str_copy(up_call, peer, sizeof(up_call));
+                str_upper(up_call);
+                str_copy(g_pend_call, up_call, sizeof(g_pend_call));
+                str_copy(g_pend_text, text, sizeof(g_pend_text));
+                relays_for(g_self);
+                hal_relay_resolve(up_call, str_len(up_call),
+                                  g_relays, str_len(g_relays));
+                char line[96];
+                str_copy(line, "looking up ", sizeof(line));
+                str_cat(line, up_call, sizeof(line));
+                str_cat(line, " to send your message …", sizeof(line));
+                status_line(line);
+            } else {
+                status_line("cannot send: that conversation has no usable key");
+                notify_new("Not sent", "No usable key for this conversation.",
+                           "nokey", "");
+            }
+        }
         return;
     }
     if (str_eq(cmd, "conversations_open")) {
-        char peer[80] = "";
+        char peer[128] = "";
         json_raw(buf, "conversations_convo", peer, sizeof(peer));
         str_lower(peer);
+        { /* Same normalisation as send: a thread opened under an npub becomes
+           * the hex thread it really is, once, on open. */
+            char hex[80];
+            if (key_to_hex(peer, hex, sizeof(hex)) && !str_eq(hex, peer)) {
+                rekey_convo(peer, hex);
+                str_copy(peer, hex, sizeof(peer));
+            }
+        }
         unclose(peer); /* opening a closed thread re-engages it */
         str_copy(g_open, peer, sizeof(g_open));
         int i = peer_idx(peer);
@@ -1468,6 +1550,27 @@ void module_handle_event(void) {
         if (peer[0]) {
             closed_add(peer);
             if (str_eq(g_open, peer)) g_open[0] = '\0';
+        }
+        return;
+    }
+    /* The host knows the person's name (it opened this thread from their
+     * profile); we may only know a key. File it as the callsign so the row
+     * says "X1RD89" instead of 63 characters of npub. */
+    if (str_eq(cmd, "convo_name")) {
+        char id[128] = "", name[40] = "";
+        json_raw(buf, "convo_name_id", id, sizeof(id));
+        json_raw(buf, "convo_name", name, sizeof(name));
+        str_lower(id);
+        char hex[80];
+        if (id[0] && name[0] && key_to_hex(id, hex, sizeof(hex))) {
+            int i = peer_add(hex);
+            if (i >= 0) {
+                str_copy(g_pcall[i], name, sizeof(g_pcall[0]));
+                peers_save();
+                char title[40];
+                peer_title(i, title, sizeof(title));
+                convo_upsert(hex, title, "", 0);
+            }
         }
         return;
     }

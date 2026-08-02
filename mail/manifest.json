@@ -1,6 +1,6 @@
 {
   "id":              "tools.geogram.mail",
-  "version":         "0.3.4",
+  "version":         "0.3.8",
   "kind":            "app",
   "title":           "Mail",
   "description":     "Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh.",
