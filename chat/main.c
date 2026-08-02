@@ -994,7 +994,7 @@ static int geo_dup(const char *from, const char *text) {
  * APRS-IS and BLE — or a repeated bulletin — pops only once. */
 static void notify_msg(const char *title, const char *from, const char *text,
                        const char *body) {
-  /* Chat is no longer the messenger: the Messages wapp raises the notification
+  /* Chat is no longer the messenger: the Mail wapp raises the notification
    * for a direct message. Notifying here too gave the user TWO notifications for
    * one message (observed on-device), and tapping this one would open a wapp
    * with no conversation screen to show it in. */
@@ -1153,7 +1153,7 @@ static void convo_msg(const char *id, const char *dir, const char *from,
   /* GROUPS ONLY (plus rooms, plus LXMF peers). A NOSTR 1:1 message still
    * reaches this wapp over BLE/APRS (the radios do not know the difference),
    * but rendering it here would rebuild the second inbox we just removed — the
-   * Messages wapp owns kind-4 1:1. LXMF peers are the exception: NomadNet
+   * Mail wapp owns kind-4 1:1. LXMF peers are the exception: NomadNet
    * users have no kind-4 inbox anywhere, so their DMs render here. */
   if (!is_group(id) && !room_is_room(id) && !s_pre(id, "lxmf:")) return;
   char t[8]; fmt_time(t);
@@ -1649,7 +1649,7 @@ static void convo_title(const char *id, char *out, unsigned osz) {
   s_cat(out, global ? " (global)" : " (local)", osz);   /* ASCII-only tag */
 }
 /* Refresh a conversation row (title/preview/icon + distance badge). */
-/* Chat is a GROUP client now: 1:1 moved to the Messages wapp, which owns the
+/* Chat is a GROUP client now: 1:1 moved to the Mail wapp, which owns the
  * NOSTR kind-4 inbox. A 1:1 row appearing here would be a second, worse inbox
  * for the same message — the duplication the merge set out to end. Everything
  * that would open a conversation goes through convo_touch/convo_ensure, so one
@@ -4206,7 +4206,7 @@ static void do_rooms_send(const char *buf) {
  *     service "lxmf"): matched by announced name, identity hash or LXMF
  *     delivery address; a pasted 32-hex address works even when unheard.
  *   - Geogram/NOSTR people (hal_people_search): callsign / npub / nickname —
- *     these open in the Messages wapp, which owns the one kind-4 inbox. */
+ *     these open in the Mail wapp, which owns the one kind-4 inbox. */
 
 /* djb2 + diffed send: an unchanged people list is never re-sent (a re-sent
  * list resets the scroll). */
@@ -4606,9 +4606,9 @@ static void do_finduser_tap(const char *buf) {
     const char *c = "{\"type\":\"ui.screen.close\"}";
     hal_msg_send(c, s_len(c));
   } else if (s_pre(id, "np:")) {
-    /* A NOSTR person: their 1:1 lives in the Messages wapp (the ONE kind-4
+    /* A NOSTR person: their 1:1 lives in the Mail wapp (the ONE kind-4
      * inbox) — jump there instead of growing a second copy here. */
-    char m[200] = "{\"type\":\"messages.open\",\"target\":\"";
+    char m[200] = "{\"type\":\"mail.open\",\"target\":\"";
     jesc(m, sizeof(m), id + 3);
     s_cat(m, "\"}", sizeof(m));
     hal_msg_send(m, s_len(m));
@@ -4880,16 +4880,26 @@ static void convo_ensure(const char *id) {
   hal_msg_send(m, s_len(m));
 }
 
-/* Groups every NEW install is subscribed to (global, so worldwide messages show
- * up out of the box). Seeded exactly once — guarded by KV "grpseed" so a user
- * who later removes them isn't re-subscribed on the next launch. */
-static const char *DEFAULT_GROUPS[] = {
-  "#DEV*", "#NEWS*", "#MISC*", "#HELP*", "#HELLO*", "#CHILL*"
+/* The #topic groups older builds subscribed every install to. Nothing seeds
+ * them any more — the rooms rail replaced them — but they are still in KV
+ * "groups" on any device that ever ran those builds, so they keep showing up
+ * as rows nobody chose. Listed here only to REMOVE them. */
+static const char *LEGACY_DEFAULT_GROUPS[] = {
+  "#DEV", "#NEWS", "#MISC", "#HELP", "#HELLO", "#CHILL"
 };
-static void groups_seed_defaults(void) {
-  /* Retired: the Discord-like rooms rail replaces the old default #topics, so a
-   * fresh install seeds none. (Kept referenced to satisfy -Werror.) */
-  (void)DEFAULT_GROUPS;
+/* Is [id] one of those, in either scope ("#DEV" or the global "#DEV*")? */
+static int is_legacy_default_group(const char *id) {
+  if (!id || id[0] != '#') return 0;
+  char bare[24];
+  s_cpy(bare, id, sizeof(bare));
+  unsigned L = s_len(bare);
+  if (L && bare[L - 1] == '*') bare[L - 1] = 0;   /* drop the global marker */
+  for (unsigned i = 0;
+       i < sizeof(LEGACY_DEFAULT_GROUPS) / sizeof(LEGACY_DEFAULT_GROUPS[0]);
+       i++) {
+    if (s_eq(bare, LEGACY_DEFAULT_GROUPS[i])) return 1;
+  }
+  return 0;
 }
 /* One-time: drop the conversation rows this wapp used to own.
  *
@@ -4899,7 +4909,7 @@ static void groups_seed_defaults(void) {
  * the store once; groups_load() immediately re-creates every group row after.
  *
  * This discards Chat's old 1:1 history. That is the intent, not a side effect:
- * those conversations live in the Messages wapp now, which holds them as NOSTR
+ * those conversations live in the Mail wapp now, which holds them as NOSTR
  * kind-4 and rehydrates them from the relays. Group history is lost with it,
  * which is a real cost — the groups were near-empty broadcast channels, and
  * carrying a split-brain inbox forward costs more. */
@@ -4920,8 +4930,13 @@ static void groups_load(void) {
   convo_purge_legacy();
   char buf[600];
   uint32_t n = hal_kv_get("groups", 6, buf, sizeof(buf) - 1);
-  if (n == 0) { groups_seed_defaults(); return; } /* fresh install -> defaults */
+  if (n == 0) return;                       /* clean slate: nothing is seeded */
   buf[n] = 0;
+  /* One-time: forget the #topic groups older builds subscribed everyone to.
+   * Only those exact ids — a group the user joined themselves stays. */
+  int drop_defaults = 0;
+  { char f[2];
+    if (hal_kv_get("grpclean", 8, f, sizeof(f) - 1) == 0) drop_defaults = 1; }
   char id[40]; int j = 0;
   for (unsigned i = 0; i <= n; i++) {
     char ch = (i < n) ? buf[i] : ';';
@@ -4929,6 +4944,14 @@ static void groups_load(void) {
      * shows in the Messages list on every page open, not only the g/ filter. */
     if (ch == ';') {
       id[j] = 0;
+      if (drop_defaults && is_legacy_default_group(id)) {
+        char m[160] = "{\"type\":\"ui.convo.remove\",\"id\":\"";
+        jesc(m, sizeof(m), id);
+        s_cat(m, "\"}", sizeof(m));
+        hal_msg_send(m, s_len(m));
+        j = 0;
+        continue;                      /* not remembered → dropped on save */
+      }
       /* Drop malformed lxmf rows written by an earlier build (the separator
        * bug welded the peer's name onto the address). They are unopenable and
        * un-messageable; removing the row also removes its phantom unread. */
@@ -4946,15 +4969,16 @@ static void groups_load(void) {
     }
     else if (j < 39) id[j++] = ch;
   }
-  /* Existing install already has groups: mark seeded so a later "remove all"
-   * doesn't trigger the new-install defaults. */
-  char f[2];
-  if (hal_kv_get("grpseed", 7, f, sizeof(f) - 1) == 0)
-    hal_kv_set("grpseed", 7, "1", 1);
-  /* The NomadNet bridge channel exists whenever the bridge is on — messages
-   * from LXMF nodes land there, so it must be on the rail BEFORE the first
-   * one arrives, not only after. */
-  if (g_chan_nomad && !convo_known(LXMF_GROUP)) convo_ensure(LXMF_GROUP);
+  if (drop_defaults) {
+    groups_save();          /* persist the shorter list, once */
+    hal_kv_set("grpclean", 8, "1", 1);
+    const char *lg = "[chat] removed the legacy default #topic groups";
+    hal_log(1, lg, s_len(lg));
+  }
+  /* The NomadNet bridge channel is NOT pre-created any more: an empty row for
+   * traffic that may never arrive is exactly the clutter a clean slate is
+   * meant to avoid. lxmf_drain creates and persists it the moment a message
+   * for it actually lands. */
   render_rail();   /* the restored channels belong on the rail immediately */
 }
 
@@ -6420,7 +6444,7 @@ void module_tick(void) {
     }
   }
 
-  /* 1:1 messaging moved to the Messages wapp (tools.geogram.messages), which
+  /* 1:1 messaging moved to the Mail wapp (tools.geogram.mail), which
    * owns the NOSTR kind-4 inbox. This wapp no longer polls the relays for DMs:
    * doing so delivered a SECOND copy of every message and raised a SECOND
    * notification for it, and cost a relay round-trip every 60s for a UI that no
