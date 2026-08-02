@@ -372,10 +372,36 @@ static unsigned long long g_last_fetch = 0;
 static unsigned long long g_last_names = 0;
 static int g_sent = 0, g_recv = 0, g_dupes = 0;
 
+/* Newest message timestamp we have ever raised unread/notify for, persisted
+ * (KV "ntfts"). Replays and mailbox copies of OLDER messages are history, not
+ * news: they may still land in the thread, but they must not ring the bell. */
+static unsigned long long g_notif_ts = 0;
+
 static char g_evt[8192];
 static char g_plain[4096];
 static char g_msg[6144];
 static char g_relays[1024];
+
+/* ── Notify watermark (persistent) ─────────────────────────────────────── */
+static unsigned long long u64_parse(const char *s) {
+    unsigned long long v = 0;
+    for (unsigned i = 0; s[i] >= '0' && s[i] <= '9'; i++) v = v * 10 + (s[i] - '0');
+    return v;
+}
+static void notifts_load(void) {
+    char buf[24];
+    unsigned n = hal_kv_get("ntfts", 5, buf, sizeof(buf) - 1);
+    if (n == 0 || n >= sizeof(buf)) return;
+    buf[n] = '\0';
+    g_notif_ts = u64_parse(buf);
+}
+static void notifts_advance(unsigned long long ts) {
+    if (ts <= g_notif_ts) return;
+    g_notif_ts = ts;
+    char buf[24];
+    u64_str(ts, buf);
+    hal_kv_set("ntfts", 5, buf, str_len(buf));
+}
 
 /* ── Dedup ring (persistent) ─────────────────────────────────────────────
  * A store-and-forward copy can arrive minutes — or a reboot — after the direct
@@ -950,8 +976,15 @@ static void ingest(const char *peer_hex, const char *plaintext, int mine,
     const char *text = env_split(plaintext, rmid, sizeof(rmid));
 
     /* Dedup on the envelope id when present (folds the two lanes together),
-     * else on the lane's own event id (an older sender, one copy only). */
-    const char *key = rmid[0] ? rmid : lane_id;
+     * else on the lane's own event id (an older sender, one copy only).
+     *
+     * The ring stores 19 chars per slot, so the lookup key must be truncated
+     * to the SAME width before comparing: a full 64-char event id matched
+     * against its stored truncation never hits, which made every pre-envelope
+     * message a brand-new message on every replay — ghost notifications and
+     * duplicated rows, forever. */
+    char key[20];
+    str_copy(key, rmid[0] ? rmid : lane_id, sizeof(key));
     int dup = seen_has(key);
     {   /* Which key a copy dedups on is the difference between one bubble and
          * four, and it is invisible from outside — so say it out loud. */
@@ -991,11 +1024,19 @@ static void ingest(const char *peer_hex, const char *plaintext, int mine,
 
     if (!mine) {
         g_recv++;
-        if (!str_eq(g_open, peer_hex)) {
+        /* News = strictly newer than anything we already rang the bell for.
+         * A replay or a late mailbox copy of an older message still lands in
+         * the thread above, but it is history — no unread, no notification.
+         * (Messages sent while we were offline ARE newer than the watermark,
+         * so the offline-catchup case keeps notifying.) */
+        unsigned long long tsn = u64_parse(ts);
+        int news = tsn == 0 || tsn > g_notif_ts;
+        if (news && !str_eq(g_open, peer_hex)) {
             g_peer_unread[i]++;
             unread_emit();
             notify_new(title, text, key);
         }
+        if (tsn > 0) notifts_advance(tsn);
     }
 }
 
@@ -1326,6 +1367,7 @@ void module_init(void) {
     peers_load();
     block_load();
     closed_load();
+    notifts_load();
     blocked_render();
     email_load();
     email_render();
