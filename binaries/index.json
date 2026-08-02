@@ -202,6 +202,7 @@
   {"file":"mail/mail-0.3.1.wapp","id":"tools.geogram.mail","version":"0.3.1","size":57836,"title":"Mail","description":"Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},
   {"file":"mail/mail-0.3.2.wapp","id":"tools.geogram.mail","version":"0.3.2","size":59951,"title":"Mail","description":"Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},
   {"file":"mail/mail-0.3.3.wapp","id":"tools.geogram.mail","version":"0.3.3","size":61007,"title":"Mail","description":"Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},
+  {"file":"mail/mail-0.3.4.wapp","id":"tools.geogram.mail","version":"0.3.4","size":61172,"title":"Mail","description":"Mail — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},
   {"file":"maps/maps-1.0.1.wapp","id":"tools.geogram.maps","version":"1.0.1","size":13128,"title":"Maps","description":"Satellite maps with offline tile cache."},
   {"file":"messages/messages-0.1.0.wapp","id":"tools.geogram.messages","version":"0.1.0","size":40461,"title":"Messages","description":"Messages — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},
   {"file":"messages/messages-0.1.1.wapp","id":"tools.geogram.messages","version":"0.1.1","size":40856,"title":"Messages","description":"Messages — one inbox. Encrypted NOSTR direct messages over the internet and the Reticulum mesh."},

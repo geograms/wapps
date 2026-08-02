@@ -566,14 +566,20 @@ static void unread_emit(void) {
 /* One tag PER MESSAGE (the envelope id / event id), namespaced "mail:". A
  * constant tag collapsed every mail into one notification row AND suppressed
  * the 2nd..Nth mail of a session (the host announces a tag once, ever —
- * persisted across restarts). */
-static void notify_new(const char *title, const char *body, const char *key) {
+ * persisted across restarts). `convo` (the peer's pubkey) makes the
+ * notification tappable: the host opens THAT thread, not the inbox. */
+static void notify_new(const char *title, const char *body, const char *key,
+                       const char *convo) {
     str_copy(g_msg, "{\"type\":\"notify\",\"level\":\"info\",\"intent\":\"mail\",\"title\":\"", sizeof(g_msg));
     json_escape_cat(g_msg, title, sizeof(g_msg));
     str_cat(g_msg, "\",\"body\":\"", sizeof(g_msg));
     json_escape_cat(g_msg, body, sizeof(g_msg));
     str_cat(g_msg, "\",\"tag\":\"mail:", sizeof(g_msg));
     json_escape_cat(g_msg, key, sizeof(g_msg));
+    if (convo && convo[0]) {
+        str_cat(g_msg, "\",\"convo\":\"", sizeof(g_msg));
+        json_escape_cat(g_msg, convo, sizeof(g_msg));
+    }
     str_cat(g_msg, "\"}", sizeof(g_msg));
     send_msg(g_msg);
 }
@@ -1034,7 +1040,7 @@ static void ingest(const char *peer_hex, const char *plaintext, int mine,
         if (news && !str_eq(g_open, peer_hex)) {
             g_peer_unread[i]++;
             unread_emit();
-            notify_new(title, text, key);
+            notify_new(title, text, key, peer_hex);
         }
         if (tsn > 0) notifts_advance(tsn);
     }
@@ -1131,7 +1137,7 @@ static void do_send(const char *peer_hex, const char *text) {
     if (lane1 <= 0 && lane2 <= 0) {
         status_line("send FAILED: no relay reachable on either lane");
         notify_new("Not sent", "No relay reachable — the message was not sent.",
-                   rmid);
+                   rmid, peer_hex);
     }
 }
 
