@@ -1049,10 +1049,16 @@ static void notify_msg(const char *title, const char *from, const char *text,
    * correctly on its own. */
   const char *shown = title;
   if (s_pre(title, "lxmf:") && from && from[0]) shown = from;
-  char m[480] = "{\"type\":\"notify\",\"level\":\"info\",\"title\":\"";
+  char m[560] = "{\"type\":\"notify\",\"level\":\"info\",\"title\":\"";
   jesc(m, sizeof(m), shown);
   s_cat(m, "\",\"body\":\"", sizeof(m));
   jesc(m, sizeof(m), body);
+  /* The conversation this is about — the host routes a notification TAP
+   * through geogram://open?wapp=chat&convo=<id> straight into this thread.
+   * Without it a tap opened the app on whatever screen it was left on, which
+   * reads as "notifications don't work". */
+  s_cat(m, "\",\"convo\":\"", sizeof(m));
+  jesc(m, sizeof(m), title);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
 }
