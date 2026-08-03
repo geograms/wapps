@@ -1179,6 +1179,16 @@ static void rekey_convo(const char *from_id, const char *hex) {
     send_msg(g_msg);
 
     int i = peer_add(hex);
+    /* Carry the name across. The row we are replacing was keyed by what the
+     * user typed — a callsign — and the new hex-keyed peer starts blank, so
+     * peer_title() fell through to the truncated public key and the thread
+     * the user had just been reading as "X1RD89" turned into
+     * "1b4e5d3686a0" the moment they sent to it. */
+    if (i >= 0 && !g_pcall[i][0] && from_id[0] && !is_hex64(from_id)) {
+        str_copy(g_pcall[i], from_id, sizeof(g_pcall[0]));
+        str_upper(g_pcall[i]);
+        peers_save();
+    }
     char title[40];
     peer_title(i, title, sizeof(title));
     str_copy(g_msg, "{\"type\":\"ui.convo.upsert\",\"id\":\"", sizeof(g_msg));
