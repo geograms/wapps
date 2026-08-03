@@ -296,6 +296,7 @@ static int ble_reach_chips(char *out, unsigned max);
 /* Reticulum 1:1 sender (defined after the BLE frame packer); fans the same frame
  * out to every RNS delivery dest advertised under the recipient's npub. */
 static int rns_tx_msg(const char *to, const char *wire);
+static int rns_tx_public(const char *to, const char *wire);
 /* Reticulum is the PRIMARY transport (APRS-IS is legacy/opt-in and requires a
  * licensed callsign): 1 when the local RNS node is up. Defined with rns_tx_msg. */
 static int rns_up(void);
@@ -2975,7 +2976,7 @@ static void convo_send_core(const char *buf, const char *id_in,
     /* Primary: Reticulum — directed to every known device of the recipient plus
      * an encrypted-safe broadcast; store-and-forward holds it for an offline
      * peer. Copies arriving over more than one transport dedup on receipt. */
-    rns_tx_msg(id, wire);
+    rns_tx_public(id, wire);
     if (g_ble_on) ble_tx_msg(id, wire);
     /* Legacy APRS-IS (opt-in, licensed callsign only). Encrypted (ENC1) messages
      * are NEVER sent over APRS-IS: APRS is a 7-bit text protocol and mangles the
@@ -3632,6 +3633,27 @@ static int rns_tx_msg(const char *to, const char *wire) {
    * against the directed copy by content hash, so it still shows once. */
   if (hal_rns_broadcast(frame, s_len(frame)) == 1) sent++;
   return sent;
+}
+
+/* PUBLIC 1:1 send. Same as rns_tx_msg, except that a recipient whose pubkey we
+ * have never heard still gets the frame — as a plaintext Reticulum broadcast,
+ * which is what the message already is when there is no key to encrypt it to.
+ *
+ * rns_tx_msg returns 0 the moment pk_get() comes up empty, BEFORE the broadcast
+ * backstop, so writing to a contact whose pubkey beacon had not arrived yet
+ * transmitted NOTHING: no directed copy, no broadcast, and with BLE and APRS-IS
+ * off (the normal case) the message left the device by no path at all while the
+ * UI happily echoed it into the thread. Private conversations keep the strict
+ * rule — they must never fall back to plaintext — so they still call
+ * rns_tx_msg directly. */
+static int rns_tx_public(const char *to, const char *wire) {
+  int sent = rns_tx_msg(to, wire);
+  if (sent > 0) return sent;
+  const char *npub = pk_get(to);
+  if (npub && npub[0]) return sent;   /* key known: rns_tx_msg already broadcast */
+  char frame[900];
+  ble_pack(frame, sizeof(frame), g_call, to, wire);
+  return hal_rns_broadcast(frame, s_len(frame)) == 1 ? 1 : 0;
 }
 
 /* ── Store-and-forward: BLE iGate mailbox for heard stations ──────────────
