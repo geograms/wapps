@@ -993,23 +993,56 @@ static int geo_dup(const char *from, const char *text) {
  * user is alerted with the screen off / app closed) and an in-app card when the
  * page is open. Content-deduped (own ring) so the same message arriving via both
  * APRS-IS and BLE — or a repeated bulletin — pops only once. */
+/* Alert the user about a message they cannot see, because the app is in the
+ * background or on another screen.
+ *
+ * This was a no-op — disabled wholesale on the reasoning that "Mail raises the
+ * notification for a direct message", which is true only for the NOSTR kind-4
+ * inbox Mail owns. Everything Chat itself renders — LXMF peer DMs, rooms,
+ * groups, Activity — notified NOBODY. A phone in someone's pocket received
+ * messages in complete silence, which is the same as not receiving them.
+ *
+ * The boundary is exactly the one convo_msg draws: notify for what Chat shows,
+ * stay quiet for the plain 1:1 that belongs to Mail (which notifies it), so a
+ * single message never produces two notifications. */
+static uint32_t g_notif_seen[16];
+static int g_notif_w = 0;
+
+static int notif_dup(const char *from, const char *text) {
+  uint32_t h = 5381;
+  for (int i = 0; from && from[i]; i++) h = h * 33u + (unsigned char)from[i];
+  for (int i = 0; text && text[i]; i++) h = h * 33u + (unsigned char)text[i];
+  if (!h) h = 1;
+  for (int i = 0; i < 16; i++) if (g_notif_seen[i] == h) return 1;
+  g_notif_seen[g_notif_w] = h;
+  g_notif_w = (g_notif_w + 1) % 16;
+  return 0;
+}
+
+static int is_group(const char *id);       /* '#' prefix; defined below */
 static void notify_msg(const char *title, const char *from, const char *text,
                        const char *body) {
-  /* Chat is no longer the messenger: the Mail wapp raises the notification
-   * for a direct message. Notifying here too gave the user TWO notifications for
-   * one message (observed on-device), and tapping this one would open a wapp
-   * with no conversation screen to show it in. */
-  (void)title; (void)from; (void)text; (void)body;
-  return;
-#if 0
+  if (!title || !title[0]) return;
+  /* Only what this wapp can actually open and show. A 1:1 keyed by callsign is
+   * Mail's; notifying it here would double up and then land the user in a wapp
+   * with no thread to show them. */
+  if (!(is_group(title) || room_is_room(title) || s_pre(title, "lxmf:") ||
+        s_eq(title, "Activity"))) {
+    return;
+  }
   if (notif_dup(from, text)) return;
+  /* Show WHO wrote, not the address they wrote from: an LXMF thread id is
+   * "lxmf:" plus 32 hex characters, which told the user nothing except that
+   * something happened. Groups and rooms keep their own id — "#NEWS" reads
+   * correctly on its own. */
+  const char *shown = title;
+  if (s_pre(title, "lxmf:") && from && from[0]) shown = from;
   char m[480] = "{\"type\":\"notify\",\"level\":\"info\",\"title\":\"";
-  jesc(m, sizeof(m), title);
+  jesc(m, sizeof(m), shown);
   s_cat(m, "\",\"body\":\"", sizeof(m));
   jesc(m, sizeof(m), body);
   s_cat(m, "\"}", sizeof(m));
   hal_msg_send(m, s_len(m));
-#endif
 }
 
 /* BLE mesh repeater: rebroadcast each received frame once, suppressing any
