@@ -1786,6 +1786,26 @@ static void lxmf_title(const char *id, char *out, unsigned osz) {
   s_cat(out, sh, osz);
 }
 
+/* Chat renders exactly three kinds of conversation: a #group, a room, and an
+ * "lxmf:" thread (see convo_msg, which drops everything else). An id outside
+ * that set can therefore NEVER hold a message — and two emitters below used to
+ * upsert one keyed by a bare CALLSIGN, which produced a row in the host list
+ * that looked like a conversation, carried a preview, and opened to "No
+ * messages yet" forever. The real thread sat right beside it under its
+ * "lxmf:<dest>" id. Refuse those ids, and remove any ghost an older build
+ * already wrote into the host's store. */
+static int convo_renderable(const char *id) {
+  return id && id[0] && (is_group(id) || is_lxmf(id) || room_is_room(id));
+}
+
+static void convo_drop_ghost(const char *id) {
+  if (!id || !id[0]) return;
+  char m[140] = "{\"type\":\"ui.convo.remove\",\"id\":\"";
+  jesc(m, sizeof(m), id);
+  s_cat(m, "\"}", sizeof(m));
+  hal_msg_send(m, s_len(m));
+}
+
 static void convo_touch(const char *id, const char *preview, int select) {
   if (!is_group(id) && !is_lxmf(id) && !room_is_room(id)) return;
   convo_remember(id);
@@ -1808,6 +1828,7 @@ static void convo_touch(const char *id, const char *preview, int select) {
 /* Distance-only refresh (when a known contact beacons a new position). */
 static void convo_badge_only(const char *id) {
   if (id[0] == '#') return;
+  if (!convo_renderable(id)) { convo_drop_ghost(id); return; }
   char badge[24] = ""; distance_badge(id, badge, sizeof(badge));
   if (!badge[0]) return;
   char m[160] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
@@ -2056,6 +2077,7 @@ static void cpriv_load(void) {
 }
 /* Show/hide the private (off-grid) badge on a conversation row in the host UI. */
 static void convo_priv_emit(const char *call, int on) {
+  if (!convo_renderable(call)) { convo_drop_ghost(call); return; }
   char m[120] = "{\"type\":\"ui.convo.upsert\",\"id\":\"";
   jesc(m, sizeof(m), call);
   s_cat(m, "\",\"private\":", sizeof(m));
@@ -6944,6 +6966,11 @@ void module_init(void) {
   pk_load();       /* restore known callsign -> pubkey map (for verification) */
   rns_dest_load(); /* restore npub -> {RNS delivery dests} (Reticulum addressing) */
   cpriv_load();    /* restore which 1:1 conversations are private (Reticulum-only) */
+  /* Sweep out callsign-keyed ghost rows written by older builds: every id we
+   * hold as a bare callsign is, by definition, not something this wapp can
+   * render. Cheap, idempotent, and it heals a store the user is looking at. */
+  for (int i = 0; i < g_cpriv_n; i++) convo_drop_ghost(g_cpriv[i]);
+  for (int i = 0; i < g_pk_n; i++) convo_drop_ghost(g_pk_call[i]);
   pollrelay_load(); /* restore NOSTR relays peers told us to poll for DM backups */
   midseen_load();   /* restore the persistent relay-message dedup ring */
   pk_render();     /* populate the Keys list view from the restored database */
