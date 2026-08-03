@@ -1006,15 +1006,27 @@ static int geo_dup(const char *from, const char *text) {
  * stay quiet for the plain 1:1 that belongs to Mail (which notifies it), so a
  * single message never produces two notifications. */
 static uint32_t g_notif_seen[16];
+static uint64_t g_notif_time[16];
 static int g_notif_w = 0;
 
+/* Suppress only a REAL duplicate: the same message arriving again over another
+ * transport, which happens within seconds. A plain content ring with no clock
+ * silenced a person genuinely saying the same thing twice — the second "ok" of
+ * the day never notified. 60s covers every multi-transport race we have. */
+#define NOTIF_DUP_WINDOW_SEC 60
 static int notif_dup(const char *from, const char *text) {
   uint32_t h = 5381;
   for (int i = 0; from && from[i]; i++) h = h * 33u + (unsigned char)from[i];
   for (int i = 0; text && text[i]; i++) h = h * 33u + (unsigned char)text[i];
   if (!h) h = 1;
-  for (int i = 0; i < 16; i++) if (g_notif_seen[i] == h) return 1;
+  uint64_t now = hal_time_epoch();
+  for (int i = 0; i < 16; i++) {
+    if (g_notif_seen[i] == h && now - g_notif_time[i] < NOTIF_DUP_WINDOW_SEC) {
+      return 1;
+    }
+  }
   g_notif_seen[g_notif_w] = h;
+  g_notif_time[g_notif_w] = now;
   g_notif_w = (g_notif_w + 1) % 16;
   return 0;
 }
