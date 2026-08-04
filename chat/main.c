@@ -453,12 +453,22 @@ static void push_status(void) {
   hal_msg_send(m, s_len(m));
 }
 
-static void fmt_time(char *b) {
-  uint64_t e = hal_time_epoch();
+static void fmt_time_at(char *b, uint64_t e) {
   int hh = (int)((e / 3600) % 24), mm = (int)((e / 60) % 60);
   b[0] = (char)('0' + hh / 10); b[1] = (char)('0' + hh % 10); b[2] = ':';
   b[3] = (char)('0' + mm / 10); b[4] = (char)('0' + mm % 10); b[5] = 0;
 }
+static void fmt_time(char *b) { fmt_time_at(b, hal_time_epoch()); }
+
+/* When set, the NEXT convo_msg stamps this epoch instead of "now".
+ *
+ * A message's time is the SENDER's, not ours: an LXMF message can sit in a
+ * propagation mailbox for hours, and stamping arrival made the two devices
+ * show different minutes for the same message. That matters beyond looks —
+ * a like names its target by content AND minute, so a disagreement there is a
+ * like that lands on nothing. The envelope carries the sender's timestamp;
+ * this is how it reaches the bubble. */
+static uint64_t g_msg_epoch = 0;
 
 /* kind: "pos" (position beacon) or "msg" (text message). The host uses
  * it to detect repeats — positions repeat per callsign (telemetry varies),
@@ -1121,8 +1131,10 @@ static void convo_msg(const char *id, const char *dir, const char *from,
    * but rendering it here would rebuild the second inbox we just removed — the
    * Mail wapp owns kind-4 1:1. LXMF peers are the exception: NomadNet
    * users have no kind-4 inbox anywhere, so their DMs render here. */
+  uint64_t stamp = g_msg_epoch; g_msg_epoch = 0;  /* one message, one stamp */
   if (!is_group(id) && !room_is_room(id) && !s_pre(id, "lxmf:")) return;
-  char t[8]; fmt_time(t);
+  char t[8];
+  if (stamp) fmt_time_at(t, stamp); else fmt_time(t);
   char m[640] = "{\"type\":\"ui.convo.msg\",\"id\":\"";
   jesc(m, sizeof(m), id);
   s_cat(m, "\",\"dir\":\"", sizeof(m)); s_cat(m, dir, sizeof(m));
@@ -1447,13 +1459,29 @@ static void hide_add(const char *id, const char *key) {
  * derives the count + whether *we* liked it. [remove] retracts the like;
  * [mine] flags our own vote so the host can light the heart. App-agnostic on
  * the host side (a generic reaction by an opaque actor id). */
+static void convo_react_of(const char *ck, const char *id, const char *mid,
+                           const char *from, int remove, int mine);
 static void convo_react(const char *id, const char *mid, const char *from,
                         int remove, int mine) {
-  char m[220] = "{\"type\":\"ui.convo.react\",\"id\":\"";
+  convo_react_of("", id, mid, from, remove, mine);
+}
+/* As convo_react, plus a CONTENT KEY for what was voted on. Two devices that
+ * never agreed on an id — anything sent before ids were derived, or a peer
+ * that numbers messages differently — resolve the target by content instead.
+ * The key is opaque here: the host computes it from the message it holds, and
+ * this wapp only carries it. Without it a like on an older message reached the
+ * other side and matched nothing. */
+static void convo_react_of(const char *ck, const char *id, const char *mid,
+                           const char *from, int remove, int mine) {
+  char m[260] = "{\"type\":\"ui.convo.react\",\"id\":\"";
   jesc(m, sizeof(m), id);
   s_cat(m, "\",\"mid\":\"", sizeof(m)); s_cat(m, mid, sizeof(m));
   s_cat(m, "\",\"from\":\"", sizeof(m)); jesc(m, sizeof(m), from);
   s_cat(m, "\"", sizeof(m));
+  if (ck && ck[0]) {
+    s_cat(m, ",\"ck\":\"", sizeof(m)); jesc(m, sizeof(m), ck);
+    s_cat(m, "\"", sizeof(m));
+  }
   if (remove) s_cat(m, ",\"remove\":true", sizeof(m));
   if (mine) s_cat(m, ",\"mine\":true", sizeof(m));
   s_cat(m, "}", sizeof(m));
@@ -2437,9 +2465,14 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   if (id[0] == '#') {
     /* A like vote ("<4hex>:like") is not a chat message: register the reaction
      * and stop (no bubble). Works for our own echo (mine) and others' votes. */
-    char tgt[5]; int unlike;
-    if (like_parse(body, tgt, &unlike)) {
-      convo_react(id, tgt, from, unlike, s_eq(from, g_call));
+    char tgt[70]; int unlike; const char *vtext;
+    if (votemark_parse(body, tgt, &unlike, &vtext)) {
+      convo_react_of(vtext, id, tgt, from, unlike, s_eq(from, g_call));
+      return 0;
+    }
+    char stgt[5];
+    if (like_parse(body, stgt, &unlike)) {
+      convo_react(id, stgt, from, unlike, s_eq(from, g_call));
       return 0;
     }
     msg_id(from, body, mid);
@@ -4166,11 +4199,17 @@ static void do_rooms_send(const char *buf) {
        * (the host widget only knows how to send text), and without this branch
        * the vote was DELIVERED to the peer as a bubble reading "b9fb:like"
        * while no heart ever lit on either side. */
-      char ltgt[70]; int unlike;
-      if (anylike_parse(text, ltgt, &unlike)) {
+      char ltgt[70]; int unlike; const char *vtext;
+      if (votemark_parse(text, ltgt, &unlike, &vtext) ||
+          (vtext = "", anylike_parse(text, ltgt, &unlike))) {
         char from[16]; s_cpy(from, g_call, sizeof(from));
-        hal_lxmf_send(dest, s_len(dest), "", 0, text, s_len(text));
-        convo_react(rid, ltgt, from, unlike, 1);  /* our vote lights it now */
+        /* Send the vote WITH the text it voted on, so the peer can find the
+         * message even when it never held our id for it — which is every
+         * message either side sent before ids were derived. */
+        char wire[96];
+        votemark_wire(wire, sizeof(wire), ltgt, unlike, vtext);
+        hal_lxmf_send(dest, s_len(dest), "", 0, wire, s_len(wire));
+        convo_react_of(vtext, rid, ltgt, from, unlike, 1); /* lights it now */
         return;
       }
       /* A reply carries its parent as a "+<4hex> " marker. That is wire
@@ -4201,11 +4240,14 @@ static void do_rooms_send(const char *buf) {
   /* The heart button rides the send path: a like is a REACTION (kind 7 on the
    * wire, a tally in the UI), never a message bubble. */
   {
-    char mid[70]; int unlike;
-    if (roomlike_parse(text, mid, &unlike)) {
+    char mid[70]; int unlike; const char *vtext;
+    if (votemark_parse(text, mid, &unlike, &vtext) ||
+        (vtext = "", roomlike_parse(text, mid, &unlike))) {
       room_react(rid, mid, unlike);
       char from[16]; s_cpy(from, g_pubkey[0] ? g_pubkey : g_call, 13);
-      convo_react(rid, mid, from, unlike, 1);   /* our vote lights the heart now */
+      /* Rooms address by NOSTR event id, which both ends do share — the text
+       * only rides along so the local tally lands on the right bubble. */
+      convo_react_of(vtext, rid, mid, from, unlike, 1);
       return;
     }
   }
@@ -4901,7 +4943,11 @@ static void lxmf_drain(void) {
      * (or an older build of ours) that puts a vote on the wire must never
      * become a bubble here. */
     {
-      char ltgt[70]; int ul;
+      char ltgt[70]; int ul; const char *vtext;
+      if (votemark_parse(body, ltgt, &ul, &vtext)) {
+        convo_react_of(vtext, cid, ltgt, who, ul, 0);
+        continue;
+      }
       if (anylike_parse(body, ltgt, &ul)) {
         convo_react(cid, ltgt, who, ul, 0);
         continue;
@@ -4915,6 +4961,10 @@ static void lxmf_drain(void) {
     thread_parse(body, parent, &disp);
     if (!disp[0]) continue;
     char mid[5]; msg_id(is_group_msg ? who : from, disp, mid);
+    /* Show the time the sender wrote it (the envelope's), not the time it
+     * reached us — see g_msg_epoch. */
+    int sent_ts = jint(js, "ts");
+    if (sent_ts > 0) g_msg_epoch = (uint64_t)sent_ts;
     convo_msg(cid, "in", who, disp, "", "", 0, 0, "LXM", mid, parent, "", 0, 0);
     convo_touch(cid, disp, 0);
     notify_msg(cid, who, disp, disp);

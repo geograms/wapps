@@ -162,6 +162,67 @@ WAPP_TEST(anylike_covers_both_id_lengths) {
   WAPP_EXPECT_INT_EQ(unlike, 0);
 }
 
+/* ── Votes that name their target by content ─────────────────────── */
+
+WAPP_TEST(votemark_splits_id_from_content_key) {
+  char mid[70]; int unlike = 9; const char *ck;
+  WAPP_EXPECT_TRUE(votemark_parse("+like:9eb5 1a2b3c4d", mid, &unlike, &ck));
+  WAPP_EXPECT_STR_EQ(mid, "9eb5");
+  WAPP_EXPECT_STR_EQ(ck, "1a2b3c4d");
+  WAPP_EXPECT_INT_EQ(unlike, 0);
+  WAPP_EXPECT_TRUE(votemark_parse("+unlike:9eb5 1a2b3c4d", mid, &unlike, &ck));
+  WAPP_EXPECT_INT_EQ(unlike, 1);
+}
+
+/* A message with no text (an image reference) has no content key: the id is
+ * all there is, and the vote still has to parse. */
+WAPP_TEST(votemark_without_a_key_still_parses) {
+  char mid[70]; int unlike; const char *ck;
+  WAPP_EXPECT_TRUE(votemark_parse("+like:9eb5", mid, &unlike, &ck));
+  WAPP_EXPECT_STR_EQ(mid, "9eb5");
+  WAPP_EXPECT_STR_EQ(ck, "");
+}
+
+/* The id may be any length — a 64-hex NOSTR event id from a room, or the
+ * envelope hash an older build used. */
+WAPP_TEST(votemark_takes_a_long_id) {
+  const char *ev =
+      "82ccbaec1f0d4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233";
+  char in[96]; strcpy(in, "+like:"); strcat(in, ev); strcat(in, " 1a2b3c4d");
+  char mid[70]; int unlike; const char *ck;
+  WAPP_EXPECT_TRUE(votemark_parse(in, mid, &unlike, &ck));
+  WAPP_EXPECT_STR_EQ(mid, ev);
+  WAPP_EXPECT_STR_EQ(ck, "1a2b3c4d");
+}
+
+WAPP_TEST(a_reply_is_not_a_vote) {
+  char mid[70]; int unlike; const char *ck;
+  WAPP_EXPECT_TRUE(!votemark_parse("+9eb5 OK", mid, &unlike, &ck));
+  WAPP_EXPECT_TRUE(!votemark_parse("+like", mid, &unlike, &ck));
+  WAPP_EXPECT_TRUE(!votemark_parse("+like:", mid, &unlike, &ck));
+  WAPP_EXPECT_TRUE(!votemark_parse("I like: this", mid, &unlike, &ck));
+}
+
+WAPP_TEST(votemark_round_trips) {
+  char wire[96]; char mid[70]; int unlike; const char *ck;
+  votemark_wire(wire, sizeof(wire), "9eb5", 0, "1a2b3c4d");
+  WAPP_EXPECT_STR_EQ(wire, "+like:9eb5 1a2b3c4d");
+  WAPP_EXPECT_TRUE(votemark_parse(wire, mid, &unlike, &ck));
+  WAPP_EXPECT_STR_EQ(mid, "9eb5");
+  WAPP_EXPECT_STR_EQ(ck, "1a2b3c4d");
+
+  votemark_wire(wire, sizeof(wire), "9eb5", 1, "");
+  WAPP_EXPECT_STR_EQ(wire, "+unlike:9eb5");
+}
+
+/* Whatever the message, the vote is the same handful of bytes — these ride
+ * Bluetooth, where a few hundred characters of quoted text would not be free. */
+WAPP_TEST(a_vote_is_small_whatever_it_votes_on) {
+  char wire[96];
+  votemark_wire(wire, sizeof(wire), "9eb5", 0, "1a2b3c4d");
+  WAPP_EXPECT_TRUE(strlen(wire) < 24);
+}
+
 /* ── The two paths, end to end ───────────────────────────────────── */
 
 /*
@@ -196,11 +257,21 @@ WAPP_TEST(lxmf_round_trip_reply_then_like) {
   WAPP_EXPECT_STR_EQ(rx_disp, "OK");
   WAPP_EXPECT_STR_EQ(rx_parent, a_mid);
 
-  /* B hearts A's message: the composer hands the send path "<mid>:like". That
-   * is a vote on both ends — never a bubble. */
-  char heart[16]; strcpy(heart, a_mid); strcat(heart, ":like");
-  char tgt[70]; int ul = 9;
-  WAPP_EXPECT_TRUE(anylike_parse(heart, tgt, &ul));
+  /* B hearts A's message: the composer hands the send path
+   * "+like:<mid> <content key>". That is a vote on both ends — never a
+   * bubble — and it survives the trip with the key intact, which is what lets
+   * A find the message even when A holds it under no id at all. */
+  char heart[96];
+  votemark_wire(heart, sizeof(heart), a_mid, 0, "1a2b3c4d");
+  char tgt[70]; int ul = 9; const char *ck;
+  WAPP_EXPECT_TRUE(votemark_parse(heart, tgt, &ul, &ck));
   WAPP_EXPECT_STR_EQ(tgt, a_mid);
+  WAPP_EXPECT_STR_EQ(ck, "1a2b3c4d");
   WAPP_EXPECT_INT_EQ(ul, 0);
+
+  /* And the older bare form still parses, so a peer that has not updated is
+   * still understood. */
+  char legacy[16]; strcpy(legacy, a_mid); strcat(legacy, ":like");
+  WAPP_EXPECT_TRUE(anylike_parse(legacy, tgt, &ul));
+  WAPP_EXPECT_STR_EQ(tgt, a_mid);
 }

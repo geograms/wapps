@@ -43,4 +43,27 @@ int roomlike_parse(const char *text, char mid[70], int *unlike);
  * receive paths use it so a vote never renders as a bubble. */
 int anylike_parse(const char *text, char mid[70], int *unlike);
 
+/* A vote that also names WHAT it voted on: "+like:<id> <ck>" /
+ * "+unlike:<id> <ck>", where <ck> is a short key derived from the target's
+ * content.
+ *
+ * An id alone is not enough between two devices that did not agree on one.
+ * Every message sent before ids were derived (and every message from a peer
+ * that numbers them differently) is unreachable by id — the vote arrives
+ * naming something the other side never held, and a like on yesterday's
+ * message does nothing at all. Content is the one thing both ends always have.
+ *
+ * The key is opaque to this layer: the host computes and matches it, the wapp
+ * only carries it. It is a fixed handful of characters whatever the message,
+ * which matters because these votes also ride Bluetooth.
+ *
+ * On match copies the id into [mid], sets *unlike, and points *ck at the key
+ * (empty when the vote carries none). Returns 1. */
+int votemark_parse(const char *wire, char mid[70], int *unlike,
+                   const char **ck);
+
+/* Compose that wire form. Returns [out]. */
+char *votemark_wire(char *out, unsigned osz, const char *mid, int unlike,
+                    const char *ck);
+
 #endif /* CHAT_THREAD_H */

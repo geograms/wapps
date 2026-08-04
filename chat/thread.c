@@ -137,3 +137,38 @@ int anylike_parse(const char *text, char mid[70], int *unlike) {
   }
   return roomlike_parse(text, mid, unlike);
 }
+
+int votemark_parse(const char *wire, char mid[70], int *unlike,
+                   const char **ck) {
+  mid[0] = 0; *unlike = 0; *ck = "";
+  const char *p;
+  if (wire[0] != '+') return 0;
+  if (wire[1] == 'l' && wire[2] == 'i' && wire[3] == 'k' && wire[4] == 'e' &&
+      wire[5] == ':') { *unlike = 0; p = wire + 6; }
+  else if (wire[1] == 'u' && wire[2] == 'n' && wire[3] == 'l' && wire[4] == 'i' &&
+           wire[5] == 'k' && wire[6] == 'e' && wire[7] == ':') {
+    *unlike = 1; p = wire + 8;
+  } else return 0;
+  unsigned n = 0;
+  while (p[n] && p[n] != ' ' && n < 69) { mid[n] = p[n]; n++; }
+  if (n == 0) return 0;
+  mid[n] = 0;
+  /* The key is optional: a message with no text has none, and then the id is
+   * all there is to go on. */
+  *ck = p[n] == ' ' ? p + n + 1 : "";
+  return 1;
+}
+
+char *votemark_wire(char *out, unsigned osz, const char *mid, int unlike,
+                    const char *ck) {
+  unsigned i = 0;
+  const char *tag = unlike ? "+unlike:" : "+like:";
+  for (const char *p = tag; *p && i + 1 < osz; p++) out[i++] = *p;
+  for (const char *p = mid; *p && i + 1 < osz; p++) out[i++] = *p;
+  if (ck && ck[0]) {
+    if (i + 1 < osz) out[i++] = ' ';
+    for (const char *p = ck; *p && i + 1 < osz; p++) out[i++] = *p;
+  }
+  out[i] = 0;
+  return out;
+}
