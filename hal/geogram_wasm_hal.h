@@ -1303,6 +1303,18 @@ __attribute__((import_module("hal"), import_name("rns_nodes")))
 int32_t hal_rns_nodes(const char *filter, uint32_t filter_len,
                       char *out, uint32_t out_cap);
 
+/* Whether a route to this destination is held right now. The truthful
+ * "can I reach them directly" — a node list cannot distinguish a live peer
+ * from a hub replaying its announce cache. */
+__attribute__((import_module("hal"), import_name("rns_has_path")))
+int32_t hal_rns_has_path(const char *dest_hex, uint32_t len);
+
+/* Messages to this LXMF destination still sitting in the retry queue. Zero
+ * means the last send got through; nonzero after a send means there is no
+ * working path, which is exactly when a copy is worth handing to a carrier. */
+__attribute__((import_module("hal"), import_name("lxmf_pending")))
+int32_t hal_lxmf_pending(const char *dest_hex, uint32_t len);
+
 /* ── BLE street mesh (doc/mesh.md) ──────────────────────────────── *
  *
  * Read-only registry of the BLE mesh node: who is within reach (direct
