@@ -290,9 +290,6 @@ static uint64_t g_ble_last_hello = 0;   /* last lightweight BLE presence beacon 
 static void ble_tx_msg(const char *to, const char *text);
 /* Best-hope custody: air a 1:1 only when nothing else can carry it. Defined
  * with the other BLE senders; declared here because send_message is above. */
-static int ble_tx_best_hope(const char *to, const char *text);
-static void bh_arm(const char *rid, const char *dest, const char *text);
-static void bh_pump(void);
 /* Substring search — defined with the nearby-list helpers, used earlier by the
  * custody identity lookup. */
 static const char *s_find(const char *hay, const char *needle);
@@ -3062,21 +3059,12 @@ static void convo_send_core(const char *buf, const char *id_in,
      * (from, to) is readable so a carrier knows whom it is holding for; the
      * body stays ENC1. */
     int sent = rns_tx_msg(id, wire);
-    /* Judge by REACHABILITY, not by what the send call returned. LXMF accepts a
-     * message it has no path for and holds it for a propagation node, so `sent`
-     * is positive even when nothing can carry it today — waiting for that to
-     * fail means the best-hope copy is never aired at all. */
-    int aired = 0;
-    if (g_ble_on && reach_class(id) == REACH_NONE) {
-      aired = ble_tx_best_hope(id, wire);
-      if (aired) {
-        convo_sysnote(id, "No direct path - handed to nearby devices to "
-                          "deliver when they meet this person");
-      } else if (sent <= 0) {
-        notify("warning", "Too long for the Bluetooth mesh - not sent");
-      }
-    }
-    if (sent <= 0 && !aired) {
+    /* Air the already-encrypted wire too: the envelope (from, to) is readable
+     * so a carrier knows whom it holds this for, the body stays ENC1. Whether
+     * anyone needs to CARRY it is the core's call — MeshCourier parks what it
+     * hears and hands it on (docs/mesh.md §6). */
+    if (g_ble_on) ble_tx_msg(id, wire);
+    if (sent <= 0 && !g_ble_on) {
       notify("warning", "No Reticulum address for this contact yet");
       return; /* don't echo a private message that reached nobody */
     }
@@ -3087,12 +3075,8 @@ static void convo_send_core(const char *buf, const char *id_in,
     rns_tx_public(id, wire);
     /* Air a copy only when Bluetooth can add something. A contact sitting on
      * the same LAN, or reachable over a hub, is already getting this message;
-     * a second copy on the air only burns the single advertising slot and
-     * fills every nearby device's custody store with mail nobody needs to
-     * carry. No path at all is the case custody exists for. */
-    if (g_ble_on && reach_class(id) != REACH_NET) {
-      if (!ble_tx_best_hope(id, wire)) ble_tx_msg(id, wire);
-    }
+     * a second copy on the air only burns the single advertising slot. */
+    if (g_ble_on && reach_class(id) != REACH_NET) ble_tx_msg(id, wire);
     /* Legacy APRS-IS (opt-in, licensed callsign only). Encrypted (ENC1) messages
      * are NEVER sent over APRS-IS: APRS is a 7-bit text protocol and mangles the
      * base64 ciphertext (multi-line reassembly + charset), so the recipient gets
@@ -3702,223 +3686,6 @@ static void ble_tx_msg(const char *to, const char *text) {
  * so this is a lookup, not a network call. Returns 0 when we do not know the
  * identity — in which case there is no spoof-proof way to address custody and
  * we simply do not air one. */
-static int lxmf_identity(const char *dest, char *call_out, unsigned call_sz,
-                         char *npub_out, unsigned npub_sz) {
-  if (!dest || !dest[0]) return 0;
-  /* The name this thread already shows. lxname_get is what the header uses, so
-   * if the conversation reads "X1RD89" we have the callsign without guessing —
-   * and the callsign is the key into the pubkey store. */
-  const char *nm = lxname_get(dest);
-  if (nm && nm[0]) {
-    const char *k = pk_get(nm);
-    if (k && k[0]) {
-      s_cpy(call_out, nm, call_sz);
-      s_cpy(npub_out, k, npub_sz);
-      return 1;
-    }
-    /* No beacon from them lately — ask the host's messaging directory. That is
-     * the one callsign -> npub map that is NOT liveness-gated (RnsService.
-     * messagingDirectory), so a peer whose radios are off is still identifiable.
-     * hal_rns_nodes is the wrong door: its rows carry the RETICULUM pubkey, not
-     * the npub, and it hides anything not currently fresh. */
-    static char dir[8192];
-    int n = hal_people_directory(nm, s_len(nm), dir, sizeof(dir) - 1);
-    if (n > 0) {
-      dir[n < (int)sizeof(dir) ? n : (int)sizeof(dir) - 1] = 0;
-      char pat[40];
-      s_cpy(pat, "\"callsign\":\"", sizeof(pat));
-      s_cat(pat, nm, sizeof(pat));
-      s_cat(pat, "\"", sizeof(pat));
-      const char *at = s_find(dir, pat);
-      if (at) {
-        /* npub follows callsign inside the same geogram row; stop at the row
-         * boundary so we never borrow the next person's key. */
-        const char *np = 0;
-        for (const char *c = at; *c; c++) {
-          if (*c == '{') break;
-          if (c[0] == '"' && c[1] == 'n' && c[2] == 'p' && c[3] == 'u' &&
-              c[4] == 'b' && c[5] == '"' && c[6] == ':' && c[7] == '"') {
-            np = c + 8; break;
-          }
-        }
-        if (np) {
-          unsigned i = 0;
-          while (np[i] && np[i] != '"' && i < npub_sz - 1) { npub_out[i] = np[i]; i++; }
-          npub_out[i] = 0;
-          if (i >= 8) { s_cpy(call_out, nm, call_sz); return 1; }
-          npub_out[0] = 0;
-        }
-      }
-    }
-    /* Callsign but no npub: still worth airing. The envelope needs a name to
-     * address the custody to; the npub only decides whether the BODY can be
-     * sealed. An LXMF/NomadNet contact we have never had a NOSTR key for would
-     * otherwise be the one peer store-and-forward refuses to serve. */
-    s_cpy(call_out, nm, call_sz);
-    npub_out[0] = 0;
-    return 1;
-  }
-  /* Otherwise work back from the beacon map: dest -> npub -> callsign. */
-  const char *npub = 0;
-  for (int i = 0; i < g_rns_n; i++) {
-    if (s_eq_ci(g_rns_dest[i], dest) || s_eq_ci(g_rns_prop[i], dest)) {
-      npub = g_rns_npub[i];
-      break;
-    }
-  }
-  if (!npub || !npub[0]) return 0;
-  for (int i = 0; i < g_pk_n; i++) {
-    if (s_eq(g_pk_key[i], npub)) {
-      s_cpy(call_out, g_pk_call[i], call_sz);
-      s_cpy(npub_out, npub, npub_sz);
-      return call_out[0] ? 1 : 0;
-    }
-  }
-  return 0;
-}
-
-static int best_hope_wire(const char *npub, const char *text,
-                          char *out, unsigned cap) {
-  int sealed = (npub && npub[0]) ? 1 : 0;
-  char core[700];
-  if (sealed) {
-    char ct[640];
-    uint32_t cn = hal_encrypt(npub, s_len(npub), text, s_len(text),
-                              ct, sizeof(ct) - 1);
-    if (cn == 0 || cn >= sizeof(ct)) return 0;
-    ct[cn] = 0;
-    s_cpy(core, "ENC1:", sizeof(core));
-    s_cat(core, ct, sizeof(core));
-  } else {
-    /* No key for them: carry it in the clear, still signed. Same exposure as
-     * the public 1:1 this thread would have used anyway — a custodian must be
-     * able to read the envelope regardless, and refusing to send would leave
-     * the message nowhere. */
-    s_cpy(core, text, sizeof(core));
-  }
-
-  /* Sign the encrypted body, exactly as the callsign path does: anyone can
-   * check who sent it, nobody but the holder of the npub can read it. */
-  char signed_wire[760];
-  s_cpy(signed_wire, core, sizeof(signed_wire));
-  {
-    char canon[720]; sig_canon(canon, sizeof(canon), g_call, core);
-    char sg[80];
-    uint32_t sn = hal_identity_sign(canon, s_len(canon), sg, sizeof(sg) - 1);
-    if (sn > 0 && sn < sizeof(sg)) {
-      sg[sn] = 0;
-      s_cat(signed_wire, " ~", sizeof(signed_wire));
-      s_cat(signed_wire, sg, sizeof(signed_wire));
-    }
-  }
-
-  /* np: first, then am: — both public, both before the ciphertext. */
-  unsigned char rb[3]; hal_crypto_random((char *)rb, 3);
-  static const char hx[] = "0123456789abcdef";
-  char am[8];
-  for (int i = 0; i < 3; i++) { am[i*2] = hx[rb[i] >> 4]; am[i*2+1] = hx[rb[i] & 15]; }
-  am[6] = 0;
-
-  /* ORDER MATTERS: am: FIRST. Both custody layers key on a receipt id found at
-   * the very start of the text — MeshCustodyDelegate.onAirFrame on the phones
-   * and blemesh_scf_offer on the dongle — and a frame without one is carried
-   * but can never be handed on in a session. np: follows it, then the body. */
-  out[0] = 0;
-  s_cat(out, "am:", cap); s_cat(out, am, cap); s_cat(out, " ", cap);
-  if (sealed) { s_cat(out, "np:", cap); s_cat(out, npub, cap); s_cat(out, " ", cap); }
-  s_cat(out, signed_wire, cap);
-  return 1;
-}
-
-/* Air a 1:1 as BEST HOPE — for a custodian to hold and deliver later.
- *
- * Separate from ble_tx_msg for one reason: SIZE. ble_tx_from packs into a
- * 220-byte buffer and s_cat truncates in silence. An encrypted message always
- * carries a signature, so a ~100-character text lands near 275 bytes: it would
- * be cut, parked by every custodian, muled for days, delivered — and fail to
- * decrypt, with nothing anywhere saying why. Anything a carrier cannot take
- * whole must not be handed to a carrier at all.
- *
- * The 240-byte ceiling is the ESP32's: BLEMESH_SCF_FRAME_MAX is 252, and a
- * frame the phones accept (480) but the dongle drops is exactly the mule you
- * were counting on refusing the job.
- */
-#define BLE_BEST_HOPE_MAX 240
-static int ble_tx_best_hope(const char *to, const char *text) {
-  if (!g_ble_on) return 0;
-  char buf[300];
-  ble_pack(buf, sizeof(buf), g_call, to, text);
-  if (s_len(buf) > BLE_BEST_HOPE_MAX) return 0;   /* caller says why */
-  fseen_add(sig_hash("b", "", buf));   /* don't re-handle our own advert */
-  ble_send(buf);
-  return 1;
-}
-/* ── Best hope: hand it to a passing carrier once delivery has actually failed ─
- *
- * One slot per waiting message. Armed at send, aired by the tick once the host
- * still reports it undelivered — deliberately a few seconds late, because the
- * only trustworthy answer to "can I reach them" is "did it arrive".
- */
-#define BH_MAX 8
-#define BH_WAIT_S 20        /* the send itself gives up on a direct link at 10s */
-#define BH_GIVEUP_S 900
-static struct {
-  char rid[80];
-  char dest[80];
-  char text[220];
-  uint64_t ts;
-  int used;
-} g_bh[BH_MAX];
-
-static void bh_arm(const char *rid, const char *dest, const char *text) {
-  if (!dest || !dest[0] || !text || !text[0]) return;
-  int slot = -1;
-  for (int i = 0; i < BH_MAX; i++) if (!g_bh[i].used) { slot = i; break; }
-  if (slot < 0) slot = 0;                       /* oldest wins the eviction */
-  s_cpy(g_bh[slot].rid, rid, sizeof(g_bh[slot].rid));
-  s_cpy(g_bh[slot].dest, dest, sizeof(g_bh[slot].dest));
-  s_cpy(g_bh[slot].text, text, sizeof(g_bh[slot].text));
-  g_bh[slot].ts = hal_time_epoch();
-  g_bh[slot].used = 1;
-}
-
-static void bh_pump(void) {
-  uint64_t now = hal_time_epoch();
-  for (int i = 0; i < BH_MAX; i++) {
-    if (!g_bh[i].used) continue;
-    if (now - g_bh[i].ts < BH_WAIT_S) continue;
-    /* Delivered while we waited: nothing to hand on. */
-    if (hal_lxmf_pending(g_bh[i].dest, s_len(g_bh[i].dest)) <= 0) {
-      g_bh[i].used = 0;
-      continue;
-    }
-    if (now - g_bh[i].ts > BH_GIVEUP_S) { g_bh[i].used = 0; continue; }
-    char pcall[16] = "", pnpub[48] = "";
-    if (!lxmf_identity(g_bh[i].dest, pcall, sizeof(pcall), pnpub, sizeof(pnpub))) {
-      /* No name to address the custody to — a carrier could not tell whom it
-       * is holding it for, so it must not be aired. */
-      g_bh[i].used = 0;
-      convo_sysnote(g_bh[i].rid, "Undelivered, and nobody nearby can be told "
-                                 "whom to hold it for");
-      continue;
-    }
-    char bh[760];
-    if (best_hope_wire(pnpub, g_bh[i].text, bh, sizeof(bh)) &&
-        ble_tx_best_hope(pcall, bh)) {
-      convo_sysnote(g_bh[i].rid,
-                    pnpub[0]
-                        ? "No path - handed encrypted to nearby devices to "
-                          "deliver when they meet this person"
-                        : "No path - handed to nearby devices to deliver when "
-                          "they meet this person");
-    } else {
-      convo_sysnote(g_bh[i].rid, "Too long to hand to a carrier - shorten it "
-                                 "and send again");
-    }
-    g_bh[i].used = 0;
-  }
-}
-
 static void ble_tx_pos(double lat, double lon, const char *comment) {
   char t[96] = "";
   append_dbl(t, sizeof(t), lat); s_cat(t, ",", sizeof(t));
@@ -4553,14 +4320,10 @@ static void do_rooms_send(const char *buf) {
        * carrying the recipient's NPUB, which is the identity that cannot be
        * spoofed and means something outside Reticulum too. Without a known
        * identity there is no honest way to address it, so we do not air one. */
-      /* Best hope is decided AFTER the fact, never before. Every presence test
-       * available up front lies in the direction that matters: hal_rns_nodes
-       * calls a device "seen" because a hub replayed its announce cache, and a
-       * held path outlives the peer that taught it by hours. What does not lie
-       * is delivery — a peer on the LAN or reachable over a hub acks in well
-       * under a second, so a message still in the retry queue seconds later
-       * genuinely has no path. bh_arm queues it; bh_pump airs it. */
-      if (g_ble_on) bh_arm(rid, dest, text);
+      /* Delivery is the CORE's job, not ours: if this message needs a carrier
+       * on the mesh, MeshCourier arms it inside hal_lxmf_send and airs it when
+       * the retry queue proves there was no path. A carried message comes back
+       * through the ordinary LXMF inbox, so nothing here has to know. */
       if (lx_sent > 0) {
         char from[16]; s_cpy(from, g_call, sizeof(from));
         convo_msg(rid, "out", from, disp, "", "", 0, 0, "LXM", mid, parent, "", 0, 0);
@@ -7502,7 +7265,6 @@ void module_tick(void) {
    * scan/advertise state, drain inbound frames, and beacon our position. */
   ble_reconcile();
   push_status();   /* refresh APRS-IS / BLE indicators (only on change) */
-  bh_pump();       /* messages that never arrived -> hand to a passing carrier */
 
   /* The people picker is open: announces keep arriving (a hub replays its
    * whole cached table over the first minutes of a link), so re-render on a
