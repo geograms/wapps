@@ -198,10 +198,13 @@ static void parse_sources_raw(void) {
 /* Default catalog source when no user configuration exists yet. The
  * Settings tab can add or replace it; this is just the seed so a
  * fresh install isn't staring at an empty catalog. Self-hosted on
- * geogram.radio (no github.com dependency) — the store appends
- * "/index.json" and downloads "<base>/<file>" for each wapp. A
- * github.com tree URL, if ever configured, is still converted to the
- * raw form at fetch time (see github_tree_to_raw below). */
+ * geogram.radio — the store appends "/index.json" and downloads
+ * "<base>/<file>" for each wapp.
+ *
+ * The shipped binary reaches NO proprietary host: the URL is used exactly as
+ * configured, and the github.com -> raw.githubusercontent.com rewriter that
+ * used to live here is gone. A catalog served from a code-hosting site has to
+ * publish plain-file URLs like any other host. */
 #define DEFAULT_SOURCE "rns:npub1dwfaavw4k2af0snm3q2n4c7vd046xl7ze8scp553x5upw84wm5ns5deehf"
 
 /* Bump when DEFAULT_SOURCE changes so devices upgrading from an older store
@@ -431,48 +434,6 @@ static void push_status_card(const char *id, const char *title,
 static int32_t pending_req = -1;
 static char index_buf[32768];
 
-/* Rewrite a github.com tree URL into the raw.githubusercontent.com
- * form so the fetcher actually gets JSON instead of HTML. Pattern:
- *   https://github.com/<org>/<repo>/tree/<branch>/<path...>
- *     -> https://raw.githubusercontent.com/<org>/<repo>/<branch>/<path...>
- * Anything that doesn't match is copied through unchanged. The
- * caller's [out] must be sized for the result (longer than input).
- */
-static void github_tree_to_raw(const char *src, char *out, unsigned out_cap) {
-    const char *prefix = "https://github.com/";
-    if (!str_starts(src, prefix)) {
-        str_copy(out, src, out_cap);
-        return;
-    }
-    const char *p = src + str_len(prefix);
-    /* Find org and repo segments. */
-    const char *org = p;
-    while (*p && *p != '/') p++;
-    if (*p != '/' || p == org) { str_copy(out, src, out_cap); return; }
-    unsigned org_len = (unsigned)(p - org);
-    p++;
-    const char *repo = p;
-    while (*p && *p != '/') p++;
-    if (*p != '/' || p == repo) { str_copy(out, src, out_cap); return; }
-    unsigned repo_len = (unsigned)(p - repo);
-    p++;
-    /* Expect "tree/" next. */
-    if (!str_starts(p, "tree/")) { str_copy(out, src, out_cap); return; }
-    p += 5;
-    /* Branch + path remainder is everything past "tree/". */
-    str_copy(out, "https://raw.githubusercontent.com/", out_cap);
-    unsigned olen = str_len(out);
-    for (unsigned i = 0; i < org_len && olen < out_cap - 2; i++) {
-        out[olen++] = org[i];
-    }
-    if (olen < out_cap - 1) out[olen++] = '/';
-    for (unsigned i = 0; i < repo_len && olen < out_cap - 2; i++) {
-        out[olen++] = repo[i];
-    }
-    if (olen < out_cap - 1) out[olen++] = '/';
-    out[olen] = '\0';
-    str_cat(out, p, out_cap);
-}
 
 /* Kick off the fetch for sources[fetching_idx]. For URL sources the
  * HTTP request is started via hal_http and polled from module_tick.
@@ -492,13 +453,11 @@ static void start_current_fetch(void) {
     send_output(msg, "info");
 
     if (source_str_is_url(src)) {
-        char rewritten[512];
-        github_tree_to_raw(src, rewritten, sizeof(rewritten));
         char url[600] = "";
-        str_cat(url, rewritten, sizeof(url));
-        unsigned slen = str_len(rewritten);
-        if (slen < 5 || !str_eq(rewritten + slen - 5, ".json")) {
-            if (rewritten[slen - 1] != '/') str_cat(url, "/", sizeof(url));
+        str_cat(url, src, sizeof(url));
+        unsigned slen = str_len(src);
+        if (slen < 5 || !str_eq(src + slen - 5, ".json")) {
+            if (src[slen - 1] != '/') str_cat(url, "/", sizeof(url));
             str_cat(url, "index.json", sizeof(url));
         }
         hal_log(1, "[install] http GET", 18);
@@ -843,14 +802,9 @@ static void do_install(const char *name) {
         return;
     }
 
-    /* Resolve GitHub tree URLs to raw.githubusercontent.com so the
-     * host's plain http.get retrieves the .wapp ZIP, not the HTML
-     * tree view. Tree URLs (the default config form) 404 or serve
-     * HTML when concatenated with the file path; raw URLs serve the
-     * actual bytes. Non-github / already-raw URLs and local paths
-     * pass through unchanged. */
+    /* The source is used verbatim: no host-specific URL rewriting. */
     char src[256];
-    github_tree_to_raw(e->source_raw, src, sizeof(src));
+    str_copy(src, e->source_raw, sizeof(src));
 
     /* Build install message for the renderer. The source is whatever
      * repository THIS entry came from, not a global — that way a
