@@ -1,0 +1,38 @@
+[
+  {
+    "$": "screen",
+    "name": "Stations",
+    "icon": "radar",
+    "tip": "Stations heard over the air only - BLE, LAN or LoRa. Never the internet.",
+    "children": [
+      {
+        "$": "field",
+        "name": "stations",
+        "$type": "people",
+        "empty": "Nothing heard yet.\nLeave Bluetooth on, or bring another station into range.\n\nThis list is radio only - peers reached over the internet never appear here."
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Traffic",
+    "icon": "list_alt",
+    "menu": true,
+    "tip": "Every XPRS packet heard, and which bearer carried it - including packets meant for other stations.",
+    "children": [
+      {
+        "$": "field",
+        "name": "traffic",
+        "$type": "log",
+        "label": "XPRS packets heard",
+        "tip": "Newest last. Packets addressed to other stations are marked (passing)."
+      },
+      {
+        "$": "action",
+        "name": "traffic_clear",
+        "label": "Clear",
+        "icon": "delete_sweep"
+      }
+    ]
+  }
+]

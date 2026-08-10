@@ -336,5 +336,6 @@
   {"file":"torrents/torrents-0.5.9.wapp","id":"tools.geogram.torrents","version":"0.5.9","size":47994,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.6.0.wapp","id":"tools.geogram.torrents","version":"0.6.0","size":55208,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
   {"file":"torrents/torrents-0.6.1.wapp","id":"tools.geogram.torrents","version":"0.6.1","size":55208,"title":"Torrents","description":"Folder torrents over Reticulum - create, share, download and seed."},
-  {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."}
+  {"file":"widget_demo/widget_demo-1.0.1.wapp","id":"tools.geogram.widget-demo","version":"1.0.1","size":7694,"title":"Functionality Demo","description":"Demo wapp providing multiple functionalities for widget requests."},
+  {"file":"xprs/xprs-0.1.0.wapp","id":"tools.geogram.xprs","version":"0.1.0","size":8062,"title":"XPRS","description":"XPRS - stations heard over the air, and the packets they sent."}
 ]

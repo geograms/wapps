@@ -1348,6 +1348,25 @@ __attribute__((import_module("hal"), import_name("archive_set_pref")))
 int32_t hal_archive_set_pref(const char *kv, uint32_t kv_len);
 
 
+/* XPRS: what this device has heard ON THE AIR (docs/XPRS.md).
+ *
+ * Read-only diagnostics. Internet traffic is NOT here and cannot be: the host
+ * records the bearer where a packet arrives and only collects radio and local
+ * ones, so there is nothing to filter out and nothing to forget to filter.
+ *
+ * Stations heard, as ready-to-render people-widget sections:
+ *   [{"title":"Heard over the air (n)","items":[{id,title,subtitle,tags}]}] */
+__attribute__((import_module("hal"), import_name("xprs_stations")))
+int32_t hal_xprs_stations(char *out, uint32_t out_cap);
+
+/* Recent XPRS packets, oldest first. INCLUDES packets addressed to other
+ * stations, which is most of what a mesh carries:
+ *   [{ts,bearer,rssi,from,to,type,id,mine,wire}]
+ * `bearer` is one of ble|lan|lora|wifi|vhf|uhf|hf; `mine` is whether `d:`
+ * named this station. */
+__attribute__((import_module("hal"), import_name("xprs_traffic")))
+int32_t hal_xprs_traffic(char *out, uint32_t out_cap);
+
 /* Mesh node status JSON
  * ({running,callsign,advertising,class,powered,uptime,neighbors,routes,
  *   beaconsSent,beaconsHeard,revision}). */
