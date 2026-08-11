@@ -1724,6 +1724,47 @@ static const char *lxname_get(const char *dest) {
     if (s_eq(g_lxn_dest[i], dest)) return g_lxn_name[i];
   return 0;
 }
+
+/* Peers whose name we have asked the directory for, and when.
+ *
+ * The lookup used to happen ONCE, at first contact. If the directory did not
+ * know that delivery dest yet — which is the normal case, because a message can
+ * arrive before the sender's announce does — the row kept the raw hash prefix
+ * ("3b02bb89") FOREVER. Two phones showed the same peer under two different
+ * names, and the wrong one never healed.
+ *
+ * So it is retried. Slowly, on purpose: a display name is cosmetic, and
+ * docs/performance.md is blunt that a cosmetic value never deserves a hot loop
+ * ("a HAL call that does more than it says"). Once a minute per peer, and only
+ * while the name is still missing. */
+#define LXQ_MAX 16
+#define LXQ_RETRY_S 60
+static char g_lxq_dest[LXQ_MAX][66];
+static uint64_t g_lxq_at[LXQ_MAX];
+static int g_lxq_n = 0;
+
+/* True when we may ask the directory about [dest] right now. */
+static int lxname_may_ask(const char *dest) {
+  uint64_t now = hal_time_epoch();
+  for (int i = 0; i < g_lxq_n; i++) {
+    if (!s_eq(g_lxq_dest[i], dest)) continue;
+    if (now - g_lxq_at[i] < LXQ_RETRY_S) return 0;
+    g_lxq_at[i] = now;
+    return 1;
+  }
+  if (g_lxq_n >= LXQ_MAX) {          /* forget the oldest ask */
+    for (int i = 0; i < g_lxq_n - 1; i++) {
+      s_cpy(g_lxq_dest[i], g_lxq_dest[i + 1], sizeof(g_lxq_dest[i]));
+      g_lxq_at[i] = g_lxq_at[i + 1];
+    }
+    g_lxq_n--;
+  }
+  s_cpy(g_lxq_dest[g_lxq_n], dest, sizeof(g_lxq_dest[0]));
+  g_lxq_at[g_lxq_n] = now;
+  g_lxq_n++;
+  return 1;
+}
+
 static void lxname_save(void) {
   char b[LXN_MAX * 100]; b[0] = 0;
   for (int i = 0; i < g_lxn_n; i++) {
@@ -4893,6 +4934,32 @@ static void group_note_ingest(const char *evt) {
   notify_msg(cid, from, content, content);
 }
 
+/* Ask the host directory who [dest] is and remember the answer. Cheap no-op
+ * while the name is known or the retry window has not elapsed. */
+static void lxname_resolve(const char *dest) {
+  if (!dest || !dest[0]) return;
+  if (lxname_get(dest)) return;            /* already named */
+  if (!lxname_may_ask(dest)) return;       /* asked recently */
+  static char dj[1600];
+  int32_t dn = hal_people_directory(dest, s_len(dest), dj, sizeof(dj) - 1);
+  if (dn <= 0) return;
+  dj[dn] = 0;
+  char slice[600];
+  const char *p = fnd_next_obj(dj, slice, sizeof(slice));
+  while (p) {
+    char d2[70] = "", nm[40] = "", cs[24] = "";
+    jstr(slice, "dest", d2, sizeof(d2));
+    jstr(slice, "name", nm, sizeof(nm));
+    jstr(slice, "callsign", cs, sizeof(cs));
+    if (s_eq(d2, dest) && (cs[0] || nm[0])) {
+      lxname_set(dest, cs[0] ? cs : nm);
+      render_rail();                       /* the row is wrong until redrawn */
+      return;
+    }
+    p = fnd_next_obj(p, slice, sizeof(slice));
+  }
+}
+
 /* ── Groups from NomadNet (LXMF) ────────────────────────────────────────────
  * Reticulum already has its own chat, and those people are on the same mesh. An
  * inbound LXMF message whose title names a group (#NEWS) joins that group's
@@ -4992,26 +5059,7 @@ static void lxmf_drain(void) {
       /* First contact from this address: ask the host's directory who it is
        * before the row is drawn, so a new thread opens as "X16JK8" rather than
        * "LXMF 85cdc031" and stays that way. */
-      if (title[0] != '#' && !lxname_get(from)) {
-        static char dj[1600];
-        int32_t dn = hal_people_directory(from, s_len(from), dj, sizeof(dj) - 1);
-        if (dn > 0) {
-          dj[dn] = 0;
-          char slice[600];
-          const char *p = fnd_next_obj(dj, slice, sizeof(slice));
-          while (p) {
-            char d2[70] = "", nm[40] = "", cs[24] = "";
-            jstr(slice, "dest", d2, sizeof(d2));
-            jstr(slice, "name", nm, sizeof(nm));
-            jstr(slice, "callsign", cs, sizeof(cs));
-            if (s_eq(d2, from) && (cs[0] || nm[0])) {
-              lxname_set(from, cs[0] ? cs : nm);
-              break;
-            }
-            p = fnd_next_obj(p, slice, sizeof(slice));
-          }
-        }
-      }
+      if (title[0] != '#') lxname_resolve(from);
       convo_ensure(cid);   /* auto-join, or nobody sees it */
       groups_save();       /* …and PERSIST the join — an unsaved auto-join was
                             * gone after a restart while the host store kept
@@ -7299,6 +7347,27 @@ static void aprs_tick(void) {
 }
 
 void module_tick(void) {
+  /* A conversation still showing a raw address asks the directory again, one
+   * peer per sweep, once a minute each (lxname_resolve throttles). A name that
+   * missed at first contact used to stay wrong forever — the peer that shows as
+   * "3b02bb89" on one phone and its callsign on the other. Cosmetic, so it gets
+   * a slow lane, never a hot loop (docs/performance.md section 4.2). */
+  {
+    static unsigned name_tick = 0;
+    static int name_next = 0;
+    if ((++name_tick % 30) == 0 && g_convo_n > 0) {
+      for (int i = 0; i < g_convo_n; i++) {
+        int k = (name_next + i) % g_convo_n;
+        const char *id = g_convo_ids[k];
+        if (id[0] != 'l' || id[1] != 'x') continue;     /* "lxmf:" rows only */
+        if (lxname_get(id + 5)) continue;               /* already named */
+        lxname_resolve(id + 5);
+        name_next = (k + 1) % g_convo_n;
+        break;                                          /* one per sweep */
+      }
+    }
+  }
+
   /* BLE runs independently of the internet link (off-grid). Reconcile the
    * scan/advertise state, drain inbound frames, and beacon our position. */
   ble_reconcile();
