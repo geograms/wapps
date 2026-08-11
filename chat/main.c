@@ -17,6 +17,7 @@
 #include "thread.h"
 #include "ble.h"
 #include "room.h"
+#include "xprs.h"
 
 /* ── tiny libc ──────────────────────────────────────────────────────── */
 static unsigned s_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
@@ -3640,8 +3641,25 @@ static void do_prompt_result(const char *buf) {
  * from these fields. The HAL just carries the bytes. */
 #define BLE_SEP '\x1f'
 
+/* Build the frame chat airs.
+ *
+ * XPRS (docs/XPRS.md) is what the device speaks now, so that is what goes out:
+ * the same content as `key:value` fields any XPRS station can read, including
+ * one that has never heard of this wapp. What chat puts INSIDE `m:` — an ENC1
+ * ciphertext, a ~signature, a reply marker — is untouched.
+ *
+ * The compact form stays as the fallback for the frames XPRS has no words for
+ * yet (?MAIL, ?IGATE, ?PING) and for anything that would not fit, and every
+ * receiver still reads both, so a device on the old build keeps working. */
 static void ble_pack(char *out, unsigned max, const char *from,
                      const char *to, const char *text) {
+  /* 250 bytes is the XPRS limit (section 4), not our buffer's: a longer body
+   * is not an XPRS packet at all, and section 6.6 (parts) is the answer to it
+   * rather than a packet nobody is required to accept. Until that is wired,
+   * a long message keeps the compact frame, which the Reticulum path carries
+   * whole. */
+  unsigned cap = max > 251 ? 251 : max;
+  if (xprs_pack(out, cap, from, to, text, hal_time_epoch())) return;
   char sep[2] = { BLE_SEP, 0 };
   out[0] = 0;
   s_cat(out, from, max); s_cat(out, sep, max);
@@ -6942,14 +6960,34 @@ static void do_ping(const char *buf) {
  * transport and we tag every delivered copy with it. */
 static void ble_handle(const char *compact, int rssi, const char *via) {
   char from[16] = "", to[24] = "", text[256] = "";
-  int seg = 0, fi = 0, ti = 0, xi = 0;
-  for (const char *q = compact; *q; q++) {
-    if (*q == BLE_SEP) { seg++; continue; }
-    if (seg == 0) { if (fi < 15) from[fi++] = *q; }
-    else if (seg == 1) { if (ti < 23) to[ti++] = *q; }
-    else { if (xi < 255) text[xi++] = *q; }
+
+  /* Two formats on the air: XPRS, which is what we now send, and the compact
+   * frame, which older builds and the ESP32 still send. Both land in the same
+   * (from, to, text), so everything below this point is unchanged. */
+  if (xprs_looks_like(compact)) {
+    uint64_t sent = 0;
+    if (!xprs_unpack(compact, from, sizeof(from), to, sizeof(to),
+                     text, sizeof(text), &sent)) {
+      return;   /* a type chat has nothing to show for — the XPRS wapp does */
+    }
+    /* A message's time is the SENDER's. The compact frame never carried one,
+     * so a message that waited in a mailbox was stamped with its arrival;
+     * XPRS says when it was written. Ignore a clock that is obviously wrong
+     * rather than filing the message in the wrong hour. */
+    uint64_t now = hal_time_epoch();
+    if (sent && sent <= now + 300 && now - sent < 30ULL * 24 * 3600) {
+      g_msg_epoch = sent;
+    }
+  } else {
+    int seg = 0, fi = 0, ti = 0, xi = 0;
+    for (const char *q = compact; *q; q++) {
+      if (*q == BLE_SEP) { seg++; continue; }
+      if (seg == 0) { if (fi < 15) from[fi++] = *q; }
+      else if (seg == 1) { if (ti < 23) to[ti++] = *q; }
+      else { if (xi < 255) text[xi++] = *q; }
+    }
+    from[fi] = 0; to[ti] = 0; text[xi] = 0;
   }
-  from[fi] = 0; to[ti] = 0; text[xi] = 0;
   if (!from[0]) return;
   if (is_self_call(from)) return;
 
