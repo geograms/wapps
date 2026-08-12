@@ -1375,19 +1375,27 @@ static int extract_np(char *s, char *np, unsigned np_sz) {
   return 0;
 }
 
-/* User opened a 1:1 conversation → send read receipts for its pending msgs. */
-static void do_convo_open(const char *buf) {
-  /* 48, not 16: an LXMF conversation id is "lxmf:" + 32 hex. */
-  char convo[48] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
-  if (!convo[0] || convo[0] == '#') return;      /* groups: no receipts */
-  if (room_is_room(convo)) return;               /* rooms: no 1:1 receipts */
+/* Opening a 1:1 conversation IS reading it: send the read receipt for every
+ * message of it we are still holding one for, and keep the rest.
+ *
+ * Lives on its own because the thread is opened by TWO different commands and
+ * only one of them used to call it. The chat screen is the ROOMS field, so a
+ * Bluetooth/NomadNet thread arrives as `rooms_open` — which returned early —
+ * while this flush sat behind `conversations_open`, a command that screen never
+ * sends. The second tick was therefore unreachable on exactly the conversations
+ * that matter, no matter what else was fixed. */
+static void rpend_flush_read(const char *convo) {
+  if (!convo || !convo[0] || convo[0] == '#') return;  /* groups: no receipts */
+  if (room_is_room(convo)) return;                     /* rooms: no 1:1 receipts */
   int w = 0;
   for (int i = 0; i < g_rpend_n; i++) {
     if (s_eq(g_rpend_convo[i], convo)) {
       send_receipt(convo, g_rpend_am[i], 'r', g_rpend_via[i]);
     } else {
       if (w != i) {
-        s_cpy(g_rpend_convo[w], g_rpend_convo[i], 16);
+        /* sizeof, not 16: an id kept here used to be cut to 15 characters,
+         * which is half of why a second open never found its entry. */
+        s_cpy(g_rpend_convo[w], g_rpend_convo[i], sizeof(g_rpend_convo[0]));
         s_cpy(g_rpend_am[w], g_rpend_am[i], 8);
         s_cpy(g_rpend_via[w], g_rpend_via[i], 8);
       }
@@ -1395,6 +1403,13 @@ static void do_convo_open(const char *buf) {
     }
   }
   g_rpend_n = w;
+}
+
+/* User opened a 1:1 conversation → send read receipts for its pending msgs. */
+static void do_convo_open(const char *buf) {
+  /* 48, not 16: an LXMF conversation id is "lxmf:" + 32 hex. */
+  char convo[48] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
+  rpend_flush_read(convo);
 }
 
 /* ── Local hide / block (never transmitted) ───────────────────────────────
@@ -4381,6 +4396,9 @@ static void do_rooms_open(const char *buf) {
       groups_save();
       render_rail();
     }
+    /* Opening it is reading it. This is the command the chat screen actually
+     * sends for a 1:1 thread, so without this the read receipt never left. */
+    rpend_flush_read(rid);
     return;
   }
   s_cpy(g_cur_room, rid, sizeof(g_cur_room));
