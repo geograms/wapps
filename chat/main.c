@@ -466,8 +466,28 @@ static void push_status(void) {
   hal_msg_send(m, s_len(m));
 }
 
+/* Minutes east of UTC, read once and reused.
+ *
+ * A message carries the SENDER's UTC epoch (see the stamp note below), which is
+ * the only value two phones in different zones can agree on. Rendering that
+ * epoch directly prints UTC, so every bubble on a CEST phone read two hours
+ * early — 15:56 was sent and "13:56" was drawn. Cached because a thread redraw
+ * formats every row and this must never become a per-row host call
+ * (docs/performance.md section 4.2). */
+static int  g_tz_min = 0;
+static int  g_tz_known = 0;
+static int tz_offset_min(void) {
+  if (!g_tz_known) { g_tz_min = hal_time_utc_offset(); g_tz_known = 1; }
+  return g_tz_min;
+}
+
 static void fmt_time_at(char *b, uint64_t e) {
-  int hh = (int)((e / 3600) % 24), mm = (int)((e / 60) % 60);
+  /* Local wall clock. The offset can be negative, so work in signed seconds
+   * and wrap into [0,86400) — west of UTC would otherwise underflow the day. */
+  long long secs = (long long)e + (long long)tz_offset_min() * 60;
+  long long day = secs % 86400;
+  if (day < 0) day += 86400;
+  int hh = (int)(day / 3600), mm = (int)((day / 60) % 60);
   b[0] = (char)('0' + hh / 10); b[1] = (char)('0' + hh % 10); b[2] = ':';
   b[3] = (char)('0' + mm / 10); b[4] = (char)('0' + mm % 10); b[5] = 0;
 }
@@ -4168,14 +4188,32 @@ static void groups_subscribe(void) {
 /* ── Rooms (NIP-72 communities + moderation op-log; see room.c) ──────────── */
 static char g_sub_rooms[64] = "";
 
+/* The live room filter, and when it was last (re)subscribed.
+ *
+ * A re-subscribe is not cheap: the filter carries limit:500 and no `since`, so
+ * every relay replays its whole room history into this wapp. Doing that on each
+ * "something changed" signal closed a feedback loop that pegged a core — the
+ * replay contains the very events that report a change. So a re-subscribe now
+ * has to EARN itself: the filter must actually differ, and never more than once
+ * in 30 seconds whatever the events say. */
+static char g_sub_rooms_filter[1400] = "";
+static uint64_t g_sub_rooms_at = 0;
+#define ROOMS_RESUB_MIN_S 30
+
 static void rooms_subscribe(void) {
+  char f[1400];
+  unsigned fn = room_sub_filter(f, sizeof(f));
+  if (!fn) return;
+  /* Same question as last time: the answer cannot have changed. */
+  if (g_sub_rooms[0] && s_eq(f, g_sub_rooms_filter)) return;
+  uint64_t now = hal_time_epoch();
+  if (g_sub_rooms[0] && now - g_sub_rooms_at < ROOMS_RESUB_MIN_S) return;
+  g_sub_rooms_at = now;
+  s_cpy(g_sub_rooms_filter, f, sizeof(g_sub_rooms_filter));
   if (g_sub_rooms[0]) {
     hal_nostr_unsubscribe(g_sub_rooms, s_len(g_sub_rooms));
     g_sub_rooms[0] = 0;
   }
-  char f[1400];
-  unsigned fn = room_sub_filter(f, sizeof(f));
-  if (!fn) return;
   uint32_t n = hal_nostr_subscribe(f, s_len(f), g_sub_rooms, sizeof(g_sub_rooms) - 1);
   if (n > 0 && n < sizeof(g_sub_rooms)) g_sub_rooms[n] = 0; else g_sub_rooms[0] = 0;
 }

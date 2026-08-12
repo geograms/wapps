@@ -31,6 +31,12 @@ uint64_t hal_time_ms(void);
 __attribute__((import_module("hal"), import_name("time_epoch")))
 uint64_t hal_time_epoch(void);
 
+/* Minutes EAST of UTC for this device right now (DST included: +120 in CEST).
+ * Epochs travel as UTC — two phones in different zones must agree on the wire
+ * — so this is what turns one into a wall clock the reader recognises. */
+__attribute__((import_module("hal"), import_name("time_utc_offset")))
+int32_t hal_time_utc_offset(void);
+
 /* Log a message. level: 0=debug, 1=info, 2=warn, 3=error */
 __attribute__((import_module("hal"), import_name("log")))
 void hal_log(int32_t level, const char *msg, uint32_t msg_len);
