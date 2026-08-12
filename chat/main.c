@@ -1246,7 +1246,11 @@ static const char *ackmap_get(int seq) {
 
 /* Received-but-unread 1:1 messages awaiting a read receipt on convo open. */
 #define RPEND_MAX 64
-static char g_rpend_convo[RPEND_MAX][16];
+/* Wide enough for an LXMF conversation id ("lxmf:" + 32 hex = 37), not just a
+ * callsign. At 16 it silently truncated one to 15 characters, so the read
+ * receipt for a NomadNet/Bluetooth thread never matched the conversation the
+ * user opened and the second tick never appeared. */
+static char g_rpend_convo[RPEND_MAX][48];
 static char g_rpend_am[RPEND_MAX][8];
 static char g_rpend_via[RPEND_MAX][8];
 static int  g_rpend_n = 0;
@@ -1255,13 +1259,13 @@ static void rpend_add(const char *convo, const char *am, const char *via) {
   for (int i = 0; i < g_rpend_n; i++) if (s_eq(g_rpend_am[i], am)) return;
   if (g_rpend_n >= RPEND_MAX) {                 /* drop oldest */
     for (int i = 1; i < RPEND_MAX; i++) {
-      s_cpy(g_rpend_convo[i-1], g_rpend_convo[i], 16);
+      s_cpy(g_rpend_convo[i-1], g_rpend_convo[i], sizeof(g_rpend_convo[0]));
       s_cpy(g_rpend_am[i-1], g_rpend_am[i], 8);
       s_cpy(g_rpend_via[i-1], g_rpend_via[i], 8);
     }
     g_rpend_n = RPEND_MAX - 1;
   }
-  s_cpy(g_rpend_convo[g_rpend_n], convo, 16);
+  s_cpy(g_rpend_convo[g_rpend_n], convo, sizeof(g_rpend_convo[0]));
   s_cpy(g_rpend_am[g_rpend_n], am, 8);
   s_cpy(g_rpend_via[g_rpend_n], via, 8);
   g_rpend_n++;
@@ -1290,6 +1294,14 @@ static void send_receipt(const char *to, const char *am, char state, const char 
   if (!to || !to[0] || to[0] == '#' || !am || !am[0]) return;
   char body[24]; s_cpy(body, "?ACK ", sizeof(body)); s_cat(body, am, sizeof(body));
   char sp[3] = {' ', state, 0}; s_cat(body, sp, sizeof(body));
+  /* A NomadNet/Bluetooth peer is addressed by its delivery destination, not by
+   * a callsign — the conversation id carries it as "lxmf:<dest>". Without this
+   * the read receipt for those threads was aired at a callsign nobody has. */
+  if (s_pre(to, "lxmf:")) {
+    const char *d = to + 5;
+    hal_lxmf_send(d, s_len(d), "", 0, body, s_len(body));
+    return;
+  }
   if (s_eq(via, "NET")) aprs_msg_noseq(to, body);
   else if (g_ble_on && s_eq(via, "BLE")) ble_tx_msg(to, body);
   rns_tx_msg(to, body);   /* backstop (covers RET/RLY arrival + reliability) */
@@ -1365,7 +1377,8 @@ static int extract_np(char *s, char *np, unsigned np_sz) {
 
 /* User opened a 1:1 conversation → send read receipts for its pending msgs. */
 static void do_convo_open(const char *buf) {
-  char convo[16] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
+  /* 48, not 16: an LXMF conversation id is "lxmf:" + 32 hex. */
+  char convo[48] = ""; jstr(buf, "conversations_convo", convo, sizeof(convo));
   if (!convo[0] || convo[0] == '#') return;      /* groups: no receipts */
   if (room_is_room(convo)) return;               /* rooms: no 1:1 receipts */
   int w = 0;
@@ -4409,7 +4422,24 @@ static void do_rooms_send(const char *buf) {
       thread_parse(text, parent, &disp);
       if (!disp[0]) return;
       char mid[5]; msg_id(lxmf_self_dest(), disp, mid);
-      int lx_sent = hal_lxmf_send(dest, s_len(dest), "", 0, text, s_len(text));
+      /* Correlation id for the ticks. The APRS/BLE path has stamped `am:<6hex>`
+       * on every 1:1 message for a long time; this path never did, so a
+       * NomadNet/Bluetooth conversation could not produce a receipt and its
+       * bubbles never showed a tick at all. Same token, same six hex, so the
+       * peer answers it with the same "?ACK <am> d" it already knows how to
+       * send. PREPENDED for the reason the other path documents: a signature
+       * line must stay alone on the last line. */
+      char am[8] = "";
+      { unsigned char rb[3]; hal_crypto_random((char *)rb, 3);
+        static const char hx[] = "0123456789abcdef";
+        for (int i = 0; i < 3; i++) { am[i*2] = hx[rb[i] >> 4]; am[i*2+1] = hx[rb[i] & 15]; }
+        am[6] = 0; }
+      char lwire[900];
+      s_cpy(lwire, "am:", sizeof(lwire));
+      s_cat(lwire, am, sizeof(lwire));
+      s_cat(lwire, " ", sizeof(lwire));
+      s_cat(lwire, text, sizeof(lwire));
+      int lx_sent = hal_lxmf_send(dest, s_len(dest), "", 0, lwire, s_len(lwire));
       /* BEST HOPE. LXMF accepts a message it has no path for and holds it, so
        * "sent" says nothing about whether anyone will ever carry it. When the
        * peer is reachable nowhere, air an encrypted copy for nearby devices to
@@ -4423,7 +4453,12 @@ static void do_rooms_send(const char *buf) {
        * through the ordinary LXMF inbox, so nothing here has to know. */
       if (lx_sent > 0) {
         char from[16]; s_cpy(from, g_call, sizeof(from));
+        /* "sent" draws NOTHING (the tick appears on delivered), but it carries
+         * the rid the peer's receipt will name. */
+        s_cpy(g_send_rid, am, sizeof(g_send_rid));
+        s_cpy(g_send_status, "sent", sizeof(g_send_status));
         convo_msg(rid, "out", from, disp, "", "", 0, 0, "LXM", mid, parent, "", 0, 0);
+        g_send_rid[0] = 0; g_send_status[0] = 0;
         convo_touch(rid, disp, 0);
         status("TX (LXMF)");
       } else {
@@ -5160,6 +5195,29 @@ static void lxmf_drain(void) {
         convo_react(cid, ltgt, who, ul, 0);
         continue;
       }
+    }
+    /* Receipt correlation id, and the receipt itself.
+     *
+     * `am:<6hex>` rides in front of the text (see the send path). Pull it out
+     * and strip it BEFORE anything renders or threads on the body, then answer
+     * it: the sender is waiting for exactly this to turn its bubble from
+     * pending into a tick. A "?ACK <am> <d|r>" arriving here is that answer
+     * coming back, and it is not a message -- rcpt_intercept consumes it. */
+    char lam[8] = "";
+    { char ambuf[900]; s_cpy(ambuf, body, sizeof(ambuf));
+      if (extract_am(ambuf, lam)) {
+        static char lbody[900];
+        s_cpy(lbody, ambuf, sizeof(lbody));
+        body = lbody;
+      } }
+    if (rcpt_intercept(from, body)) continue;   /* a tick, never a bubble */
+    if (lam[0] && !is_group_msg) {
+      char rcpt[24];
+      s_cpy(rcpt, "?ACK ", sizeof(rcpt));
+      s_cat(rcpt, lam, sizeof(rcpt));
+      s_cat(rcpt, " d", sizeof(rcpt));
+      hal_lxmf_send(from, s_len(from), "", 0, rcpt, s_len(rcpt));
+      rpend_add(cid, lam, "RET");   /* the read receipt, when the chat opens */
     }
     /* Strip the reply marker and hand the host the parent separately. The mid
      * is derived from "<sender>|<text>", exactly as the sender derived it, so
