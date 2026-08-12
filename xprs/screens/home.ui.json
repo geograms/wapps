@@ -24,7 +24,7 @@
       {
         "$": "field",
         "name": "detail",
-        "$type": "people",
+        "$type": "details",
         "empty": "Pick a packet on the Traffic screen."
       },
       {

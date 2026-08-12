@@ -319,7 +319,6 @@ static void section_open_icon(const char *title, const char *icon) {
     }
     str_cat(g_msg, "\",\"items\":[", sizeof(g_msg));
 }
-static void section_open(const char *title) { section_open_icon(title, ""); }
 static void section_close(void) { str_cat(g_msg, "]}", sizeof(g_msg)); }
 
 /* Newest first: a person looking at a radio wants the last thing said. */
@@ -486,22 +485,75 @@ static int find_packet(const char *id, char *out, unsigned m) {
     return 0;
 }
 
-/* One row per field of the wire, with what that field means. */
+/* One row per field of the wire, with what that field means.
+ *
+ * A `details` field, not a people list: a people row draws an identicon and a
+ * name, so pointing it at the fields of a packet gave every one of them a
+ * meaningless generated face and truncated the explanation into "the station
+ * that composed…". This reads as an account of a message instead. */
+static void detail_item(const char *label, const char *value, const char *key,
+                        int mono, int first) {
+    if (!first) str_cat(g_msg, ",", sizeof(g_msg));
+    str_cat(g_msg, "{\"label\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), label);
+    str_cat(g_msg, "\",\"value\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), value);
+    if (key && key[0]) {
+        str_cat(g_msg, "\",\"key\":\"", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), key);
+    }
+    str_cat(g_msg, mono ? "\",\"mono\":true}" : "\"}", sizeof(g_msg));
+}
+
+/* Is this value an identifier rather than words? Those read better in
+ * monospace, where the shape of each character is comparable. */
+static int looks_like_id(const char *v) {
+    unsigned n = 0, hex = 0;
+    for (; v[n]; n++) {
+        char c = v[n];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) hex++;
+    }
+    return n >= 12 && hex == n;
+}
+
 static void push_detail(const char *obj) {
     char wire[400] = "", type[24] = "", bearer[16] = "", rssi[12] = "", id[16] = "";
+    char from[24] = "", to[24] = "", ts[16] = "", mine[8] = "";
     json_raw(obj, "wire", wire, sizeof(wire));
     json_raw(obj, "type", type, sizeof(type));
     json_raw(obj, "bearer", bearer, sizeof(bearer));
     json_raw(obj, "rssi", rssi, sizeof(rssi));
     json_raw(obj, "id", id, sizeof(id));
+    json_raw(obj, "from", from, sizeof(from));
+    json_raw(obj, "to", to, sizeof(to));
+    json_raw(obj, "ts", ts, sizeof(ts));
+    json_raw(obj, "mine", mine, sizeof(mine));
 
-    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"detail\",\"sections\":[",
+    str_copy(g_msg, "{\"type\":\"ui.field.set\",\"field\":\"detail\",\"value\":[",
              sizeof(g_msg));
-    section_open("What it says");
 
-    /* Split the wire on spaces into key:value, minding that `m:` is greedy to
-     * the end of the packet (docs/XPRS.md section 4.1). */
-    int emitted = 0;
+    /* A plain-language summary first, so the screen answers "what is this?"
+     * before it answers "what are its fields?". */
+    str_cat(g_msg, "{\"title\":\"In short\",\"items\":[", sizeof(g_msg));
+    {
+        char line[200];
+        str_copy(line, from[0] ? from : "An unknown station", sizeof(line));
+        if (str_eq(mine, "true"))      str_cat(line, " sent this to us", sizeof(line));
+        else if (to[0])              { str_cat(line, " sent this to ", sizeof(line)); str_cat(line, to, sizeof(line)); }
+        else                           str_cat(line, " broadcast this to everyone", sizeof(line));
+        detail_item("What happened", line, "", 0, 1);
+
+        char when[8]; unsigned e = 0;
+        for (unsigned i = 0; ts[i] >= '0' && ts[i] <= '9'; i++) e = e * 10 + (unsigned)(ts[i] - '0');
+        fmt_clock(when, sizeof(when), e);
+        detail_item("Heard at", when, "", 0, 0);
+        detail_item("Kind of packet", type[0] ? type : "packet", "t", 0, 0);
+    }
+    str_cat(g_msg, "]},", sizeof(g_msg));
+
+    /* Every field of the wire, with what it means. */
+    str_cat(g_msg, "{\"title\":\"What it says\",\"items\":[", sizeof(g_msg));
+    int first = 1;
     unsigned i = 0;
     while (wire[i]) {
         while (wire[i] == ' ') i++;
@@ -515,42 +567,31 @@ static void push_detail(const char *obj) {
         int greedy = str_eq(key, "m") || str_eq(key, "cw");
         while (wire[i] && (greedy || wire[i] != ' ') && v < sizeof(val) - 1) val[v++] = wire[i++];
         val[v] = '\0';
-
-        if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
-        str_cat(g_msg, "{\"id\":\"", sizeof(g_msg));
-        json_esc(g_msg, sizeof(g_msg), key);
-        str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
-        json_esc(g_msg, sizeof(g_msg), val);
-        str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
-        { const char *mean = key_meaning(key);
-          json_esc(g_msg, sizeof(g_msg), mean[0] ? mean : "Field"); }
-        str_cat(g_msg, "\",\"tags\":[\"", sizeof(g_msg));
-        json_esc(g_msg, sizeof(g_msg), key);
-        str_cat(g_msg, "\"]}", sizeof(g_msg));
-        emitted++;
+        const char *mean = key_meaning(key);
+        detail_item(mean[0] ? mean : "Field", val, key, looks_like_id(val), first);
+        first = 0;
     }
-    section_close();
+    if (first) detail_item("Nothing readable in this packet", "", "", 0, 1);
+    str_cat(g_msg, "]},", sizeof(g_msg));
 
     /* How it reached us, and the bytes exactly as they were on the air. */
-    section_open("How it arrived");
-    str_cat(g_msg, "{\"id\":\"bearer\",\"title\":\"", sizeof(g_msg));
-    { char up[16]; str_copy(up, bearer, sizeof(up));
-      for (unsigned j = 0; up[j]; j++) if (up[j] >= 'a' && up[j] <= 'z') up[j] = (char)(up[j] - 32);
-      json_esc(g_msg, sizeof(g_msg), up[0] ? up : "AIR"); }
-    if (rssi[0] && !str_eq(rssi, "0")) { str_cat(g_msg, "  \\u00b7  ", sizeof(g_msg)); json_esc(g_msg, sizeof(g_msg), rssi); str_cat(g_msg, " dBm", sizeof(g_msg)); }
-    str_cat(g_msg, "\",\"subtitle\":\"The bearer that carried it. Never the internet.\"},", sizeof(g_msg));
-    str_cat(g_msg, "{\"id\":\"raw\",\"title\":\"", sizeof(g_msg));
-    json_esc(g_msg, sizeof(g_msg), wire);
-    str_cat(g_msg, "\",\"subtitle\":\"The packet exactly as it was on the air\"},", sizeof(g_msg));
-    str_cat(g_msg, "{\"id\":\"ident\",\"title\":\"", sizeof(g_msg));
-    json_esc(g_msg, sizeof(g_msg), id);
-    str_cat(g_msg, "\",\"subtitle\":\"Its identifier - derived from the packet, never transmitted\"}", sizeof(g_msg));
-    section_close();
-
-    str_cat(g_msg, "]}", sizeof(g_msg));
+    str_cat(g_msg, "{\"title\":\"How it arrived\",\"items\":[", sizeof(g_msg));
+    {
+        char b[40];
+        str_copy(b, "", sizeof(b));
+        for (unsigned j = 0; bearer[j] && j < 8; j++) {
+            char c = bearer[j];
+            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+            unsigned l = str_len(b); b[l] = c; b[l + 1] = '\0';
+        }
+        if (rssi[0] && !str_eq(rssi, "0")) { str_cat(b, " at ", sizeof(b)); str_cat(b, rssi, sizeof(b)); str_cat(b, " dBm", sizeof(b)); }
+        detail_item("Bearer that carried it - never the internet", b[0] ? b : "air", "", 0, 1);
+        detail_item("The packet exactly as it was on the air", wire, "", 1, 0);
+        detail_item("Identifier - derived from the packet, never transmitted", id, "", 1, 0);
+    }
+    str_cat(g_msg, "]}]}", sizeof(g_msg));
     send_msg(g_msg);
 
-    /* Open the panel, titled with what this actually is. */
     char m[200];
     str_copy(m, "{\"type\":\"ui.screen.open\",\"name\":\"Packet\",\"title\":\"", sizeof(m));
     json_esc(m, sizeof(m), type[0] ? type : "packet");
