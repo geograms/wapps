@@ -1,14 +1,25 @@
 /*
- * xprs — what this device can hear on the air.
+ * xprs — what this device can hear on the air, and what it is carrying.
  *
- * Two read-only host calls, nothing else:
- *   hal_xprs_stations → stations heard, pre-shaped as people-widget sections
- *   hal_xprs_traffic  → the recent packet ring, oldest first
+ *   hal_xprs_stations  → stations heard, pre-shaped as people-widget sections
+ *   hal_xprs_traffic   → the recent packet ring, oldest first
+ *   hal_mesh_held      → mail this device holds for OTHER people
+ *   hal_mesh_scf_status→ how much of it, and whether carrying is on
+ *   hal_mesh_set_pref  → "scfEnabled=0|1", the owner's answer on carrying
  *
- * It transmits nothing. It is a window onto the radio, and deliberately shows
+ * It transmits nothing of its own. It is a window onto the radio, and shows
  * traffic addressed to OTHER people too — on a mesh that is most of what goes
- * past, and being able to see it is the difference between believing the
- * network works and knowing it does.
+ * past, and seeing it is the difference between believing the network works
+ * and knowing it does.
+ *
+ * The packet list is a people-widget rather than a log, because a log can only
+ * be read top to bottom: sections give free filtering (the widget switches
+ * them locally, no round trip), a row gives a tap target for the full packet,
+ * and a row action gives the star.
+ *
+ * Favourites are kept as the packet's OWN JSON, not as an id. The host ring
+ * holds 200 sightings and then forgets; a favourite that was only a pointer
+ * would rot into a dead reference within minutes of a busy channel.
  *
  * Nothing here arrived over the internet. The host records a packet's bearer
  * where it lands and only collects radio and local ones, so this view cannot
@@ -25,8 +36,7 @@ static int str_eq(const char *a, const char *b) { while (*a && *b && *a == *b) {
 static void str_copy(char *d, const char *s, unsigned m) { unsigned i = 0; while (i < m - 1 && s[i]) { d[i] = s[i]; i++; } d[i] = '\0'; }
 static void str_cat(char *d, const char *s, unsigned m) { unsigned l = str_len(d); unsigned i = 0; while (l + i < m - 1 && s[i]) { d[l + i] = s[i]; i++; } d[l + i] = '\0'; }
 
-/* Find "key":<value> in flat JSON starting at `json`, copy the raw value.
- * Same scanner the bluetooth wapp uses — the host emits flat objects. */
+/* Find "key":<value> in flat JSON starting at `json`, copy the raw value. */
 static int json_raw(const char *json, const char *key, char *out, unsigned m) {
     char pat[48];
     str_copy(pat, "\"", sizeof(pat));
@@ -52,7 +62,6 @@ static int json_raw(const char *json, const char *key, char *out, unsigned m) {
     return 0;
 }
 
-/* Escape a string into a JSON context. */
 static void json_esc(char *d, unsigned m, const char *s) {
     unsigned l = str_len(d);
     for (unsigned i = 0; s[i] && l < m - 2; i++) {
@@ -64,40 +73,316 @@ static void json_esc(char *d, unsigned m, const char *s) {
     d[l] = '\0';
 }
 
-/* Right-pad so the log lines form columns a person can scan. */
-static void pad_to(char *d, unsigned m, unsigned width) {
-    unsigned l = str_len(d);
-    /* Count from the last newline, not the start: d is one line here. */
-    while (l < width && l < m - 1) { d[l++] = ' '; }
-    d[l] = '\0';
+/* Copy one {...} object out of an array, brace-balanced. */
+static int obj_copy(const char *p, char *out, unsigned m) {
+    if (*p != '{') return 0;
+    int depth = 0, instr = 0;
+    unsigned o = 0;
+    for (; *p && o < m - 1; p++) {
+        char c = *p;
+        if (instr) { if (c == '"' && p[-1] != '\\') instr = 0; }
+        else if (c == '"') instr = 1;
+        else if (c == '{') depth++;
+        else if (c == '}') { out[o++] = c; if (--depth == 0) { out[o] = '\0'; return 1; } continue; }
+        out[o++] = c;
+    }
+    out[o] = '\0';
+    return 0;
 }
 
 /* ── Buffers ─────────────────────────────────────────────────────────── */
 static char g_stations[32768];
 static char g_traffic[65536];
-static char g_msg[40960];
-static char g_line[512];
-static char g_last_id[8] = "";   /* newest packet already rendered */
-static int  g_have_last = 0;
+static char g_held[32768];
+static char g_scf[1024];
+static char g_msg[60000];
+static char g_favs[16384];     /* favourite packets, own JSON, 0x1E-separated */
+static char g_obj[1200];
+static char g_open[1200];      /* the packet the detail panel is showing      */
+
+#define FAV_SEP '\036'         /* 0x1E: a record separator, never in JSON text */
+#define FAV_MAX 40
 
 static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
 
-static void log_line(const char *text) {
-    char m[700];
-    str_copy(m, "{\"type\":\"ui.log.append\",\"field\":\"traffic\",\"line\":\"", sizeof(m));
-    json_esc(m, sizeof(m), text);
-    str_cat(m, "\"}", sizeof(m));
-    send_msg(m);
+/* ── Favourites ──────────────────────────────────────────────────────── */
+static void favs_load(void) {
+    uint32_t n = hal_kv_get("xprs.favs", 9, g_favs, sizeof(g_favs) - 1);
+    if (n >= sizeof(g_favs)) n = 0;
+    g_favs[n] = '\0';
+}
+static void favs_save(void) { hal_kv_set("xprs.favs", 9, g_favs, str_len(g_favs)); }
+
+/* Walk the favourites; each record is one packet object. */
+static const char *fav_next(const char *p, char *out, unsigned m) {
+    /* ALWAYS terminate the caller's buffer. Every walk below tests `rec[0]`
+     * to decide whether it got a record, so returning without touching `out`
+     * left them reading uninitialised stack — which is why an empty store
+     * counted one favourite. */
+    out[0] = '\0';
+    if (!p || !*p) return 0;
+    unsigned o = 0;
+    while (*p && *p != FAV_SEP && o < m - 1) out[o++] = *p++;
+    out[o] = '\0';
+    while (*p == FAV_SEP) p++;
+    return o ? p : 0;
 }
 
-static void log_clear(void) {
-    send_msg("{\"type\":\"ui.log.clear\",\"field\":\"traffic\"}");
+static int fav_has(const char *id) {
+    char rec[1200], want[16];
+    for (const char *p = g_favs; (p = fav_next(p, rec, sizeof(rec))) || rec[0]; ) {
+        if (json_raw(rec, "id", want, sizeof(want)) && str_eq(want, id)) return 1;
+        if (!p) break;
+    }
+    return 0;
+}
+
+static void fav_remove(const char *id) {
+    static char keep[16384];
+    char rec[1200], want[16];
+    keep[0] = '\0';
+    for (const char *p = g_favs; (p = fav_next(p, rec, sizeof(rec))) || rec[0]; ) {
+        int drop = json_raw(rec, "id", want, sizeof(want)) && str_eq(want, id);
+        if (!drop && rec[0]) {
+            if (keep[0]) { unsigned l = str_len(keep); if (l < sizeof(keep) - 2) { keep[l] = FAV_SEP; keep[l + 1] = '\0'; } }
+            str_cat(keep, rec, sizeof(keep));
+        }
+        if (!p) break;
+    }
+    str_copy(g_favs, keep, sizeof(g_favs));
+    favs_save();
+}
+
+/* Count records, so the oldest can be shed at the cap. */
+static int fav_count(void) {
+    int n = 0;
+    char rec[1200];
+    for (const char *p = g_favs; (p = fav_next(p, rec, sizeof(rec))) || rec[0]; ) {
+        if (rec[0]) n++;
+        if (!p) break;
+    }
+    return n;
+}
+
+static void fav_add(const char *obj) {
+    char id[16] = "";
+    if (!json_raw(obj, "id", id, sizeof(id))) return;
+    if (fav_has(id)) return;
+    while (fav_count() >= FAV_MAX) {
+        char rec[1200], oldest[16] = "";
+        const char *p = fav_next(g_favs, rec, sizeof(rec));
+        (void)p;
+        if (!json_raw(rec, "id", oldest, sizeof(oldest))) break;
+        fav_remove(oldest);
+    }
+    if (g_favs[0]) {
+        unsigned l = str_len(g_favs);
+        if (l < sizeof(g_favs) - 2) { g_favs[l] = FAV_SEP; g_favs[l + 1] = '\0'; }
+    }
+    str_cat(g_favs, obj, sizeof(g_favs));
+    favs_save();
+}
+
+/* ── Time ────────────────────────────────────────────────────────────── */
+/* Epoch seconds → local "HH:MM". The offset is a host call, so it is read
+ * once: a redraw formats every row (docs/performance.md section 4.2). */
+static int g_tz_min = 0, g_tz_known = 0;
+static void fmt_clock(char *d, unsigned m, unsigned epoch) {
+    if (!g_tz_known) { g_tz_min = hal_time_utc_offset(); g_tz_known = 1; }
+    long long secs = (long long)epoch + (long long)g_tz_min * 60;
+    long long day = secs % 86400;
+    if (day < 0) day += 86400;
+    unsigned hh = (unsigned)(day / 3600), mm = (unsigned)((day / 60) % 60);
+    char b[8];
+    b[0] = (char)('0' + hh / 10); b[1] = (char)('0' + hh % 10); b[2] = ':';
+    b[3] = (char)('0' + mm / 10); b[4] = (char)('0' + mm % 10); b[5] = '\0';
+    str_copy(d, b, m);
+}
+
+/* ── What a key means (docs/XPRS.md section 4.2) ─────────────────────── */
+/* The packet is readable without a decoder, but "what does lx: mean" is a
+ * fair question the first time. Wapp-side on purpose: the host stays generic
+ * and knows nothing about XPRS vocabulary. */
+static const char *key_meaning(const char *k) {
+    if (str_eq(k, "t"))    return "Packet type";
+    if (str_eq(k, "f"))    return "From — the station that composed it";
+    if (str_eq(k, "d"))    return "To — the station it is addressed to";
+    if (str_eq(k, "ts"))   return "When it was composed (UTC)";
+    if (str_eq(k, "m"))    return "The message itself";
+    if (str_eq(k, "q"))    return "What the sender wants back";
+    if (str_eq(k, "s"))    return "What this packet answers or reports";
+    if (str_eq(k, "r"))    return "The packet this one refers to";
+    if (str_eq(k, "n"))    return "Part i of n";
+    if (str_eq(k, "via"))  return "Stations that relayed it, oldest first";
+    if (str_eq(k, "sig"))  return "Signature over the packet";
+    if (str_eq(k, "lx"))   return "Where to write to this station (LXMF)";
+    if (str_eq(k, "link")) return "The bearer this reading is about";
+    if (str_eq(k, "peers"))return "How many stations it can hear";
+    if (str_eq(k, "hears"))return "Which stations it can hear";
+    if (str_eq(k, "mail")) return "Messages it is holding for others";
+    if (str_eq(k, "pos"))  return "Position";
+    if (str_eq(k, "batt")) return "Battery level";
+    if (str_eq(k, "urg"))  return "Urgency";
+    if (str_eq(k, "until"))return "Stops mattering after";
+    if (str_eq(k, "dest")) return "Region it is addressed to";
+    if (str_eq(k, "near")) return "How close to that region counts";
+    if (str_eq(k, "root")) return "The packet its thread hangs from";
+    if (str_eq(k, "cw"))   return "What it contains, warned before rendering";
+    /* Telemetry a station reports about itself (section 10). */
+    if (str_eq(k, "uptime"))  return "How long it has run without interruption";
+    if (str_eq(k, "lifetime"))return "How long it has run in total, across restarts";
+    if (str_eq(k, "snr"))     return "Signal-to-noise ratio";
+    if (str_eq(k, "rssi"))    return "How loud it was heard";
+    if (str_eq(k, "busy"))    return "How much of the last hour the channel was busy";
+    if (str_eq(k, "txtime"))  return "How much of the last hour it was transmitting";
+    if (str_eq(k, "temp"))    return "Temperature";
+    if (str_eq(k, "hum"))     return "Humidity";
+    if (str_eq(k, "type"))    return "What the station is, or is riding on";
+    if (str_eq(k, "alt"))     return "Altitude";
+    if (str_eq(k, "spd"))     return "Speed";
+    if (str_eq(k, "crs"))     return "Course";
+    return "";
+}
+
+/* ── One row in the packet list ──────────────────────────────────────── */
+static void item_json(char *out, unsigned m, const char *obj, int starred) {
+    char bearer[16] = "", rssi[12] = "", from[24] = "", to[24] = "";
+    char type[24] = "", mine[8] = "", id[16] = "", ts[16] = "";
+    json_raw(obj, "bearer", bearer, sizeof(bearer));
+    json_raw(obj, "rssi", rssi, sizeof(rssi));
+    json_raw(obj, "from", from, sizeof(from));
+    json_raw(obj, "to", to, sizeof(to));
+    json_raw(obj, "type", type, sizeof(type));
+    json_raw(obj, "mine", mine, sizeof(mine));
+    json_raw(obj, "id", id, sizeof(id));
+    json_raw(obj, "ts", ts, sizeof(ts));
+
+    str_cat(out, "{\"id\":\"", m); json_esc(out, m, id);
+    /* Title: who is talking to whom, which is what a person scans for. */
+    str_cat(out, "\",\"title\":\"", m);
+    json_esc(out, m, from[0] ? from : "(unknown)");
+    if (to[0]) { str_cat(out, " \\u2192 ", m); json_esc(out, m, to); }
+    else       { str_cat(out, " \\u2192 everyone", m); }
+
+    /* Subtitle: the human summary — when, what, how loud. */
+    str_cat(out, "\",\"subtitle\":\"", m);
+    { unsigned e = 0; for (unsigned i = 0; ts[i] >= '0' && ts[i] <= '9'; i++) e = e * 10 + (unsigned)(ts[i] - '0');
+      char clock[8]; fmt_clock(clock, sizeof(clock), e); json_esc(out, m, clock); }
+    str_cat(out, "  \\u00b7  ", m);
+    json_esc(out, m, type[0] ? type : "packet");
+
+    str_cat(out, "\",\"tags\":[\"", m);
+    { char up[16]; str_copy(up, bearer, sizeof(up));
+      for (unsigned i = 0; up[i]; i++) if (up[i] >= 'a' && up[i] <= 'z') up[i] = (char)(up[i] - 32);
+      json_esc(out, m, up[0] ? up : "AIR"); }
+    str_cat(out, "\",\"", m);
+    if (str_eq(mine, "true")) str_cat(out, "for us", m);
+    else if (to[0])           str_cat(out, "passing", m);
+    else                      str_cat(out, "broadcast", m);
+    if (rssi[0] && !str_eq(rssi, "0")) {
+        str_cat(out, "\",\"", m); json_esc(out, m, rssi); str_cat(out, " dBm", m);
+    }
+    str_cat(out, "\"],", m);
+
+    /* The star. A row action, so it never costs a screen change. */
+    str_cat(out, "\"action\":\"", m);
+    str_cat(out, starred ? "unfav" : "fav", m);
+    str_cat(out, "\",\"actionLabel\":\"", m);
+    str_cat(out, starred ? "\\u2605" : "\\u2606", m);
+    str_cat(out, "\"}", m);
+}
+
+/* ── Traffic ─────────────────────────────────────────────────────────── */
+
+/* Does this packet belong in section [want]?
+ * 0 all · 1 for us · 2 messages · 3 beacons · 4 everything else */
+static int in_section(const char *obj, int want) {
+    char type[24] = "", mine[8] = "";
+    json_raw(obj, "type", type, sizeof(type));
+    json_raw(obj, "mine", mine, sizeof(mine));
+    if (want == 0) return 1;
+    if (want == 1) return str_eq(mine, "true");
+    if (want == 2) return str_eq(type, "message");
+    if (want == 3) return str_eq(type, "observation");
+    return !str_eq(type, "message") && !str_eq(type, "observation");
+}
+
+/* A section names an ICON, so the filter strip is icons rather than six
+ * wrapped words. The title rides along as the tooltip. */
+static void section_open_icon(const char *title, const char *icon) {
+    if (g_msg[str_len(g_msg) - 1] != '[') str_cat(g_msg, ",", sizeof(g_msg));
+    str_cat(g_msg, "{\"title\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), title);
+    if (icon && icon[0]) {
+        str_cat(g_msg, "\",\"icon\":\"", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), icon);
+    }
+    str_cat(g_msg, "\",\"items\":[", sizeof(g_msg));
+}
+static void section_open(const char *title) { section_open_icon(title, ""); }
+static void section_close(void) { str_cat(g_msg, "]}", sizeof(g_msg)); }
+
+/* Newest first: a person looking at a radio wants the last thing said. */
+static void push_packets(void) {
+    int n = hal_xprs_traffic(g_traffic, sizeof(g_traffic) - 1);
+    if (n < 0) return;
+    g_traffic[n > 0 ? n : 0] = '\0';
+
+    static const char *names[5] = {"All", "For us", "Messages", "Beacons", "Other"};
+    static const char *icons[5] = {"list", "mail", "chat", "radar", "more_horiz"};
+    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"packets\",\"sections\":[",
+             sizeof(g_msg));
+
+    for (int sec = 0; sec < 5; sec++) {
+        /* The widget appends "(n)" itself — see
+         * people_view_field.dart: a title carrying its own count renders as
+         * "All (24) (24)". */
+        section_open_icon(names[sec], icons[sec]);
+
+        /* Walk backwards over the array so the newest row is first. The ring
+         * is small (200) and this runs on a 3s tick, so a rescan is cheaper
+         * than keeping a parallel index in sync. */
+        int emitted = 0;
+        for (const char *p = g_traffic + str_len(g_traffic); p >= g_traffic && emitted < 60; p--) {
+            if (*p != '{') continue;
+            if (!obj_copy(p, g_obj, sizeof(g_obj))) continue;
+            if (!in_section(g_obj, sec)) continue;
+            char id[16] = "";
+            json_raw(g_obj, "id", id, sizeof(id));
+            if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
+            item_json(g_msg, sizeof(g_msg), g_obj, fav_has(id));
+            emitted++;
+        }
+        section_close();
+    }
+
+    /* Favourites last, and from their own copies — the ring has long since
+     * forgotten most of them. */
+    {
+        if (g_msg[str_len(g_msg) - 1] != '[') str_cat(g_msg, ",", sizeof(g_msg));
+        /* The star is written as an escape so the source stays ASCII. */
+        str_cat(g_msg, "{\"title\":\"Favourites\",\"icon\":\"star\",\"items\":[", sizeof(g_msg));
+        int emitted = 0;
+        char rec[1200];
+        for (const char *p = g_favs; (p = fav_next(p, rec, sizeof(rec))) || rec[0]; ) {
+            if (rec[0]) {
+                if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
+                item_json(g_msg, sizeof(g_msg), rec, 1);
+                emitted++;
+            }
+            if (!p) break;
+        }
+        section_close();
+    }
+
+    str_cat(g_msg, "]}", sizeof(g_msg));
+    send_msg(g_msg);
 }
 
 /* ── Stations ────────────────────────────────────────────────────────── */
 static void push_stations(void) {
     int n = hal_xprs_stations(g_stations, sizeof(g_stations) - 1);
-    if (n <= 0) return;                       /* 0 = nothing, <0 = too small */
+    if (n <= 0) return;
     g_stations[n] = '\0';
     str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"stations\",\"sections\":",
              sizeof(g_msg));
@@ -106,116 +391,187 @@ static void push_stations(void) {
     send_msg(g_msg);
 }
 
-/* ── Traffic ─────────────────────────────────────────────────────────── */
-
-/* One rendered line:
- *   BLE   -37  X1RD89  observation  peers 12, mail 3
- *   BLE   -42  X1A67X  message      -> X32DVA (passing)
- */
-static void render_packet(const char *obj) {
-    char bearer[16] = "", rssi[12] = "", from[16] = "", to[16] = "";
-    char type[16] = "", mine[8] = "", wire[300] = "";
-    json_raw(obj, "bearer", bearer, sizeof(bearer));
-    json_raw(obj, "rssi", rssi, sizeof(rssi));
-    json_raw(obj, "from", from, sizeof(from));
-    json_raw(obj, "to", to, sizeof(to));
-    json_raw(obj, "type", type, sizeof(type));
-    json_raw(obj, "mine", mine, sizeof(mine));
-    json_raw(obj, "wire", wire, sizeof(wire));
-
-    /* Bearer, upper-cased, padded into a column. */
-    str_copy(g_line, "", sizeof(g_line));
-    for (unsigned i = 0; bearer[i] && i < 8; i++) {
-        char c = bearer[i];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        unsigned l = str_len(g_line);
-        g_line[l] = c; g_line[l + 1] = '\0';
-    }
-    pad_to(g_line, sizeof(g_line), 6);
-
-    if (rssi[0] && !str_eq(rssi, "0")) {
-        str_cat(g_line, rssi, sizeof(g_line));
-        str_cat(g_line, " dBm", sizeof(g_line));
-    }
-    pad_to(g_line, sizeof(g_line), 15);
-
-    str_cat(g_line, from, sizeof(g_line));
-    pad_to(g_line, sizeof(g_line), 26);
-
-    str_cat(g_line, type, sizeof(g_line));
-    pad_to(g_line, sizeof(g_line), 40);
-
-    /* Who it was for. Traffic that is merely passing is the interesting part
-     * of a mesh, so it is labelled rather than hidden. */
-    if (str_eq(mine, "true")) {
-        str_cat(g_line, "for us", sizeof(g_line));
-    } else if (to[0]) {
-        str_cat(g_line, "-> ", sizeof(g_line));
-        str_cat(g_line, to, sizeof(g_line));
-        str_cat(g_line, " (passing)", sizeof(g_line));
-    } else {
-        str_cat(g_line, "broadcast", sizeof(g_line));
-    }
-
-    log_line(g_line);
-    /* The packet itself, indented, so the trace is the actual wire text. */
-    str_copy(g_line, "        ", sizeof(g_line));
-    str_cat(g_line, wire, sizeof(g_line));
-    log_line(g_line);
+/* ── Carried: what we hold for other people ──────────────────────────── */
+static void push_carry_switch(void) {
+    int n = hal_mesh_scf_status(g_scf, sizeof(g_scf) - 1);
+    if (n <= 0) return;
+    g_scf[n] = '\0';
+    char en[8] = "1";
+    json_raw(g_scf, "enabled", en, sizeof(en));
+    str_copy(g_msg, "{\"type\":\"ui.field.set\",\"field\":\"carry_on\",\"value\":",
+             sizeof(g_msg));
+    str_cat(g_msg, str_eq(en, "0") ? "false" : "true", sizeof(g_msg));
+    str_cat(g_msg, "}", sizeof(g_msg));
+    send_msg(g_msg);
 }
 
-/* Walk the traffic array and render everything newer than the last one shown.
- * The host returns a ring, so a poll usually repeats what we already have. */
-static void push_traffic(int force) {
-    int n = hal_xprs_traffic(g_traffic, sizeof(g_traffic) - 1);
-    if (n <= 0) return;
-    g_traffic[n] = '\0';
+static void push_held(void) {
+    int n = hal_mesh_held(g_held, sizeof(g_held) - 1);
+    if (n < 0) return;
+    g_held[n > 0 ? n : 0] = '\0';
 
-    if (force) { log_clear(); g_have_last = 0; g_last_id[0] = '\0'; }
-
-    /* Find where to resume: everything after the object carrying g_last_id. */
-    char *start = g_traffic;
-    if (g_have_last) {
-        for (char *p = g_traffic; *p; p++) {
-            if (*p != '{') continue;
-            char id[8] = "";
-            json_raw(p, "id", id, sizeof(id));
-            if (str_eq(id, g_last_id)) {
-                while (*p && *p != '}') p++;
-                start = *p ? p + 1 : p;
-            }
-        }
-        if (start == g_traffic) {
-            /* The one we last showed has aged out of the ring: everything
-             * here is new. Better to repeat than to silently skip. */
-            start = g_traffic;
-        }
-    }
-
-    for (char *p = start; *p; p++) {
+    int counts[2] = {0, 0};
+    for (const char *p = g_held; *p; p++) {
         if (*p != '{') continue;
-        render_packet(p);
-        char id[8] = "";
-        if (json_raw(p, "id", id, sizeof(id))) {
-            str_copy(g_last_id, id, sizeof(g_last_id));
-            g_have_last = 1;
+        if (obj_copy(p, g_obj, sizeof(g_obj))) {
+            char st[8] = "0"; json_raw(g_obj, "state", st, sizeof(st));
+            counts[str_eq(st, "1") ? 1 : 0]++;
         }
         while (*p && *p != '}') p++;
         if (!*p) break;
     }
+
+    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"held\",\"sections\":[",
+             sizeof(g_msg));
+    static const char *names[2] = {"Waiting to hand on", "Delivered, kept a while"};
+    static const char *icons[2] = {"upload", "check"};
+    for (int want = 0; want < 2; want++) {
+        section_open_icon(names[want], icons[want]);
+        int emitted = 0;
+        for (const char *p = g_held; *p && emitted < 60; p++) {
+            if (*p != '{') continue;
+            if (obj_copy(p, g_obj, sizeof(g_obj))) {
+                char st[8] = "0"; json_raw(g_obj, "state", st, sizeof(st));
+                if ((str_eq(st, "1") ? 1 : 0) == want) {
+                    char am[24] = "", target[24] = "", sender[24] = "", size[16] = "", ts[16] = "";
+                    json_raw(g_obj, "am", am, sizeof(am));
+                    json_raw(g_obj, "target", target, sizeof(target));
+                    json_raw(g_obj, "sender", sender, sizeof(sender));
+                    json_raw(g_obj, "size", size, sizeof(size));
+                    json_raw(g_obj, "ts", ts, sizeof(ts));
+                    if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
+                    str_cat(g_msg, "{\"id\":\"", sizeof(g_msg));
+                    json_esc(g_msg, sizeof(g_msg), am);
+                    str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
+                    json_esc(g_msg, sizeof(g_msg), sender[0] ? sender : "(unknown)");
+                    str_cat(g_msg, " \\u2192 ", sizeof(g_msg));
+                    json_esc(g_msg, sizeof(g_msg), target[0] ? target : "(anyone)");
+                    str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
+                    { unsigned e = 0; for (unsigned i = 0; ts[i] >= '0' && ts[i] <= '9'; i++) e = e * 10 + (unsigned)(ts[i] - '0');
+                      char clock[8]; fmt_clock(clock, sizeof(clock), e); json_esc(g_msg, sizeof(g_msg), clock); }
+                    str_cat(g_msg, "  \\u00b7  ", sizeof(g_msg));
+                    json_esc(g_msg, sizeof(g_msg), size);
+                    str_cat(g_msg, " bytes\"}", sizeof(g_msg));
+                    emitted++;
+                }
+            }
+            while (*p && *p != '}') p++;
+            if (!*p) break;
+        }
+        section_close();
+    }
+    str_cat(g_msg, "]}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
+/* ── The packet, in full ─────────────────────────────────────────────── */
+
+/* Find a packet by id, in the ring first and then the favourites. */
+static int find_packet(const char *id, char *out, unsigned m) {
+    char got[16];
+    for (const char *p = g_traffic; *p; p++) {
+        if (*p != '{') continue;
+        if (obj_copy(p, out, m) && json_raw(out, "id", got, sizeof(got)) && str_eq(got, id)) return 1;
+        while (*p && *p != '}') p++;
+        if (!*p) break;
+    }
+    char rec[1200];
+    for (const char *p = g_favs; (p = fav_next(p, rec, sizeof(rec))) || rec[0]; ) {
+        if (rec[0] && json_raw(rec, "id", got, sizeof(got)) && str_eq(got, id)) {
+            str_copy(out, rec, m);
+            return 1;
+        }
+        if (!p) break;
+    }
+    return 0;
+}
+
+/* One row per field of the wire, with what that field means. */
+static void push_detail(const char *obj) {
+    char wire[400] = "", type[24] = "", bearer[16] = "", rssi[12] = "", id[16] = "";
+    json_raw(obj, "wire", wire, sizeof(wire));
+    json_raw(obj, "type", type, sizeof(type));
+    json_raw(obj, "bearer", bearer, sizeof(bearer));
+    json_raw(obj, "rssi", rssi, sizeof(rssi));
+    json_raw(obj, "id", id, sizeof(id));
+
+    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"detail\",\"sections\":[",
+             sizeof(g_msg));
+    section_open("What it says");
+
+    /* Split the wire on spaces into key:value, minding that `m:` is greedy to
+     * the end of the packet (docs/XPRS.md section 4.1). */
+    int emitted = 0;
+    unsigned i = 0;
+    while (wire[i]) {
+        while (wire[i] == ' ') i++;
+        if (!wire[i]) break;
+        char key[16] = ""; unsigned k = 0;
+        while (wire[i] && wire[i] != ':' && wire[i] != ' ' && k < sizeof(key) - 1) key[k++] = wire[i++];
+        key[k] = '\0';
+        if (wire[i] != ':') { while (wire[i] && wire[i] != ' ') i++; continue; }
+        i++;
+        char val[300] = ""; unsigned v = 0;
+        int greedy = str_eq(key, "m") || str_eq(key, "cw");
+        while (wire[i] && (greedy || wire[i] != ' ') && v < sizeof(val) - 1) val[v++] = wire[i++];
+        val[v] = '\0';
+
+        if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
+        str_cat(g_msg, "{\"id\":\"", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), key);
+        str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), val);
+        str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
+        { const char *mean = key_meaning(key);
+          json_esc(g_msg, sizeof(g_msg), mean[0] ? mean : "Field"); }
+        str_cat(g_msg, "\",\"tags\":[\"", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), key);
+        str_cat(g_msg, "\"]}", sizeof(g_msg));
+        emitted++;
+    }
+    section_close();
+
+    /* How it reached us, and the bytes exactly as they were on the air. */
+    section_open("How it arrived");
+    str_cat(g_msg, "{\"id\":\"bearer\",\"title\":\"", sizeof(g_msg));
+    { char up[16]; str_copy(up, bearer, sizeof(up));
+      for (unsigned j = 0; up[j]; j++) if (up[j] >= 'a' && up[j] <= 'z') up[j] = (char)(up[j] - 32);
+      json_esc(g_msg, sizeof(g_msg), up[0] ? up : "AIR"); }
+    if (rssi[0] && !str_eq(rssi, "0")) { str_cat(g_msg, "  \\u00b7  ", sizeof(g_msg)); json_esc(g_msg, sizeof(g_msg), rssi); str_cat(g_msg, " dBm", sizeof(g_msg)); }
+    str_cat(g_msg, "\",\"subtitle\":\"The bearer that carried it. Never the internet.\"},", sizeof(g_msg));
+    str_cat(g_msg, "{\"id\":\"raw\",\"title\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), wire);
+    str_cat(g_msg, "\",\"subtitle\":\"The packet exactly as it was on the air\"},", sizeof(g_msg));
+    str_cat(g_msg, "{\"id\":\"ident\",\"title\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), id);
+    str_cat(g_msg, "\",\"subtitle\":\"Its identifier - derived from the packet, never transmitted\"}", sizeof(g_msg));
+    section_close();
+
+    str_cat(g_msg, "]}", sizeof(g_msg));
+    send_msg(g_msg);
+
+    /* Open the panel, titled with what this actually is. */
+    char m[200];
+    str_copy(m, "{\"type\":\"ui.screen.open\",\"name\":\"Packet\",\"title\":\"", sizeof(m));
+    json_esc(m, sizeof(m), type[0] ? type : "packet");
+    str_cat(m, "\"}", sizeof(m));
+    send_msg(m);
 }
 
 /* ── Module entry points ─────────────────────────────────────────────── */
 int32_t module_init(void) {
     hal_log(6, "[xprs] listening to the air", 27);
+    favs_load();
     push_stations();
-    push_traffic(1);
+    push_packets();
+    push_carry_switch();
+    push_held();
     return 0;
 }
 
 int32_t module_tick(void) {
     push_stations();
-    push_traffic(0);
+    push_packets();
     return 0;
 }
 
@@ -228,12 +584,64 @@ int32_t module_handle_event(void) {
     if (!json_raw(buf, "command", cmd, sizeof(cmd))) return 0;
 
     if (str_eq(cmd, "ready") || str_eq(cmd, "refresh")) {
+        favs_load();
         push_stations();
-        push_traffic(1);
-    } else if (str_eq(cmd, "traffic_clear")) {
-        log_clear();
-        g_have_last = 0;
-        g_last_id[0] = '\0';
+        push_packets();
+        push_carry_switch();
+        push_held();
+        return 0;
+    }
+
+    /* Star / unstar, from the row itself. */
+    if (str_eq(cmd, "packets_fav") || str_eq(cmd, "packets_unfav")) {
+        char id[16] = "";
+        json_raw(buf, "packets_id", id, sizeof(id));
+        if (!id[0]) return 0;
+        if (str_eq(cmd, "packets_unfav")) fav_remove(id);
+        else if (find_packet(id, g_obj, sizeof(g_obj))) fav_add(g_obj);
+        push_packets();
+        return 0;
+    }
+
+    /* A row tapped: the whole packet, field by field. */
+    if (str_eq(cmd, "packets_tap")) {
+        char id[16] = "";
+        json_raw(buf, "packets_id", id, sizeof(id));
+        if (id[0] && find_packet(id, g_open, sizeof(g_open))) push_detail(g_open);
+        return 0;
+    }
+
+    /* The star on the detail panel acts on whatever it is showing. */
+    if (str_eq(cmd, "detail_fav")) {
+        if (!g_open[0]) return 0;
+        char id[16] = "";
+        json_raw(g_open, "id", id, sizeof(id));
+        if (!id[0]) return 0;
+        if (fav_has(id)) fav_remove(id); else fav_add(g_open);
+        push_packets();
+        return 0;
+    }
+
+    if (str_eq(cmd, "detail_back")) {
+        send_msg("{\"type\":\"ui.screen.close\"}");
+        return 0;
+    }
+
+    /* The owner's answer on carrying other people's mail. */
+    if (str_eq(cmd, "carry_apply")) {
+        char on[8] = "";
+        json_raw(buf, "carry_on", on, sizeof(on));
+        const char *kv = str_eq(on, "true") ? "scfEnabled=1" : "scfEnabled=0";
+        hal_mesh_set_pref(kv, str_len(kv));
+        push_carry_switch();
+        push_held();
+        return 0;
+    }
+
+    if (str_eq(cmd, "held_refresh")) {
+        push_carry_switch();
+        push_held();
+        return 0;
     }
     return 0;
 }

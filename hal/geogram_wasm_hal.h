@@ -1393,7 +1393,15 @@ int32_t hal_mesh_scf_status(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("mesh_transfers")))
 int32_t hal_mesh_transfers(char *out, uint32_t out_cap);
 
-/* Set a mesh tunable "key=value" (msgQuotaMb, bulkQuotaMb). 0 ok. */
+/* Messages this device is holding for OTHER people, newest first:
+ * [{am,target,sender,ts,size,urg,state,wire}]. state 0 = still to hand on,
+ * 1 = delivered and kept for the archive window. `wire` is the frame as text
+ * when it is text (XPRS is), else empty. */
+__attribute__((import_module("hal"), import_name("mesh_held")))
+int32_t hal_mesh_held(char *out, uint32_t out_cap);
+
+/* Set a mesh tunable "key=value" (msgQuotaMb, bulkQuotaMb, scfEnabled). 0 ok.
+ * scfEnabled=0 stops carrying other people's mail; 1 (the default) carries. */
 __attribute__((import_module("hal"), import_name("mesh_set_pref")))
 int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
 
