@@ -103,40 +103,11 @@
     "$": "screen",
     "name": "Nearby devices",
     "icon": "radar",
-    "tip": "Everyone within local reach, most recently heard first. Greyed rows were reachable earlier this week.",
-    "children": [
-      {
-        "$": "field",
-        "name": "nearby_stats",
-        "$type": "stats",
-        "label": "Local reach"
-      },
-      {
-        "$": "field",
-        "name": "nearby",
-        "$type": "people",
-        "label": "Nearby",
-        "empty": "Nobody within local reach yet — leave Bluetooth on and stay on the same network as another device."
-      },
-      {
-        "$": "action",
-        "name": "nearby_refresh",
-        "label": "Refresh",
-        "icon": "refresh"
-      },
-      {
-        "$": "action",
-        "name": "nearby_clear",
-        "label": "Clear earlier",
-        "icon": "delete",
-        "tip": "Forget everyone not reachable right now. Sightings older than a week are dropped automatically."
-      }
-    ],
-    "toolbar": true,
+    "tip": "Open the Mesh wapp — the live map of every node and station within reach.",
+    "open_wapp": "mesh",
+    "children": [],
     "menu": true,
-    "appbar": true,
-    "badge": "nearby_count",
-    "search": true
+    "appbar": true
   },
   {
     "$": "screen",
