@@ -699,8 +699,14 @@ int32_t module_handle_event(void) {
         subscribe_all(); push_relays(); push_follows();
     } else if (str_eq(cmd, "activity_send")) {
         char text[6000] = "";
-        if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0])
+        if (json_raw(buf, "activity_input", text, sizeof(text)) && text[0]) {
             hal_nostr_post(1, text, str_len(text), "[]", 2);
+            /* The same words also go on the AIR as an XPRS t:status: the
+             * core picks the bearers (BLE now, LoRa when it exists,
+             * Reticulum), splits and signs. This wapp only supplies the
+             * content — it neither knows nor chooses how the bytes travel. */
+            hal_xprs_status(text, str_len(text), 0, 0);
+        }
     } else if (str_eq(cmd, "activity_refresh")) {
         /* Pull-to-refresh. The host hands over the best of what the curator is
          * holding (100 notes) — we do NOT tear the firehose/discovery subs down

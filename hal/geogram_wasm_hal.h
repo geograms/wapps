@@ -1405,6 +1405,16 @@ int32_t hal_mesh_held(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("mesh_set_pref")))
 int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
 
+/* Publish a short status (XPRS section 27) on every bearer this device has
+ * active — BLE5 now, a Reticulum broadcast, LoRa the day a radio exists. The
+ * wapp supplies the WORDS ONLY: the core builds the packet, splits long text
+ * into section 6.6 parts, signs with the profile key, and chooses transports
+ * (scope rules applied core-side). [mood] is an optional section 27.1 word;
+ * pass NULL/0 for none. Fire-and-forget; returns 0 queued, -1 empty text. */
+__attribute__((import_module("hal"), import_name("xprs_status")))
+int32_t hal_xprs_status(const char *text, uint32_t text_len,
+                        const char *mood, uint32_t mood_len);
+
 /* Browse a nearby station's custody store and take chosen messages with you.
  * Kick-off-and-poll (a dial takes seconds; a HAL call may not stall the
  * engine): cmd is JSON —
