@@ -57,6 +57,32 @@
   },
   {
     "$": "screen",
+    "name": "Carry",
+    "icon": "luggage",
+    "tip": "Mail the stations around you are carrying. Open a station's bag and choose what to take with you - what you take, you deliver when its recipient is next in your range.",
+    "children": [
+      {
+        "$": "field",
+        "name": "remote",
+        "$type": "people",
+        "empty": "No station in range says it is carrying mail.\n\nA station announces its load in its beacon; when one appears on the Stations screen with a mail count, its bag opens here."
+      },
+      {
+        "$": "action",
+        "name": "remote_carry",
+        "label": "Carry selected",
+        "icon": "luggage"
+      },
+      {
+        "$": "action",
+        "name": "remote_back",
+        "label": "All stations",
+        "icon": "radar"
+      }
+    ]
+  },
+  {
+    "$": "screen",
     "name": "Carried",
     "icon": "archive",
     "menu": true,

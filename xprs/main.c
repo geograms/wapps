@@ -463,6 +463,229 @@ static void push_held(void) {
     send_msg(g_msg);
 }
 
+/* ── Carry: browse a nearby station's bag (hal_mesh_carry) ───────────── *
+ *
+ * Two modes on one people-widget. With no station chosen it lists the
+ * stations whose beacon says they hold mail; tapping one starts the browse
+ * (a real dial — seconds), and the tick polls until the listing arrives.
+ * Rows then toggle a pick mark exactly like the traffic star, and the
+ * "Carry selected" action pulls custody of the picks over the session. */
+static char g_carry_station[12] = "";   /* "" = showing the station list */
+static char g_carry[8192];              /* last hal_mesh_carry reply */
+static char g_picked[26][8];
+static int  g_picked_n;
+static int  g_carry_pulled;             /* >0: show the "took N" note once */
+
+static void carry_cmd(const char *cmd) {
+    int n = hal_mesh_carry(cmd, str_len(cmd), g_carry, sizeof(g_carry) - 1);
+    g_carry[n > 0 ? n : 0] = '\0';
+}
+
+static int pick_has(const char *id) {
+    for (int i = 0; i < g_picked_n; i++) if (str_eq(g_picked[i], id)) return 1;
+    return 0;
+}
+static void pick_toggle(const char *id) {
+    for (int i = 0; i < g_picked_n; i++) {
+        if (str_eq(g_picked[i], id)) {
+            g_picked[i][0] = '\0';
+            str_copy(g_picked[i], g_picked[g_picked_n - 1], sizeof(g_picked[i]));
+            g_picked_n--;
+            return;
+        }
+    }
+    if (g_picked_n < (int)(sizeof(g_picked) / sizeof(g_picked[0])))
+        str_copy(g_picked[g_picked_n++], id, sizeof(g_picked[0]));
+}
+
+static void fmt_age(char *d, unsigned m, const char *secs) {
+    unsigned s = 0;
+    for (unsigned i = 0; secs[i] >= '0' && secs[i] <= '9'; i++) s = s * 10 + (unsigned)(secs[i] - '0');
+    char b[24];
+    if (s < 60)          { str_copy(b, "just now", sizeof(b)); }
+    else if (s < 3600)   { unsigned v = s / 60;    b[0] = 0; if (v >= 10) { b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0; } else { b[0] = (char)('0' + v); b[1] = 0; } str_cat(b, "m ago", sizeof(b)); }
+    else if (s < 86400)  { unsigned v = s / 3600;  b[0] = (char)('0' + v / 10); b[1] = (char)('0' + v % 10); b[2] = 0; if (b[0] == '0') { b[0] = b[1]; b[1] = 0; } str_cat(b, "h ago", sizeof(b)); }
+    else                 { unsigned v = s / 86400; b[0] = (char)('0' + v % 10); b[1] = 0; str_cat(b, "d ago", sizeof(b)); }
+    str_copy(d, b, m);
+}
+
+/* One row of the station's listing. */
+static void carry_item(const char *obj, int first) {
+    char id[12] = "", target[24] = "", len[12] = "", age[16] = "", urg[8] = "";
+    json_raw(obj, "id", id, sizeof(id));
+    json_raw(obj, "target", target, sizeof(target));
+    json_raw(obj, "len", len, sizeof(len));
+    json_raw(obj, "age", age, sizeof(age));
+    json_raw(obj, "urg", urg, sizeof(urg));
+    static const char *urgn[4] = {"low", "normal", "high", "urgent"};
+    int u = (urg[0] >= '0' && urg[0] <= '3') ? urg[0] - '0' : 1;
+
+    if (!first) str_cat(g_msg, ",", sizeof(g_msg));
+    str_cat(g_msg, "{\"id\":\"", sizeof(g_msg)); json_esc(g_msg, sizeof(g_msg), id);
+    str_cat(g_msg, "\",\"title\":\"For ", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), target[0] ? target : "(anyone)");
+    str_cat(g_msg, "\",\"subtitle\":\"", sizeof(g_msg));
+    json_esc(g_msg, sizeof(g_msg), len);
+    str_cat(g_msg, " bytes  \\u00b7  parked ", sizeof(g_msg));
+    { char a[16]; fmt_age(a, sizeof(a), age); json_esc(g_msg, sizeof(g_msg), a); }
+    str_cat(g_msg, "\",\"tags\":[\"", sizeof(g_msg));
+    str_cat(g_msg, urgn[u], sizeof(g_msg));
+    str_cat(g_msg, "\"],\"action\":\"", sizeof(g_msg));
+    str_cat(g_msg, pick_has(id) ? "unpick" : "pick", sizeof(g_msg));
+    str_cat(g_msg, "\",\"actionLabel\":\"", sizeof(g_msg));
+    str_cat(g_msg, pick_has(id) ? "\\u2611" : "\\u2610", sizeof(g_msg));
+    str_cat(g_msg, "\"}", sizeof(g_msg));
+}
+
+static void push_remote(void) {
+    str_copy(g_msg, "{\"type\":\"ui.people.set\",\"field\":\"remote\",\"sections\":[",
+             sizeof(g_msg));
+
+    if (!g_carry_station[0]) {
+        /* The stations whose beacon carries a mail count. */
+        int n = hal_xprs_stations(g_stations, sizeof(g_stations) - 1);
+        if (n > 0) g_stations[n] = '\0';
+        section_open_icon("Stations carrying mail", "luggage");
+        int emitted = 0;
+        for (const char *p = g_stations; *p; p++) {
+            if (*p != '{') continue;
+            if (!obj_copy(p, g_obj, sizeof(g_obj))) continue;
+            char id[16] = "";
+            if (!json_raw(g_obj, "id", id, sizeof(id))) continue;
+            /* The mail count rides the tags as "mail N" (section 10.6.5). */
+            const char *mail = 0;
+            for (const char *q = g_obj; *q; q++) {
+                if (q[0] == 'm' && q[1] == 'a' && q[2] == 'i' && q[3] == 'l' &&
+                    q[4] == ' ' && q[5] >= '0' && q[5] <= '9') { mail = q + 5; break; }
+            }
+            if (!mail) { while (*p && *p != '}') p++; if (!*p) break; continue; }
+            char cnt[8]; unsigned ci = 0;
+            while (mail[ci] >= '0' && mail[ci] <= '9' && ci < sizeof(cnt) - 1) { cnt[ci] = mail[ci]; ci++; }
+            cnt[ci] = '\0';
+            if (emitted) str_cat(g_msg, ",", sizeof(g_msg));
+            str_cat(g_msg, "{\"id\":\"", sizeof(g_msg)); json_esc(g_msg, sizeof(g_msg), id);
+            str_cat(g_msg, "\",\"title\":\"", sizeof(g_msg)); json_esc(g_msg, sizeof(g_msg), id);
+            str_cat(g_msg, "\",\"subtitle\":\"carrying ", sizeof(g_msg));
+            str_cat(g_msg, cnt, sizeof(g_msg));
+            str_cat(g_msg, " \\u00b7 tap to open its bag\",\"tags\":[\"", sizeof(g_msg));
+            str_cat(g_msg, cnt, sizeof(g_msg));
+            str_cat(g_msg, " held\"]}", sizeof(g_msg));
+            emitted++;
+            while (*p && *p != '}') p++;
+            if (!*p) break;
+        }
+        section_close();
+        str_cat(g_msg, "]}", sizeof(g_msg));
+        send_msg(g_msg);
+        return;
+    }
+
+    /* A station is open: poll the broker and draw what it has. */
+    carry_cmd("{\"op\":\"status\"}");
+    char state[12] = "";
+    json_raw(g_carry, "state", state, sizeof(state));
+
+    {
+        char title[64];
+        str_copy(title, "Mail carried by ", sizeof(title));
+        str_cat(title, g_carry_station, sizeof(title));
+        section_open_icon(title, "luggage");
+    }
+
+    if (str_eq(state, "busy")) {
+        str_cat(g_msg, "{\"id\":\"-\",\"title\":\"Asking ", sizeof(g_msg));
+        json_esc(g_msg, sizeof(g_msg), g_carry_station);
+        str_cat(g_msg, "\\u2026\",\"subtitle\":\"dialling the station - a few seconds\"}",
+                sizeof(g_msg));
+    } else if (str_eq(state, "fail")) {
+        str_cat(g_msg,
+                "{\"id\":\"-\",\"title\":\"Could not reach it\","
+                "\"subtitle\":\"radio busy or out of range - "
+                "tap a station to try again\"}", sizeof(g_msg));
+    } else if (str_eq(state, "pulling")) {
+        str_cat(g_msg, "{\"id\":\"-\",\"title\":\"Taking custody\\u2026\","
+                       "\"subtitle\":\"the messages transfer over this session\"}",
+                sizeof(g_msg));
+    } else {
+        int first = 1;
+        if (str_eq(state, "pulled") && g_carry_pulled > 0) {
+            char note[8];
+            unsigned ni = 0, v = (unsigned)g_carry_pulled;
+            if (v >= 10) note[ni++] = (char)('0' + v / 10);
+            note[ni++] = (char)('0' + v % 10);
+            note[ni] = '\0';
+            str_cat(g_msg, "{\"id\":\"-\",\"title\":\"Took ", sizeof(g_msg));
+            str_cat(g_msg, note, sizeof(g_msg));
+            str_cat(g_msg, " with you\",\"subtitle\":\"now on the Carried screen - "
+                           "yours to deliver\"}", sizeof(g_msg));
+            first = 0;
+        }
+        int emitted = 0;
+        for (const char *p = g_carry; *p; p++) {
+            if (*p != '{') continue;
+            /* Skip the reply envelope itself (it carries "state"). */
+            if (p == g_carry) continue;
+            if (!obj_copy(p, g_obj, sizeof(g_obj))) continue;
+            char t[24] = "";
+            if (!json_raw(g_obj, "target", t, sizeof(t))) { while (*p && *p != '}') p++; if (!*p) break; continue; }
+            carry_item(g_obj, first && !emitted);
+            emitted++; first = 0;
+            while (*p && *p != '}') p++;
+            if (!*p) break;
+        }
+        if (!emitted && !str_eq(state, "pulled")) {
+            if (!first) str_cat(g_msg, ",", sizeof(g_msg));
+            str_cat(g_msg,
+                    "{\"id\":\"-\",\"title\":\"Its bag is empty\","
+                    "\"subtitle\":\"nothing pickable right now - mail parked "
+                    "before the XPRS update delivers on its own\"}",
+                    sizeof(g_msg));
+        }
+    }
+    section_close();
+    str_cat(g_msg, "]}", sizeof(g_msg));
+    send_msg(g_msg);
+}
+
+static void carry_open(const char *station) {
+    str_copy(g_carry_station, station, sizeof(g_carry_station));
+    g_picked_n = 0;
+    g_carry_pulled = 0;
+    char cmd[64];
+    str_copy(cmd, "{\"op\":\"browse\",\"station\":\"", sizeof(cmd));
+    str_cat(cmd, station, sizeof(cmd));
+    str_cat(cmd, "\"}", sizeof(cmd));
+    carry_cmd(cmd);
+    push_remote();
+}
+
+static void carry_pull(void) {
+    if (!g_picked_n || !g_carry_station[0]) return;
+    static char cmd[512];
+    str_copy(cmd, "{\"op\":\"pull\",\"station\":\"", sizeof(cmd));
+    str_cat(cmd, g_carry_station, sizeof(cmd));
+    str_cat(cmd, "\",\"ids\":[", sizeof(cmd));
+    for (int i = 0; i < g_picked_n; i++) {
+        if (i) str_cat(cmd, ",", sizeof(cmd));
+        str_cat(cmd, "\"", sizeof(cmd));
+        str_cat(cmd, g_picked[i], sizeof(cmd));
+        str_cat(cmd, "\"", sizeof(cmd));
+    }
+    str_cat(cmd, "]}", sizeof(cmd));
+    g_carry_pulled = g_picked_n;
+    g_picked_n = 0;
+    carry_cmd(cmd);
+    push_remote();
+}
+
+static void carry_close(void) {
+    g_carry_station[0] = '\0';
+    g_picked_n = 0;
+    g_carry_pulled = 0;
+    carry_cmd("{\"op\":\"reset\"}");
+    push_remote();
+}
+
 /* ── The packet, in full ─────────────────────────────────────────────── */
 
 /* Find a packet by id, in the ring first and then the favourites. */
@@ -613,6 +836,7 @@ int32_t module_init(void) {
 int32_t module_tick(void) {
     push_stations();
     push_packets();
+    push_remote();          /* cheap: a status poll, or the station list */
     return 0;
 }
 
@@ -630,8 +854,27 @@ int32_t module_handle_event(void) {
         push_packets();
         push_carry_switch();
         push_held();
+        push_remote();
         return 0;
     }
+
+    /* Carry screen: open a station's bag / pick / take / back. */
+    if (str_eq(cmd, "remote_tap")) {
+        char id[16] = "";
+        json_raw(buf, "remote_id", id, sizeof(id));
+        if (!id[0] || str_eq(id, "-")) return 0;
+        if (!g_carry_station[0]) carry_open(id);
+        else { pick_toggle(id); push_remote(); }
+        return 0;
+    }
+    if (str_eq(cmd, "remote_pick") || str_eq(cmd, "remote_unpick")) {
+        char id[16] = "";
+        json_raw(buf, "remote_id", id, sizeof(id));
+        if (id[0] && !str_eq(id, "-")) { pick_toggle(id); push_remote(); }
+        return 0;
+    }
+    if (str_eq(cmd, "remote_carry")) { carry_pull(); return 0; }
+    if (str_eq(cmd, "remote_back"))  { carry_close(); return 0; }
 
     /* Star / unstar, from the row itself. */
     if (str_eq(cmd, "packets_fav") || str_eq(cmd, "packets_unfav")) {

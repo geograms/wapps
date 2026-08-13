@@ -1405,6 +1405,21 @@ int32_t hal_mesh_held(char *out, uint32_t out_cap);
 __attribute__((import_module("hal"), import_name("mesh_set_pref")))
 int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
 
+/* Browse a nearby station's custody store and take chosen messages with you.
+ * Kick-off-and-poll (a dial takes seconds; a HAL call may not stall the
+ * engine): cmd is JSON —
+ *   {"op":"browse","station":"X3JS7Y"}            start the dial
+ *   {"op":"status"}                               poll (cheap, idempotent)
+ *   {"op":"pull","station":"X3JS7Y","ids":[...]}  take custody of these
+ *   {"op":"reset"}                                leave the listing
+ * Reply: {"state":"idle|busy|done|fail|pulling|pulled","station","pulled",
+ * "entries":[{"id","target","len","age","urg"}]} — envelopes only, never
+ * content. Pulled messages land in THIS device's store (hal_mesh_held).
+ * Returns bytes written, negated required size when out_cap is too small. */
+__attribute__((import_module("hal"), import_name("mesh_carry")))
+int32_t hal_mesh_carry(const char *cmd, uint32_t cmd_len,
+                       char *out, uint32_t out_cap);
+
 /* ── Contacts (people this device already knows) ─────────────────────── *
  *
  * A reusable picker source: the people the user can address — those seen on
