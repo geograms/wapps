@@ -529,7 +529,9 @@ int room_ingest(const char *ev) {
     /* Proposal-dependent steps: mark it approved, and if I am the proposer,
      * publish the sub-room now (self=admin, approver=mod). Guard on the pending
      * status so a re-delivered approval doesn't publish the room twice. */
+    int changed = 0;
     if (s_eq(pstat, "pending")) {
+      changed = 1;
       { char up[128]; params_of(up, sizeof(up), proposalId, 0, 0, 0);
         db_exec("UPDATE proposals SET status='approved' WHERE id=?", up); }
       if (proposer[0] && pname[0] && room_is_self(proposer)) {
@@ -538,7 +540,14 @@ int room_ingest(const char *ev) {
         db_exec("UPDATE proposals SET status='published' WHERE id=?", up);
       }
     }
-    return 2; /* a room may have become visible — refresh the rail */
+    /* 2 means SOMETHING CHANGED, and the caller answers it by re-subscribing.
+     * Returning it for a re-delivered approval — one already applied — closed a
+     * loop that cost a phone its whole CPU: the room filter carries limit:500
+     * and no `since`, so each new subscription replays hundreds of stored
+     * events, one of which is this approval, which asked for another
+     * subscription, ~20 times a minute forever. An event that taught us nothing
+     * is consumed quietly. */
+    return changed ? 2 : 1;
   }
   return 0;
 }
