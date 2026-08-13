@@ -1,8 +1,8 @@
 [
   {
     "$": "screen",
-    "name": "Reticulum",
-    "tip": "The Reticulum network as this node has observed it",
+    "name": "Mesh",
+    "tip": "The mesh — Reticulum and XPRS — as this node has observed it",
     "children": [
       {
         "$": "group",

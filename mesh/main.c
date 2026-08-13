@@ -1,5 +1,10 @@
 /*
- * reticulum — visualize, manage & configure the Reticulum network.
+ * mesh — visualize and manage the mesh: Reticulum and XPRS.
+ *
+ * Formerly the "reticulum" wapp. The graph the host renders now carries both
+ * halves of the street: Reticulum nodes/hubs (from the observed announce
+ * registry) and XPRS stations heard over the air (kind "xprs", merged
+ * host-side into the same {nodes,edges} snapshot).
  *
  * A thin driver around three read-only host HAL calls:
  *   hal_rns_status  → node status JSON
@@ -14,7 +19,7 @@
  * emitted as host-action messages (rns.hub.* / rns.passive.set) from the
  * Hubs/Settings screens.
  *
- * Build: cd wapps/reticulum && make
+ * Build: cd wapps/mesh && make
  */
 
 #include "../hal/geogram_wasm_hal.h"
@@ -93,7 +98,7 @@ static void push_graph(void) {
     build_filter(filter, sizeof(filter));
     int n = hal_rns_nodes(filter, str_len(filter), g_data, sizeof(g_data));
     if (n < 0) {
-        hal_log(3, "[reticulum] graph too big for buffer — narrow the filter", 56);
+        hal_log(3, "[mesh] graph too big for buffer — narrow the filter", 53);
         return;
     }
     if (n == 0) return;
@@ -257,7 +262,7 @@ static void handle_command(const char *cmd, const char *full) {
 
 /* ── Module entry points ─────────────────────────────────────────────── */
 void module_init(void) {
-    hal_log(1, "[reticulum] init", 16);
+    hal_log(1, "[mesh] init", 11);
     load_state();
 }
 
@@ -285,7 +290,7 @@ void module_handle_event(void) {
 
 void module_destroy(void) {
     save_state();
-    hal_log(1, "[reticulum] destroy", 19);
+    hal_log(1, "[mesh] destroy", 14);
 }
 
 uint32_t module_tick_interval_ms(void) { return 2000; }

@@ -1,5 +1,5 @@
 /*
- * Native mock HAL for the reticulum wapp test. Provides just the HAL the wapp
+ * Native mock HAL for the mesh wapp test. Provides just the HAL the wapp
  * uses: log, kv, msg (with an injectable inbox + an outbox capture), and the
  * three read-only Reticulum calls returning canned JSON. Compiled together with
  * main.c by run.sh — no wasm, no host.
@@ -70,7 +70,7 @@ void hal_kv_set(const char *k, uint32_t kl, const char *v, uint32_t vl) {
     g_kvn++;
 }
 
-/* ── canned Reticulum data ─────────────────────────────────────────────── */
+/* ── canned Reticulum data (the mesh wapp reads it verbatim) ─────────────────────────────────────────────── */
 static char g_last_filter[256] = "";
 const char *last_filter(void) { return g_last_filter; }
 

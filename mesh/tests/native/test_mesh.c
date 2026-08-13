@@ -1,5 +1,5 @@
 /*
- * Native integration test for the reticulum wapp. Drives module_init/tick/
+ * Native integration test for the mesh wapp. Drives module_init/tick/
  * handle_event against the canned mock HAL and asserts the messages the wapp
  * emits (graph/status pushes, hub list, host-action forwarding).
  *
@@ -30,7 +30,7 @@ static void check(int cond, const char *name) {
 }
 
 int main(void) {
-    printf("reticulum native test\n");
+    printf("mesh native test\n");
 
     module_init();
 
