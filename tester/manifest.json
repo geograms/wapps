@@ -4,7 +4,7 @@
   "kind":            "system",
   "title":           "Tester",
   "description":     "Notification test harness for the host services.",
-  "summary":         "End-user test harness for geogram host services. Fire notifications of every flavour to verify stacking, levels, bodies, and system-tray routing.",
+  "summary":         "End-user test harness for XPRS host services. Fire notifications of every flavour to verify stacking, levels, bodies, and system-tray routing.",
   "icon":            "media/icons/tester.svg",
   "tags":            ["system", "tools", "debug", "tester"],
   "entry_ui":        "screens/home.ui.json",

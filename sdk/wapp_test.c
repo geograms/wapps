@@ -1,5 +1,5 @@
 /*
- * Geogram wapp unit-test framework — runner
+ * XPRS wapp unit-test framework — runner
  *
  * Linked into tests.wasm alongside the production sources. Exports
  * module_run_tests, which the engine calls after instantiating the

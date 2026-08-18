@@ -1,4 +1,4 @@
-# Geogram Wapp Specification
+# XPRS Wapp Specification
 ## Package Format, HAL, and UI Language Reference
 **Version 0.8**
 
@@ -64,7 +64,7 @@ media/                ← optional, all assets live here
 
 ```json
 {
-  "id":              "chat.geogram.messenger",
+  "id":              "chat.XPRS.messenger",
   "version":         "1.0.0",
   "kind":            "app",
   "title":           "Messenger",
@@ -901,12 +901,12 @@ This means `watch` polling is the renderer-initiated path (renderer asks the mod
 
 ---
 
-## 7. Full Example — geogram-chat.wapp
+## 7. Full Example — XPRS-chat.wapp
 
 ### Archive layout
 
 ```
-geogram-chat.wapp
+XPRS-chat.wapp
 ├── app.wasm
 ├── manifest.json
 ├── screens/
@@ -937,7 +937,7 @@ geogram-chat.wapp
 
 ```json
 [{
-  "$": "app", "name": "Geogram Chat",
+  "$": "app", "name": "XPRS Chat",
   "version": 0.8, "base-url": "/api",
   "tip": "Offline-first mesh communication. Works without internet.",
   "children": [
@@ -1232,13 +1232,13 @@ The WASM module is responsible for returning appropriate HTTP status codes from 
 
 ## 9. Mesh Distribution
 
-`.wapp` files propagate over the Geogram mesh as NOSTR events:
+`.wapp` files propagate over the XPRS mesh as NOSTR events:
 
 ```json
 {
   "kind": 32200,
   "tags": [
-    ["d",       "chat.geogram.messenger"],
+    ["d",       "chat.XPRS.messenger"],
     ["version", "1.0.0"],
     ["size",    "48320"],
     ["hash",    "sha256:abcdef..."],

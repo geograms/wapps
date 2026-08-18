@@ -1,4 +1,4 @@
-# Geogram WASM SDK — library module build rules
+# XPRS WASM SDK — library module build rules
 #
 # Usage from a top-level wapp folder (one deep):
 #   include ../sdk/Makefile.library

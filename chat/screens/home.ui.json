@@ -94,8 +94,8 @@
         "$": "field",
         "name": "finduser",
         "$type": "people",
-        "empty": "Nobody heard yet.\nNomadNet and Geogram people appear here as their announces arrive — or paste an LXMF address to message someone straight away.",
-        "tip": "Everyone you can message, in one list. Each row says where they are from. NomadNet peers chat here over LXMF; Geogram people open in Messages."
+        "empty": "Nobody heard yet.\nNomadNet and XPRS people appear here as their announces arrive — or paste an LXMF address to message someone straight away.",
+        "tip": "Everyone you can message, in one list. Each row says where they are from. NomadNet peers chat here over LXMF; XPRS people open in Messages."
       }
     ]
   },
@@ -189,7 +189,7 @@
             "label": "NomadNet bridge (#NOMADNET)",
             "default": true,
             "apply": "chan_apply",
-            "tip": "Messages from non-geogram NomadNet/LXMF nodes. Off = they are dropped on arrival."
+            "tip": "Messages from non-XPRS NomadNet/LXMF nodes. Off = they are dropped on arrival."
           }
         ]
       },

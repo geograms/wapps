@@ -510,7 +510,7 @@ static void dispatch(const char *input) {
 void module_init(void) {
     log_info("[terminal] init");
     load_cwd();
-    send_output("Geogram Terminal v1.0", "info");
+    send_output("XPRS Terminal v1.0", "info");
     send_output("Type 'help' for available commands.", "info");
 }
 

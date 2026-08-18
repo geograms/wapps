@@ -1,14 +1,14 @@
-# Geogram Wapps — default / recommended catalog
+# XPRS Wapps — default / recommended catalog
 
-This repository is the source of truth for **built-in geogram
+This repository is the source of truth for **built-in XPRS
 wapps** and a curated catalog of recommended ones. Each top-level
 directory is one wapp; building the repo produces a set of
 `.wapp` ZIPs under `binaries/` together with an `index.json` the
-geogram launcher knows how to consume.
+XPRS launcher knows how to consume.
 
 The repo is designed to be hostable as-is (e.g. on GitHub,
 GitHub Pages, an S3 bucket, or any plain HTTP server): point a
-geogram **wapp store** at the URL of `binaries/index.json` (or
+XPRS **wapp store** at the URL of `binaries/index.json` (or
 the directory containing it) and the launcher will list every
 shipped wapp for installation.
 
@@ -83,7 +83,7 @@ from what's been built.
 
 ## Hosting as a wapp store
 
-After `make`, the layout below is everything a geogram client
+After `make`, the layout below is everything an XPRS client
 needs to install wapps from this repo:
 
 ```
@@ -104,7 +104,7 @@ Two convenient ways to expose it:
 - **GitHub Releases**: bundle `binaries/` as a release asset and
   publish the asset URL.
 
-In the geogram launcher, open the **Wapp Store** wapp's
+In the XPRS launcher, open the **Wapp Store** wapp's
 **Settings** tab and add the `index.json` URL (or the directory
 containing it) as a source. The store then lists every entry
 from the index.
@@ -128,7 +128,7 @@ from the index.
 - **install** — the on-device wapp store (lists, installs, updates).
 - **maps** — satellite tiles with offline cache.
 - **terminal** — built-in command terminal.
-- **app-creator** — author/edit a wapp from inside geogram (Stage 3).
+- **app-creator** — author/edit a wapp from inside XPRS (Stage 3).
 - **functionalities** — registry inspector for inter-wapp APIs.
 - **tasks** — task monitor / scheduler reference UI.
 - **tester** — HAL smoke tests.
@@ -140,4 +140,4 @@ from the index.
 a wapp talks to (storage, messaging, location, file
 associations, notifications…) is specified there. Read it when
 porting a wapp from another runtime, or when implementing a new
-geogram engine for a new platform.
+XPRS engine for a new platform.

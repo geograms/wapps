@@ -8,7 +8,7 @@
  * Everything about rooms, roles, moderation and reputation lives in the wapp
  * (the host stays generic). Rooms federate to ANY standard NOSTR relay: a room
  * is a NIP-72 community, room messages are ordinary kind-1 notes tagged to it,
- * and non-geogram clients simply ignore our custom op kind.
+ * and non-XPRS clients simply ignore our custom op kind.
  *
  * Authority is subtree-scoped. The room tree has one root, the main room, whose
  * admin is the GLOBAL admin and whose moderators are GLOBAL mods (authority over

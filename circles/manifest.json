@@ -34,6 +34,7 @@
     "functionalities": [],
     "links": [
       "/circle/",
+      "xprs://circle",
       "geogram://circle"
     ]
   },

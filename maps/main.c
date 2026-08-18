@@ -1,5 +1,5 @@
 /*
- * maps — Geogram WASM Satellite Maps Module
+ * maps — XPRS WASM Satellite Maps Module
  *
  * Manages map viewport state (center lat/lon, zoom) and pushes
  * viewport updates to the renderer via hal_msg_send().

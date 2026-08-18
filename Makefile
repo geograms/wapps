@@ -1,4 +1,4 @@
-# Geogram wapps — top-level Makefile
+# XPRS wapps — top-level Makefile
 #
 # Targets:
 #   make             — build and package every wapp into binaries/

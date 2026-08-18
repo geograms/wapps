@@ -16,7 +16,7 @@ There are two reference implementations of the engine in this
 repository:
 
 - `iwi/lib/wapp/wapp_engine.dart` — the prototype host
-- `lib/wapp/wapp_engine.dart` — the integrated geogram host
+- `lib/wapp/wapp_engine.dart` — the integrated XPRS host
 
 Both implement the same abstractions. The C-level ABI for the
 abstractions lives in `wapps/hal/geogram_wasm_hal.h`.
@@ -468,7 +468,7 @@ array of strings (e.g. `["/usr/bin/clang","-O2","-o","/tmp/a.wasm",
 "/tmp/main.c"]`). `cwd` is an absolute working directory or empty
 for the host's CWD. argv\[0\] must be an absolute path — the host's
 PATH is **not** searched. There is **no sandbox and no allow list**;
-wapps run with the same privileges as the geogram process.
+wapps run with the same privileges as the XPRS process.
 
 Lifecycle mirrors `hal.http`: `exec` returns a handle immediately
 while the process spins up in the background; the wapp polls each
@@ -1214,7 +1214,7 @@ For an open-folder install this gives the natural human dev loop:
 ```
 edit /path/to/wapps/<wappId>/<any file>
    ↓
-press Reload in Geogram
+press Reload in XPRS
    ↓
 see the change
 ```

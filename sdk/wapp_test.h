@@ -1,5 +1,5 @@
 /*
- * Geogram wapp unit-test framework — header
+ * XPRS wapp unit-test framework — header
  *
  * Each test_*.c file in a wapp's tests/ folder includes this header,
  * declares cases with WAPP_TEST(name) { ... }, and uses the

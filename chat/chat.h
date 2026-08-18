@@ -1,7 +1,7 @@
 /*
  * aprs.h — reusable APRS client library for Aurora wapps.
  *
- * A small, self-contained C port of the APRS-IS logic from the Geogram
+ * A small, self-contained C port of the APRS-IS logic from the XPRS
  * reference implementation, built entirely on the Aurora HAL socket
  * primitives (hal_socket_*). Any wapp can include this to talk to an
  * APRS-IS server: open a connection, log in (with a computed passcode),
