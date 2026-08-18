@@ -2,7 +2,7 @@
  * Files — decentralized media archive (DESIGN.md)
  *
  * The control surface over the host's content-addressed media archive
- * (APRX.md §16): browse/search the files behind `file:<sha256>.<ext>`
+ * (XPRS.md section 16): browse/search the files behind `file:<sha256>.<ext>`
  * tokens, add new files (picker → archive → shareable token), fetch hashes
  * announced by others, and switch on the two provider transports —
  * the Blossom-compatible HTTP endpoint and the BitTorrent seeder.

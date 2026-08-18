@@ -65,7 +65,7 @@ uint32_t hal_identity_pubkey(char *buf, uint32_t buf_len);
 
 /* Sign [msg_len] bytes with THIS device's private key and write the signature,
  * as a compact ASCII string, into out_buf. The private key never leaves the
- * host. Returns bytes written (0 if no key / no room). The scheme is APRX
+ * host. Returns bytes written (0 if no key / no room). The scheme is XPRS
  * short-Schnorr over secp256k1: a 48-byte signature, base85-encoded (60 chars).
  * Verify with hal_verify against the signer's hal_identity_pubkey. */
 __attribute__((import_module("hal"), import_name("identity_sign")))
@@ -105,7 +105,7 @@ uint32_t hal_decrypt(const char *pubkey, uint32_t pubkey_len,
                      const char *blob, uint32_t blob_len,
                      char *out_buf, uint32_t out_len);
 
-/* ── Media archive + decentralized sharing (APRX §16 / Files wapp) ─────
+/* ── Media archive + decentralized sharing (XPRS section 16 / Files wapp) ─────
  * The host keeps a device-wide content-addressed archive (sha256 → bytes,
  * media.sqlite3) plus a Blossom-compatible HTTP provider endpoint and a
  * BitTorrent seeder. Hashes are accepted as a full "file:<sha256>.<ext>"
@@ -1414,6 +1414,25 @@ int32_t hal_mesh_set_pref(const char *kv, uint32_t kv_len);
 __attribute__((import_module("hal"), import_name("xprs_status")))
 int32_t hal_xprs_status(const char *text, uint32_t text_len,
                         const char *mood, uint32_t mood_len);
+
+/* The persistent spool of heard XPRS packets (section 24 serve:history) —
+ * everything this station archived, past the traffic ring's 200 entries and
+ * across restarts. [query] is a JSON filter, "{}" for the latest:
+ *   {"since":"YYYY-MM-DD_hh:mm:ss","until":"...","only":"CALL","limit":n}
+ * since/until window on the packet's own ts:, only matches sender OR
+ * addressee. Reply, newest first:
+ *   [{ts,heardTs,bearer,rssi,from,to,type,id,mine,own,sig,heard,wire}]
+ * `sig` is verified|forged|unverified|unsigned; `heard` counts collapsed
+ * duplicate sightings. Returns bytes written, negated size if out is small. */
+__attribute__((import_module("hal"), import_name("xprs_history")))
+int32_t hal_xprs_history(const char *query, uint32_t query_len,
+                         char *out, uint32_t out_cap);
+
+/* Set a spool tunable "key=value": archive (0/1), archiveMaxMb,
+ * archiveMaxDays, serveHistory (0/1 — answer cmd:history and say
+ * serve:history in the beacon). 0 ok, -1 unknown key or bad value. */
+__attribute__((import_module("hal"), import_name("xprs_set_pref")))
+int32_t hal_xprs_set_pref(const char *kv, uint32_t kv_len);
 
 /* Browse a nearby station's custody store and take chosen messages with you.
  * Kick-off-and-poll (a dial takes seconds; a HAL call may not stall the

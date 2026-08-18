@@ -1,7 +1,7 @@
 # Files wapp — decentralized media storage (design)
 
 Status (2026-06-12): **Phases 1–3 implemented; 4 partial.** Builds on
-APRX.md §16 + the host `MediaArchive` (`aurora/lib/util/media_archive.dart`).
+XPRS.md section 16 + the host `MediaArchive` (`aurora/lib/util/media_archive.dart`).
 
 Working and verified on Linux desktop:
 - Files wapp 0.1.0 (`wapps/files`): Library browser (archive as a people-list
@@ -37,7 +37,7 @@ Remaining (Phase 5):
 
 ## 1. Goal
 
-APRX messages mix text with media references (`file:<sha256>.<ext>`). The
+XPRS messages mix text with media references (`file:<sha256>.<ext>`). The
 token names content; it does not move bytes. The **Files** wapp closes that
 gap with decentralized distribution:
 
@@ -88,7 +88,7 @@ The canonical identity of a file is its **SHA-256 digest** (32 bytes).
 
 | Context              | Encoding                  | Example length |
 |----------------------|---------------------------|----------------|
-| APRX token (§16)     | base64url, no padding     | 43 chars       |
+| XPRS token (section 16)     | base64url, no padding     | 43 chars       |
 | Blossom URL / NOSTR  | lowercase hex             | 64 chars       |
 | media.sqlite3 key    | base64url (as the token)  | 43 chars       |
 
@@ -147,7 +147,7 @@ Endpoints (Blossom BUDs, serving the shared `MediaArchive`):
 Auth: the Blossom `Authorization: Nostr <base64-event>` header — a **kind
 24242** NOSTR event signed with standard **BIP-340 Schnorr**. Aurora profiles
 already hold secp256k1 keys; verification needs a proper BIP-340 verify
-(pointycastle primitives; note: APRX §14 short-Schnorr is NOT BIP-340 — this
+(pointycastle primitives; note: XPRS section 14 short-Schnorr is NOT BIP-340 — this
 is a separate, standard implementation, also reusable later for NOSTR relay
 features). v1 may ship with `PUT /upload` disabled by default (toggle in the
 Files wapp) so the read path doesn't wait on auth.
@@ -198,7 +198,7 @@ sources(sha256 TEXT, kind TEXT, value TEXT, last_seen INTEGER,
 
 Populated from **announcements**:
 
-- **APRX (offline / radio)**: a bulletin to the reserved `FILES` group:
+- **XPRS (offline / radio)**: a bulletin to the reserved `FILES` group:
   `have file:<sha256-b64u>.<ext> ih:<infohash-hex> sz:<bytes>` and/or
   `srv <base-url>` — every word fits the 67-char line limit, multi-line
   word-split applies. Stations cache the mapping even for files they don't
@@ -213,7 +213,7 @@ chat "media not available" chip):
 1. local `MediaArchive` (instant),
 2. known Blossom servers from SourcesIndex (HTTP GET, cheap),
 3. BitTorrent via cached `infohash` mapping (swarm),
-4. else: optionally broadcast a `want file:<token>` APRX bulletin to the
+4. else: optionally broadcast a `want file:<token>` XPRS bulletin to the
    FILES group and wait for a `have` announce.
 
 Every successful fetch ends in `putBytes` → the station automatically becomes
@@ -239,7 +239,7 @@ archive.
 
 Suggested order: **Phase 1 → 2** first (immediately useful: add file → token
 → chat thumbnail on the other device fetched over Blossom HTTP), then
-**4 (SourcesIndex + APRX announces) → 3 (BitTorrent) → 5 polish**.
+**4 (SourcesIndex + XPRS announces) → 3 (BitTorrent) → 5 polish**.
 
 Open questions for Max:
 

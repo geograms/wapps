@@ -341,7 +341,7 @@ static int   g_pubkey_beacon = 1;         /* broadcast it? (default on) */
 static uint64_t g_last_pkbeacon = 0;
 static uint64_t g_last_rnspull = 0;
 
-/* ── Message signing (APRX verifiable authorship) ────────────────────────
+/* ── Message signing (XPRS verifiable authorship) ────────────────────────
  * When enabled, outgoing messages carry a short-Schnorr signature so peers can
  * verify the author. The signature is 48 bytes -> 60 base85 chars, appended as
  * " ~<sig>" (one extra APRS line). Verification needs the sender's pubkey, kept
@@ -1142,9 +1142,9 @@ static void cat_thread(char *m, unsigned sz, const char *mid, const char *parent
                        const char *auth, int enc) {
   if (mid && mid[0]) { s_cat(m, ",\"mid\":\"", sz); s_cat(m, mid, sz); s_cat(m, "\"", sz); }
   if (parent && parent[0]) { s_cat(m, ",\"parent\":\"", sz); s_cat(m, parent, sz); s_cat(m, "\"", sz); }
-  /* Signature verdict (APRX): verified / bad / unverified. Empty = unsigned. */
+  /* Signature verdict (XPRS): verified / bad / unverified. Empty = unsigned. */
   if (auth && auth[0]) { s_cat(m, ",\"auth\":\"", sz); s_cat(m, auth, sz); s_cat(m, "\"", sz); }
-  /* Encrypted (APRX 1:1): host shows a lock badge. */
+  /* Encrypted (XPRS 1:1): host shows a lock badge. */
   if (enc) s_cat(m, ",\"enc\":true", sz);
 }
 /* Set just before the outgoing local-echo convo_deliver of a 1:1 message so the
@@ -1925,8 +1925,8 @@ static void convo_badge_only(const char *id) {
   hal_msg_send(m, s_len(m));
 }
 
-/* ── APRX message signatures ──────────────────────────────────────────── */
-/* base85 alphabet — must match the host (lib/util/aprx_sign.dart). */
+/* ── XPRS message signatures ──────────────────────────────────────────── */
+/* base85 alphabet — must match the host (lib/util/xprs_crypto.dart). */
 static int is_b85(char c) {
   if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
     return 1;
@@ -2537,7 +2537,7 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
    * if it carries a "+<4hex> " reply marker, split off the parent + show the
    * text without the marker. 1:1 chats are untouched. */
   char mid[5] = "", parent[5] = "";
-  /* APRX signature: split off a trailing " ~<sig>" and verify it. The core
+  /* XPRS signature: split off a trailing " ~<sig>" and verify it. The core
    * (sig stripped) is what we thread/id/display; the sig never affects mid. */
   char core[700]; char sigstr[80]; char auth[12] = ""; int have_sig = 0;
   const char *body = text;
@@ -2688,7 +2688,7 @@ static int convo_deliver(const char *id, const char *dir, const char *from,
   return 1;
 }
 
-/* ── media share helper (APRX §16 + BitTorrent) ───────────────────────────
+/* ── media share helper (XPRS section 16 + BitTorrent) ───────────────────────────
  * When a message we send embeds a media token (file:<sha256>.<ext>) for a file
  * we host, append the deterministic torrent infohash ("ih:<40hex>") to the
  * SAME message so receivers can join the swarm and fetch it over BitTorrent.
@@ -3081,7 +3081,7 @@ static void convo_send_core(const char *buf, const char *id_in,
     }
   }
 
-  /* Sign (APRX) when enabled OR when encrypted (encryption always carries a
+  /* Sign (XPRS) when enabled OR when encrypted (encryption always carries a
    * signature). The signed body is word-split by the multi-line senders so the
    * 60-char signature lands on its own final APRS line; the receiver
    * reassembles and verifies. Likes are left unsigned. */
@@ -5612,7 +5612,7 @@ static void deliver_bulletin(const char *gname, const char *from,
   if (is_self_call(from)) return;
   /* NOSTR key beacon: record the sender's pubkey and stop (not a chat). */
   if (pk_intercept(nm, from, text)) return;
-  /* Strip any APRX signature for the preview / like detection; convo_deliver
+  /* Strip any XPRS signature for the preview / like detection; convo_deliver
    * still gets the full text and re-verifies the signature. */
   char core[400]; char sg[80]; const char *cbody = text;
   if (sig_split(text, core, sizeof(core), sg, sizeof(sg))) cbody = core;
@@ -5666,7 +5666,7 @@ static void deliver_bulletin(const char *gname, const char *from,
   }
 }
 
-/* A standalone APRX signature line: "~" + exactly 60 base85 chars. The signed
+/* A standalone XPRS signature line: "~" + exactly 60 base85 chars. The signed
  * body's word-split puts the signature on its own final line, so this marks the
  * end of a multi-line signed message. */
 static int is_sig_line(const char *t) {
