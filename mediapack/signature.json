@@ -2,18 +2,18 @@
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "radio.xprs.mediapack",
   "wapp_version": "1.0.0",
-  "signed_at": 1780402242,
-  "publisher_npub": "npub1d34f2e57kyvplrv5wkf3uyfs8l5hak7fev2qe76z584wly6c2akqh8k824",
-  "publisher_hex": "6c6a95669eb1181f8d9475931e11303fe97edbc9cb140cfb42a1eaef9358576c",
+  "signed_at": 1787083764,
+  "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
+  "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851",
+  "manifest_digest_hex": "275f5a9809d9c84df7fdbd30bd974382597723812ffe7bcaac9d78cf1c8b60a7",
   "hashes": {
-    "manifest.json": "efecf478a177bd4d6bd943a1e020a3cd53a24844c12100de3586b59a406826e8"
+    "manifest.json": "58314bbb769b5247536ff8a928ece4338f444fcaad2dbddd7b3a6e54bcd1c1fd"
   },
   "event": {
-    "id": "5d6d3128d7e566bbe1e1cc5e6b9e88cead83252a8678466d340a20ad2c24f656",
-    "pubkey": "6c6a95669eb1181f8d9475931e11303fe97edbc9cb140cfb42a1eaef9358576c",
-    "created_at": 1780402242,
+    "id": "c06bd1205ad06f28eafb45602147a88b4b193b9dec2450a204afa7084d8fc0ea",
+    "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
+    "created_at": 1787083764,
     "kind": 30078,
     "tags": [
       [
@@ -34,10 +34,10 @@
       ],
       [
         "manifest_digest",
-        "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851"
+        "275f5a9809d9c84df7fdbd30bd974382597723812ffe7bcaac9d78cf1c8b60a7"
       ]
     ],
-    "content": "9722aaa9d4aed1019de9824ed30c1d96dcac3bab23cf2080bf68403ad4dbc851",
-    "sig": "c576c79eaf9e6ee019fb0ea22734c88563721735be49f7ffca5ed98934382fa9e84aad3d175ace44936b301ec48284adaa1ef6c43d601e37e6809a9e2c2c20bd"
+    "content": "275f5a9809d9c84df7fdbd30bd974382597723812ffe7bcaac9d78cf1c8b60a7",
+    "sig": "a6a8eeea1af4829e65d0e0302b642fccfbebe362fda3954607a9b529c433b431989acc6895f5f0155dd76453aeaac35d5929ff67dfd3e2e58a704c0a0b5b4b98"
   }
 }

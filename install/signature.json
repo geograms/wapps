@@ -1,27 +1,29 @@
 {
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "tools.xprs.install",
-  "wapp_version": "1.0.0",
-  "signed_at": 1776251991,
-  "publisher_npub": "npub1lut3k0m4mue97yuyj7f50qrnwz06kwgk8x03uta904ujsu4lcehq9u67tm",
-  "publisher_hex": "ff171b3f75df325f13849793478073709fab3916399f1e2fa57d792872bfc66e",
+  "wapp_version": "1.3.7",
+  "signed_at": 1787083764,
+  "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
+  "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "b8aa040acf17a6b44b68dde5774117376f09b2308496fda830b18b418f4acc7a",
+  "manifest_digest_hex": "0e165867cbb29214bdf7bafaf3ab90fdf8fecbc0d3bf9fd2fa28c756cfdc0581",
   "hashes": {
-    "main.c": "7648874ba3d8b9d9b9798b1eaa897196963ebbbd3951b1a89ed0ed0b0dbc3e5f",
-    "Makefile": "cd848e35d56fa12e921865ac821b312028a157067f9518a0217cbf105ad8bc59",
-    "screens/home.ui.json": "afd835203b3de4bdd961395ebffe7d9e7e62ed402ccad8859673bb7a6f105d34",
-    "manifest.json": "211e78494598067e17133e0af16dc83af119b178eaa90a1c52690f797b08fd30",
-    "media/icons/install.svg": "c45a5d4d337cb88031c6a6b5d48afa01e3c5a0b84e5be7ba953a65a0a274b052",
-    "lang/pt.json": "8dbdcf928dc43b823685453203916983d2c729c0dced1a67ef1f9f238184177b",
-    "lang/en.json": "e1176484a5564f9a3e3fe2150f5ce6a97b3509439060584315ee8f2926706554",
+    "Makefile": "6d5be150f80084e3b215bd6287ae05aec153f6788e10eb0e88fa9aa3af14ada4",
+    "app.wasm": "1965ef9380a6abc1954a9d3fd7a4db9bd5bdef1fa74fa2a238fc89f1b76fc4f8",
     "lang/de.json": "01b23057289cc1d949a9dbb0e0280d7421e98ad1c00e00ca6e39abb047feb716",
-    "app.wasm": "55ad9ae4e74965b80374ad686f30ef395a1591ce639b3fd90750b2292b5f9328"
+    "lang/en.json": "16ac39f8129373e7da3e64f4b9a046cc9d397d1de39d2b27095440f869030630",
+    "lang/pt.json": "8dbdcf928dc43b823685453203916983d2c729c0dced1a67ef1f9f238184177b",
+    "main.c": "9a6c9adfec17a257817ca7aff657186e544aba5204f0a8c1c0375b00e85422f5",
+    "manifest.json": "364d0d5a33c65bbd49e230ee9b4e845eb04b90162e0d4ce5ad6d4b82b7755c69",
+    "media/icons/install.svg": "3e2e9588fd2666a06e5c745b82f04c4046cabe8366fea031998279da16048490",
+    "permissions.json": "1f27adbf8fee33c051256b277fbed8abbc9803988c6b8b0b1e788dea2803a7cd",
+    "screens/home.ui.json": "523aaa9b4d0a5026e167bb8b64c6e5990d9702a6926c4174dcb06ededc66adc5",
+    "store/description.json": "edf1ce541fd18d7b32ba54f5d9296a6e00d2e2e9ac611e6eab525ff73330d7b0"
   },
   "event": {
-    "id": "ab06c2cad13da8c66887a5d4f02cdca12c73ae3d08ec02c6ea0d7ad156146c2f",
-    "pubkey": "ff171b3f75df325f13849793478073709fab3916399f1e2fa57d792872bfc66e",
-    "created_at": 1776251991,
+    "id": "62c8aac570fc2abcf7ec2f8c9d976f262c8dd73fb41a8f7a514676a7a86e95ec",
+    "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
+    "created_at": 1787083764,
     "kind": 30078,
     "tags": [
       [
@@ -38,14 +40,14 @@
       ],
       [
         "wapp_version",
-        "1.0.0"
+        "1.3.7"
       ],
       [
         "manifest_digest",
-        "b8aa040acf17a6b44b68dde5774117376f09b2308496fda830b18b418f4acc7a"
+        "0e165867cbb29214bdf7bafaf3ab90fdf8fecbc0d3bf9fd2fa28c756cfdc0581"
       ]
     ],
-    "content": "b8aa040acf17a6b44b68dde5774117376f09b2308496fda830b18b418f4acc7a",
-    "sig": "869aa9cf41f96cca4b9e8932cd418b2af63469ccda4b135e54d9e108fa4883776ee689ce91f06b8ef4c85ad349b9d25c1caadfa5dab6e04989a4abebbbdff116"
+    "content": "0e165867cbb29214bdf7bafaf3ab90fdf8fecbc0d3bf9fd2fa28c756cfdc0581",
+    "sig": "28128ce1fca6425f0407dab28f41fbcf1dc68328e23d8415be8ca8e329c56ba821fc49fee78883cc7a3f53417669418eb5951368668cf6feeb284334017976c5"
   }
 }

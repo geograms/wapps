@@ -1,0 +1,48 @@
+{
+  "schema": "xprs.wapp.signature/1",
+  "wapp_id": "tools.xprs.bluetooth",
+  "wapp_version": "0.2.0",
+  "signed_at": 1787083764,
+  "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
+  "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
+  "hash_algo": "sha256",
+  "manifest_digest_hex": "b18e4eea39af897cf11ef945db5cb37eae7462ebd75faa2092e910e3df8c69e7",
+  "hashes": {
+    "Makefile": "6d5be150f80084e3b215bd6287ae05aec153f6788e10eb0e88fa9aa3af14ada4",
+    "app.wasm": "0f19f87c9d98e36ccf8e45fa5b00372cf48947de5cb912213899610b653f764b",
+    "main.c": "d72efef574a29ec111ade664c24c7f620ed231cc947d282787851b9fafb97392",
+    "manifest.json": "e27c3de2b5dcf3fb3ce8a0198e127d8f2d7729a0d7b9d6ce9e581cd5fd1b8039",
+    "media/icons/bluetooth.svg": "b30ca6b10e00d54f3d182ce65df612269cb5e5c9975c28e2bdf7fea47246ad6a",
+    "screens/home.ui.json": "a1d7b9bb17140599c45bef970efb84e1ab9b76d8effba8c273cd5a984677d69b"
+  },
+  "event": {
+    "id": "800548457617ec506dfa7e6aae63c4997dcf414cfeb4ff6e78f0190259b8432f",
+    "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
+    "created_at": 1787083764,
+    "kind": 30078,
+    "tags": [
+      [
+        "d",
+        "xprs.wapp:tools.xprs.bluetooth"
+      ],
+      [
+        "t",
+        "xprs-wapp-signature"
+      ],
+      [
+        "wapp_id",
+        "tools.xprs.bluetooth"
+      ],
+      [
+        "wapp_version",
+        "0.2.0"
+      ],
+      [
+        "manifest_digest",
+        "b18e4eea39af897cf11ef945db5cb37eae7462ebd75faa2092e910e3df8c69e7"
+      ]
+    ],
+    "content": "b18e4eea39af897cf11ef945db5cb37eae7462ebd75faa2092e910e3df8c69e7",
+    "sig": "06a868e2ae2ae35500c0bb63d4eb28065d525e9d031c2417692f0c93390bb54e69494f3ff09f934c60713450fb8356e9652ffa75b48ab5005dc3407209a8d9a9"
+  }
+}
