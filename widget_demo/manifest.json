@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.widget-demo",
-  "version":         "1.0.1",
+  "version":         "1.0.2",
   "kind":            "system",
   "title":           "Functionality Demo",
   "description":     "Demo wapp providing multiple functionalities for widget requests.",

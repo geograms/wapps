@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.archiver",
-  "version":         "0.5.0",
+  "version":         "0.5.1",
   "kind":            "app",
   "title":           "Archiver",
   "description":     "Archiver - keep copies of other people's posts and files, so they survive when the device that made them is offline.",

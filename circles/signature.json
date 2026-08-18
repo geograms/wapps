@@ -1,12 +1,12 @@
 {
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "tools.xprs.circles",
-  "wapp_version": "0.35.1",
-  "signed_at": 1787083764,
+  "wapp_version": "0.35.2",
+  "signed_at": 1787085166,
   "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
   "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "f85aee55e2c12499df613bd48029eec90691a40199a1e6c0c2c08c706043f4f5",
+  "manifest_digest_hex": "3ac1f9e0277b2e28580005534c6de582e112d73fbcf2f685da2df67dedf0c1c7",
   "hashes": {
     "Makefile": "39b27ee34778b584d023ef693d668df406fdf7228495cf57bbacc9784c896ff7",
     "app.wasm": "4ea620d93046fc4f6e422663a481b40b2c32a0f4887df322fe0bc427d2b1c40d",
@@ -16,7 +16,7 @@
     "db.h": "c2307e0a6a27fc67df1cc53d7c0162c10a408b9caf22610c57b057168a3ac223",
     "lang/en.json": "9a18153e4ff5e9d89974db80d1b5c038dafb4f98a300e29f05ad0d79f059cd39",
     "main.c": "4763b6d7a1c21f798cd9aac3f4a43f04e6a70cbd5e140f56600d62e528864821",
-    "manifest.json": "be91c27ccb3044fab5d2fee2354b38049dd4f123a3ce660cb7e9170459a0c571",
+    "manifest.json": "5f6fa57d146b85c98fe341d6afb0de84eae69bf22ef5ebdcea488000ee791df1",
     "media/icons/circles.svg": "727402a62b1e4c12b7e79d086affd37132cbacbfbae8be3596d24617c7a793e0",
     "screens/home.ui.json": "69cd4ab36952efcd8c9f9839d1237b7cedcae1fff7ab40cd5fda6881a0897635",
     "tests.wasm": "6749d6b5dc3c52c2e384673880acf8451c1c59a24efa51729d273519ea4624df",
@@ -28,9 +28,9 @@
     "util.h": "f78c202e09950e8c5e5857a83b719abc21f3763dc86567fb78960f71ae8a8a15"
   },
   "event": {
-    "id": "9c42f8f5018c4b3ba6266cda04ed5305dee2866ecf7784ded8f29c04395b4add",
+    "id": "c82bd6e0abf76bb499fb01b917c10354f5e0b5bdc2802cf7899e281d624c43c9",
     "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
-    "created_at": 1787083764,
+    "created_at": 1787085166,
     "kind": 30078,
     "tags": [
       [
@@ -47,14 +47,14 @@
       ],
       [
         "wapp_version",
-        "0.35.1"
+        "0.35.2"
       ],
       [
         "manifest_digest",
-        "f85aee55e2c12499df613bd48029eec90691a40199a1e6c0c2c08c706043f4f5"
+        "3ac1f9e0277b2e28580005534c6de582e112d73fbcf2f685da2df67dedf0c1c7"
       ]
     ],
-    "content": "f85aee55e2c12499df613bd48029eec90691a40199a1e6c0c2c08c706043f4f5",
-    "sig": "09051e873ae85f325ab074d3c2bd69b728a8a02223130f0c0c6ab332e582c9ca368b5c42c10b3e6724dd71381ec4a01c5bf7b38134e15d5352401095117f8adc"
+    "content": "3ac1f9e0277b2e28580005534c6de582e112d73fbcf2f685da2df67dedf0c1c7",
+    "sig": "8ffa64ab5f66afaf378ecda9c59cc09e8fb44ee374d9d8b568280070b04fbc0dedb085153ecdf7a61e28920fb137d441e8709c304a658ded3bc4959ff30ed7eb"
   }
 }

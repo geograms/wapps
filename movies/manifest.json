@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.movies",
-  "version":         "0.1.2",
+  "version":         "0.1.3",
   "kind":            "app",
   "title":           "Movies",
   "description":     "Local video player with optional subtitle support.",

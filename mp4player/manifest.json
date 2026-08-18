@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.mp4player",
-  "version":         "2.0.0",
+  "version":         "2.0.1",
   "kind":            "app",
   "title":           "Player",
   "description":     "Music & media player. Add your music folders in Settings and play them; also plays MP4/H.264, HEVC/H.265 (incl. 10-bit phone videos), AV1 and WebM (VP8/VP9) video, and MP3, OGG, FLAC, WAV, AAC/M4A and Opus audio. Every codec is decoded in WebAssembly inside the wapp - none ships in the host.",

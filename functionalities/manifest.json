@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.functionalities",
-  "version":         "1.0.1",
+  "version":         "1.0.2",
   "kind":            "system",
   "title":           "Functionalities",
   "description":     "Browse registered functionalities and pick default providers.",

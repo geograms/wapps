@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.bluetooth",
-  "version":         "0.2.0",
+  "version":         "0.2.1",
   "kind":            "app",
   "title":           "Bluetooth",
   "description":     "Bluetooth - the BLE street mesh: devices within reach and how far messages can travel.",

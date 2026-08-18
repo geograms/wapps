@@ -1,6 +1,6 @@
 {
   "id": "tools.xprs.xprs",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "kind": "app",
   "title": "XPRS",
   "description": "XPRS - stations heard over the air, the packets they sent, and the mail this device carries for other people.",

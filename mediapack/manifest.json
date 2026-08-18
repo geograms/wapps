@@ -1,6 +1,6 @@
 {
   "id":              "radio.xprs.mediapack",
-  "version":         "1.0.0",
+  "version":         "1.0.1",
   "kind":            "library",
   "title":           "Mediapack",
   "description":     "Media playback capability for other wapps.",

@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.forum",
-  "version":         "0.1.0",
+  "version":         "0.1.1",
   "kind":            "app",
   "title":           "Forum",
   "description":     "Browse and post in forum collections.",

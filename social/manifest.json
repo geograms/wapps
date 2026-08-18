@@ -1,6 +1,6 @@
 {
   "id": "tools.xprs.social",
-  "version": "0.2.41",
+  "version": "0.2.42",
   "kind": "app",
   "title": "Social",
   "description": "Social \u2014 follow people, read their notes and post your own, over internet and Reticulum relays (NOSTR protocol).",

@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.atm",
-  "version":         "0.2.0",
+  "version":         "0.2.1",
   "kind":            "app",
   "title":           "ATM",
   "description":     "Operate a coin: run its blockchain and distribute it.",

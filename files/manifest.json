@@ -1,6 +1,6 @@
 {
   "id":              "tools.xprs.files",
-  "version":         "0.9.2",
+  "version":         "0.9.3",
   "kind":            "system",
   "title":           "Share",
   "description":     "Share files and folders - over Reticulum, Blossom HTTP and BitTorrent.",

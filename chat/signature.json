@@ -1,12 +1,12 @@
 {
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "tools.xprs.chat",
-  "wapp_version": "0.4.45",
-  "signed_at": 1787083764,
+  "wapp_version": "0.4.46",
+  "signed_at": 1787085166,
   "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
   "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "ce3f5cfa5a5097d54effbb6e397b948449f760b72dd11002770da74d4db23ed2",
+  "manifest_digest_hex": "2957d5c8157c602218ec35167487db1f15878096b72cd01bbc5a7a499deaf577",
   "hashes": {
     "BLE_PROTOCOL.md": "4eceb56d06a27539688aff0eaf7df1f1f6211a953df253a19a82df32983feee8",
     "Makefile": "7a4b2108f20924dd99a010706afc01bba12c6d9e63f4623c6adf28f70bca875c",
@@ -17,7 +17,7 @@
     "chat.h": "a9746ed37dac98f7fc625880840a2abd6c5cf3e5a5eb0d25326408bf5ce90dbb",
     "lang/en.json": "ab5c18d859840b65c040d96d35fc97ae11bd68488dd8b89c0e0798edd75b92bd",
     "main.c": "2cd8c79f1422aa80254d095ae9ee20a3448d41cafa2cd6ac06b5cee5fb1fc58e",
-    "manifest.json": "126dc98bc7e6728ebf1b0e76490b8bb0a8173c9e24bc2f610d5cbfb5e50445c9",
+    "manifest.json": "84f43f1ef4338ce5a385143c8f702cffd4d7fc4b3a8152419ab10c93f1db9a8b",
     "media/icons/chat.svg": "07369dcb2433c59de08a14204e077de0ebae4ceca1045dad61210a826e135645",
     "permissions.json": "af49517ab02f4315664d280a0226c07f20fd765bd644d0c1813d86ec0ecdc5a1",
     "room.c": "186c6a163069bb2652e7d18df3a2cf3dbf1626c7d5b1a62dd07451a4f6a10a30",
@@ -38,9 +38,9 @@
     "xprs.h": "4ac2ec9232b128d227487c62d20e0e806e2ac3a19a465b24372163a78974f2d5"
   },
   "event": {
-    "id": "25bf0e4330cce40f36754a3e9b5bec8c4458137c477e0337dd4eb9044563a2c9",
+    "id": "4a248f3cf15dc67a801353d81db127f9202a781d88f8eb87c5bed9a1bb6d5809",
     "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
-    "created_at": 1787083764,
+    "created_at": 1787085166,
     "kind": 30078,
     "tags": [
       [
@@ -57,14 +57,14 @@
       ],
       [
         "wapp_version",
-        "0.4.45"
+        "0.4.46"
       ],
       [
         "manifest_digest",
-        "ce3f5cfa5a5097d54effbb6e397b948449f760b72dd11002770da74d4db23ed2"
+        "2957d5c8157c602218ec35167487db1f15878096b72cd01bbc5a7a499deaf577"
       ]
     ],
-    "content": "ce3f5cfa5a5097d54effbb6e397b948449f760b72dd11002770da74d4db23ed2",
-    "sig": "1c5f71353f4acd90bcd49fb2b3f49f1571dad0167df2ba75d1739cc0d1f6cfeb273eb18063feef5dfb8add456b237cf3281d4b8e7b05eb873cb1af9689274266"
+    "content": "2957d5c8157c602218ec35167487db1f15878096b72cd01bbc5a7a499deaf577",
+    "sig": "5c091a3bb548046d0f66ddb83084e2beeaeb6dd7520c650b19220da89a8d83239642d840281056edcd79cabd645ec4c453c6cd32b99f07c24d801dedb10763e8"
   }
 }

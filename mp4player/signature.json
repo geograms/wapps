@@ -1,12 +1,12 @@
 {
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "tools.xprs.mp4player",
-  "wapp_version": "2.0.0",
-  "signed_at": 1787083765,
+  "wapp_version": "2.0.1",
+  "signed_at": 1787085166,
   "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
   "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "d50b093012a94f8f3741b770dc0291b4c6f82c4af4965967f84ac5ad71ba0355",
+  "manifest_digest_hex": "3ce828a4432b93903b529e481118a9b91f334611d9a5493bf838cec7b2e8b663",
   "hashes": {
     "Makefile": "fa7f0dc45757839102b2513f5c1178efc1cb09a802613c3e9388468b047f970d",
     "app.wasm": "38f34140b37a581a212857e8bce96c71b8155b2671e4dc996444b45efceb8280",
@@ -14,7 +14,7 @@
     "bin/ffmpeg-linux-x86_64": "46fba3210c8b209ce11f03bdfa5426ae3823c871e18793e611c7980979cd8eae",
     "bin/ffmpeg-win-x86_64.exe": "341452e2f6241e9d105d40738b76607bfe3dfca6a21af0dcdb92b81c54d1de5a",
     "main.cpp": "3d9be5d7968bfdf49aa92a83d8041c49f4aacdf64f768fd9453cbf7a326fd7b0",
-    "manifest.json": "1c1ee5727bf4257e101aa80a314a652b0ce6fe878eeb1016d4cbbe0c4b4af3c1",
+    "manifest.json": "c91c218d9255d3973a92cf38da7441377c26c53e6a919bfd65d4ef1655073e6a",
     "media/icons/mp4player.svg": "9e175b59791e4d5477d50ae3cfa33740ded443d72ec47d30365fe215a941b705",
     "screens/home.ui.json": "05a94bad06e9febee2e995a0f3df2ece88fa107ad0248dd6954ee29235328d19",
     "vendor/aac_dec.cpp": "c881fc6576ae383abe3b6d52a0c660a1b9c7a9bec24eb20f2015b5e5881ae39b",
@@ -1048,9 +1048,9 @@
     "vendor/webm_dec.h": "6d74b4d1eea9e2b4a78fd63c7af48360ae18fbb6fd910a19f0d16068fb239701"
   },
   "event": {
-    "id": "852901cc8bf118be301f019a80aeb8c89b97d97885090d9ec91cb568c934e3f0",
+    "id": "6a75de0fcf6208d5b5677ad3b057651a3bf6e6587d222311afc9908f539519b4",
     "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
-    "created_at": 1787083765,
+    "created_at": 1787085166,
     "kind": 30078,
     "tags": [
       [
@@ -1067,14 +1067,14 @@
       ],
       [
         "wapp_version",
-        "2.0.0"
+        "2.0.1"
       ],
       [
         "manifest_digest",
-        "d50b093012a94f8f3741b770dc0291b4c6f82c4af4965967f84ac5ad71ba0355"
+        "3ce828a4432b93903b529e481118a9b91f334611d9a5493bf838cec7b2e8b663"
       ]
     ],
-    "content": "d50b093012a94f8f3741b770dc0291b4c6f82c4af4965967f84ac5ad71ba0355",
-    "sig": "5deab13141e46dd0a46ef12fd7ef9a0c5930dbec164eb59a649fb43b40bae0cbcec904288bf4fdd80e954476877724da2da911a569b00c69e5c195e6ff696924"
+    "content": "3ce828a4432b93903b529e481118a9b91f334611d9a5493bf838cec7b2e8b663",
+    "sig": "c95871015e96ac76131c6a49cc379dc1c7119d5f4d1e75a3407fbaba39573c80023438ec976dabb7396831b645eb2e15cd4e8dce2348950dcd41c56850d6716c"
   }
 }
