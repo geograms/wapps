@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.terminal",
+  "id":              "tools.xprs.terminal",
   "version":         "1.0.1",
   "kind":            "app",
   "title":           "Terminal",

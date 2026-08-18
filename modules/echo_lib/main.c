@@ -1,5 +1,5 @@
 /*
- * echo_lib — Geogram WASM Library Example
+ * echo_lib — XPRS WASM Library Example
  *
  * Demonstrates the library module pattern: exports module_type(),
  * module_api_schema(), and module_invoke() instead of tick/event.
@@ -11,7 +11,7 @@
  * Build: cd wapps/modules/echo_lib && make
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../../hal/xprs_wasm_hal.h"
 
 /* ── String helpers ─────────────────────────────────────────────────── */
 
@@ -41,7 +41,7 @@ static char to_upper(char c) {
 
 static const char SCHEMA[] =
     "{"
-    "\"id\":\"radio.geogram.echo-lib\","
+    "\"id\":\"radio.xprs.echo-lib\","
     "\"version\":\"1.0.0\","
     "\"description\":\"Echo library — demonstrates WASM library pattern\","
     "\"functions\":["

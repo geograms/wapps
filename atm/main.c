@@ -1,5 +1,5 @@
 /*
- * atm — Geogram Wapp: operate a participation coin's blockchain and faucet.
+ * atm — XPRS Wapp: operate a participation coin's blockchain and faucet.
  *
  * Thin bridge: the real logic lives host-side in
  * lib/wapp/coin/atm_host_bridge.dart (using the participation-coin library).
@@ -16,7 +16,7 @@
  * Build: cd wapps/atm && make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 static unsigned slen(const char *s) {
     unsigned n = 0;

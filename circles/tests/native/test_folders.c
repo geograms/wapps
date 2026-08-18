@@ -53,10 +53,10 @@ int main(void){
   ok("resolve full key -> the circle", circle_resolve_short(full,r,sizeof(r)) && strcmp(r,cid)==0);
   ok("resolve a non-matching short code -> not found", circle_resolve_short("circle/000-000",r,sizeof(r))==0);
   const char* lf=cap_find("\"field\":\"share_link\"");
-  ok("Share shows a geogram.radio deep link with the full id",
-     lf && strstr(lf,"https://geogram.radio/circle/") && strstr(lf,cid));
+  ok("Share shows a xprs.dev deep link with the full id",
+     lf && strstr(lf,"https://xprs.dev/circle/") && strstr(lf,cid));
   /* a deep-link URL is parsed back to the circle id (self is the owner here) */
-  char url[200]; snprintf(url,sizeof(url),"https://geogram.radio/circle/%s",cid);
+  char url[200]; snprintf(url,sizeof(url),"https://xprs.dev/circle/%s",cid);
   cap_clear(); circle_apply_join(url);
   ok("deep-link URL parses to the circle id", cap_contains("already in this circle"));
 

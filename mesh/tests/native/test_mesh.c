@@ -46,19 +46,19 @@ int main(void) {
 
     /* ── graph_filter from the page persists + re-fetches with the filter ── */
     cap_clear();
-    inbox_set("{\"command\":\"graph_filter\",\"geogramOnly\":true,"
+    inbox_set("{\"command\":\"graph_filter\",\"xprsOnly\":true,"
               "\"service\":\"files\",\"search\":\"ab\"}");
     module_handle_event();
     check(cap_contains("\"type\":\"ui.graph.set\""), "filter triggers graph re-push");
-    check(strstr(last_filter(), "\"geogramOnly\":true") != NULL,
-          "filter forwards geogramOnly");
+    check(strstr(last_filter(), "\"xprsOnly\":true") != NULL,
+          "filter forwards xprsOnly");
     check(strstr(last_filter(), "\"service\":\"files\"") != NULL,
           "filter forwards service");
     check(strstr(last_filter(), "\"search\":\"ab\"") != NULL,
           "filter forwards search");
     char kv[16];
     check(hal_kv_get("geo", 3, kv, sizeof(kv) - 1) > 0 && kv[0] == '1',
-          "geogramOnly persisted to kv");
+          "xprsOnly persisted to kv");
 
     /* ── hub_add forwards a host action carrying the endpoint field ── */
     cap_clear();

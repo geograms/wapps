@@ -4,7 +4,7 @@
 # Exits 0 on pass (or SKIP when offline), non-zero on failure.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-HAL="${HAL_DIR:-/home/brito/code/geogram/wapps/hal}"
+HAL="${HAL_DIR:-/home/brito/code/xprs/wapps/hal}"
 CC="${CC:-cc}"
 OUT="$(mktemp -d)/it_aprs"
 "$CC" -O1 -I"$HAL" -o "$OUT" "$HERE/it_aprs_is.c"

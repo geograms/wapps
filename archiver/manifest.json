@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.archiver",
+  "id":              "tools.xprs.archiver",
   "version":         "0.5.0",
   "kind":            "app",
   "title":           "Archiver",

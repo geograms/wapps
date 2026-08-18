@@ -12,7 +12,7 @@
  *
  * Build: cd wapps/social && WASI_SDK_PATH=~/wasi-sdk make
  */
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── String helpers ──────────────────────────────────────────────────── */
 static unsigned str_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
@@ -238,10 +238,10 @@ static void feed_append_to(const char *evt, int pop, const char *field,
     str_cat(g_msg, "\"", sizeof(g_msg));
     if (str_eq(source, "firehose")) {
         char batch[24] = "", mode[24] = "", index[16] = "", size[16] = "";
-        json_raw(evt, "_geogram_batch", batch, sizeof(batch));
-        json_raw(evt, "_geogram_batch_mode", mode, sizeof(mode));
-        json_raw(evt, "_geogram_batch_index", index, sizeof(index));
-        json_raw(evt, "_geogram_batch_size", size, sizeof(size));
+        json_raw(evt, "_xprs_batch", batch, sizeof(batch));
+        json_raw(evt, "_xprs_batch_mode", mode, sizeof(mode));
+        json_raw(evt, "_xprs_batch_index", index, sizeof(index));
+        json_raw(evt, "_xprs_batch_size", size, sizeof(size));
         if (batch[0]) {
             str_cat(g_msg, ",\"batch\":", sizeof(g_msg)); str_cat(g_msg, batch, sizeof(g_msg));
             str_cat(g_msg, ",\"batch_mode\":\"", sizeof(g_msg)); str_cat(g_msg, mode, sizeof(g_msg));

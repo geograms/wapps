@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.mesh",
+  "id":              "tools.xprs.mesh",
   "version":         "1.1.0",
   "kind":            "app",
   "title":           "Mesh",

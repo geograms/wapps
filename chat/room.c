@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 #include "room.h"
 
 /* ── self-contained helpers (main.c's are static; keep this TU independent) ── */
@@ -627,7 +627,7 @@ int room_moderate(const char *roomId, const char *op, const char *target_pub,
   }
   if (until > 0) { s_cat(tags, ",[\"until\",\"", sizeof(tags)); s_cat(tags, untb, sizeof(tags)); s_cat(tags, "\"]", sizeof(tags)); }
   if (amount != 0) { s_cat(tags, ",[\"amount\",\"", sizeof(tags)); s_cat(tags, amtb, sizeof(tags)); s_cat(tags, "\"]", sizeof(tags)); }
-  s_cat(tags, ",[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  s_cat(tags, ",[\"client\",\"xprs-chat\"]]", sizeof(tags));
   const char *r = (reason && reason[0]) ? reason : "";
   hal_nostr_post(KIND_ROOM_OP, r, s_len(r), tags, s_len(tags));
   return 1;
@@ -715,7 +715,7 @@ int room_propose(const char *parentId, const char *name) {
   s_cat(tags, parent, sizeof(tags));
   s_cat(tags, "\"],[\"name\",\"", sizeof(tags));
   jesc(tags, sizeof(tags), name);
-  s_cat(tags, "\"],[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  s_cat(tags, "\"],[\"client\",\"xprs-chat\"]]", sizeof(tags));
   hal_nostr_post(KIND_ROOM_PROPOSAL, "", 0, tags, s_len(tags));
   return 1;
 }
@@ -732,7 +732,7 @@ int room_approve(const char *proposalId) {
   s_cat(tags, proposalId, sizeof(tags));
   s_cat(tags, "\"],[\"h\",\"", sizeof(tags));
   s_cat(tags, parent, sizeof(tags));
-  s_cat(tags, "\"],[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  s_cat(tags, "\"],[\"client\",\"xprs-chat\"]]", sizeof(tags));
   hal_nostr_post(KIND_ROOM_APPROVAL, "", 0, tags, s_len(tags));
   return 1;
 }
@@ -758,7 +758,7 @@ int room_ban_wapp(const char *target_pub) {
   if (!room_has_authority(g_self, MAIN_ROOM_ID)) return 0;
   char tags[400] = "[[\"h\",\"*\"],[\"op\",\"ban\"],[\"p\",\"";
   s_cat(tags, target_pub, sizeof(tags));
-  s_cat(tags, "\"],[\"client\",\"geogram-chat\"]]", sizeof(tags));
+  s_cat(tags, "\"],[\"client\",\"xprs-chat\"]]", sizeof(tags));
   hal_nostr_post(KIND_ROOM_OP, "", 0, tags, s_len(tags));
   return 1;
 }

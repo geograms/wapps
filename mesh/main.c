@@ -22,7 +22,7 @@
  * Build: cd wapps/mesh && make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── String helpers ──────────────────────────────────────────────────── */
 static unsigned str_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
@@ -50,20 +50,20 @@ static void json_cat_escaped(char *d, const char *s, unsigned m) {
 }
 
 /* ── Filter state (page-driven, persisted) ───────────────────────────── */
-static int  g_geogram_only = 0;       /* show only geogram-software nodes  */
+static int  g_xprs_only = 0;       /* show only xprs-software nodes  */
 static char g_service[32]  = "";      /* show only nodes with this service */
 static char g_search[64]   = "";      /* substring match on label/id/svc   */
 static int  g_ready = 0;              /* the page has loaded once          */
 
 static void load_state(void) {
     char buf[8];
-    if (hal_kv_get("geo", 3, buf, sizeof(buf) - 1) > 0) g_geogram_only = (buf[0] == '1');
+    if (hal_kv_get("geo", 3, buf, sizeof(buf) - 1) > 0) g_xprs_only = (buf[0] == '1');
     hal_kv_get("svc", 3, g_service, sizeof(g_service) - 1);
     hal_kv_get("q", 1, g_search, sizeof(g_search) - 1);
 }
 
 static void save_state(void) {
-    char b[2]; b[0] = g_geogram_only ? '1' : '0'; b[1] = '\0';
+    char b[2]; b[0] = g_xprs_only ? '1' : '0'; b[1] = '\0';
     hal_kv_set("geo", 3, b, 1);
     hal_kv_set("svc", 3, g_service, str_len(g_service));
     hal_kv_set("q", 1, g_search, str_len(g_search));
@@ -71,7 +71,7 @@ static void save_state(void) {
 
 /* ── Buffers ─────────────────────────────────────────────────────────── *
  * The graph JSON can be large on a busy hub. 80KB holds many hundreds of
- * nodes; the geogram-only default keeps it far smaller. The host returns the
+ * nodes; the xprs-only default keeps it far smaller. The host returns the
  * NEGATED required size if it doesn't fit — we then log and skip that frame. */
 static char g_data[81920];            /* hal_rns_* output                   */
 static char g_msg[82432];             /* outbound ui.webview.send wrapper    */
@@ -84,8 +84,8 @@ static void send_msg(const char *json) { hal_msg_send(json, str_len(json)); }
  * host's native `$type:"graph"` widget as {"type":"ui.graph.set","payload":…}.
  * No graph math here — the host lays it out (off the main thread) and paints. */
 static void build_filter(char *out, unsigned m) {
-    str_copy(out, "{\"geogramOnly\":", m);
-    str_cat(out, g_geogram_only ? "true" : "false", m);
+    str_copy(out, "{\"xprsOnly\":", m);
+    str_cat(out, g_xprs_only ? "true" : "false", m);
     str_cat(out, ",\"service\":\"", m);
     json_cat_escaped(out, g_service, m);
     str_cat(out, "\",\"search\":\"", m);
@@ -217,7 +217,7 @@ static void handle_command(const char *cmd, const char *full) {
         return;
     }
     if (str_eq(cmd, "graph_filter")) {
-        g_geogram_only = json_bool(full, "geogramOnly", g_geogram_only);
+        g_xprs_only = json_bool(full, "xprsOnly", g_xprs_only);
         json_str(full, "service", g_service, sizeof(g_service));
         json_str(full, "search", g_search, sizeof(g_search));
         save_state();

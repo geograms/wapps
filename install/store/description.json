@@ -1,5 +1,5 @@
 {
-  "schema": "geogram.wapp.store/1",
+  "schema": "xprs.wapp.store/1",
   "descriptions": {
     "en": {
       "title": "Wapp Store",

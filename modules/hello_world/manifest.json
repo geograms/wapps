@@ -1,5 +1,5 @@
 {
-  "id": "radio.geogram.hello-world",
+  "id": "radio.xprs.hello-world",
   "version": "1.0.0",
   "kind": "app",
   "description": "Hello world — logs platform info, ticks, echoes messages",

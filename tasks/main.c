@@ -1,5 +1,5 @@
 /*
- * tools.geogram.tasks — Task Monitor wapp
+ * tools.xprs.tasks — Task Monitor wapp
  *
  * Polls the host every tick for the live MonitoredTask snapshot and
  * relays user button clicks (received as command messages from the
@@ -25,7 +25,7 @@
  * Build: cd wapps && ./build-archive.sh tasks
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 

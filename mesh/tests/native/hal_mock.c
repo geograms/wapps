@@ -93,9 +93,9 @@ int32_t hal_rns_nodes(const char *filter, uint32_t filter_len, char *out, uint32
     memcpy(g_last_filter, filter, fn); g_last_filter[fn] = '\0';
     const char *s =
       "{\"nodes\":["
-        "{\"id\":\"self\",\"label\":\"me\",\"kind\":\"self\",\"services\":[],\"geogram\":true,\"hops\":0,\"via\":\"\",\"relayer\":\"\",\"meta\":{}},"
-        "{\"id\":\"hubA\",\"label\":\"hubA\",\"kind\":\"hub\",\"services\":[],\"geogram\":false,\"hops\":1,\"via\":\"tcp\",\"relayer\":\"\",\"meta\":{\"children\":1}},"
-        "{\"id\":\"leaf1\",\"label\":\"AB1CD\",\"kind\":\"leaf\",\"services\":[\"chat\",\"files\"],\"geogram\":true,\"hops\":2,\"via\":\"tcp\",\"relayer\":\"hubA\",\"meta\":{\"callsign\":\"AB1CD\"}}"
+        "{\"id\":\"self\",\"label\":\"me\",\"kind\":\"self\",\"services\":[],\"xprs\":true,\"hops\":0,\"via\":\"\",\"relayer\":\"\",\"meta\":{}},"
+        "{\"id\":\"hubA\",\"label\":\"hubA\",\"kind\":\"hub\",\"services\":[],\"xprs\":false,\"hops\":1,\"via\":\"tcp\",\"relayer\":\"\",\"meta\":{\"children\":1}},"
+        "{\"id\":\"leaf1\",\"label\":\"AB1CD\",\"kind\":\"leaf\",\"services\":[\"chat\",\"files\"],\"xprs\":true,\"hops\":2,\"via\":\"tcp\",\"relayer\":\"hubA\",\"meta\":{\"callsign\":\"AB1CD\"}}"
       "],\"edges\":["
         "{\"from\":\"self\",\"to\":\"hubA\",\"kind\":\"uplink\"},"
         "{\"from\":\"hubA\",\"to\":\"leaf1\",\"kind\":\"relay\"}"

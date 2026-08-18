@@ -1,5 +1,5 @@
 /*
- * tools.geogram.movies — local video player wapp.
+ * tools.xprs.movies — local video player wapp.
  *
  * The wapp itself is intentionally thin: video decode + rendering
  * happen in the host (media_kit on Flutter desktop/mobile). This
@@ -23,7 +23,7 @@
  * Build: cd wapps && make movies
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Tiny string helpers (no libc) ───────────────────────────── */
 

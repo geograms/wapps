@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.atm",
+  "id":              "tools.xprs.atm",
   "version":         "0.2.0",
   "kind":            "app",
   "title":           "ATM",

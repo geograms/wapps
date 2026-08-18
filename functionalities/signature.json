@@ -1,6 +1,6 @@
 {
-  "schema": "geogram.wapp.signature/1",
-  "wapp_id": "tools.geogram.functionalities",
+  "schema": "xprs.wapp.signature/1",
+  "wapp_id": "tools.xprs.functionalities",
   "wapp_version": "1.0.0",
   "signed_at": 1776347849,
   "publisher_npub": "npub1lut3k0m4mue97yuyj7f50qrnwz06kwgk8x03uta904ujsu4lcehq9u67tm",
@@ -24,15 +24,15 @@
     "tags": [
       [
         "d",
-        "geogram.wapp:tools.geogram.functionalities"
+        "xprs.wapp:tools.xprs.functionalities"
       ],
       [
         "t",
-        "geogram-wapp-signature"
+        "xprs-wapp-signature"
       ],
       [
         "wapp_id",
-        "tools.geogram.functionalities"
+        "tools.xprs.functionalities"
       ],
       [
         "wapp_version",

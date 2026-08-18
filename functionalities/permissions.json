@@ -1,6 +1,6 @@
 {
   "schema": "ndf-permissions-1.0",
-  "document_id": "tools.geogram.functionalities",
+  "document_id": "tools.xprs.functionalities",
   "owners": [],
   "access": {
     "view":    {"type": "public"},

@@ -89,7 +89,7 @@ unsigned long long xprs_parse_stamp(const char *s) {
 /* ── Addresses ─────────────────────────────────────────────────────────── */
 
 /* Section 6.3: an open group is uppercase 1..16 and may not be named like a
- * station, and a station is told from a group by its prefix. Geogram callsigns
+ * station, and a station is told from a group by its prefix. XPRS callsigns
  * are X1/X3/X5 plus four; an amateur callsign carries a digit inside the first
  * three characters (CT1ABC) and often an SSID (CT1ABC-9). Everything else —
  * LISBOA, FEED, NOSTR — is a group. */

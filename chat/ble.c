@@ -1,5 +1,5 @@
 #include "ble.h"
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 
 static unsigned b_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
 

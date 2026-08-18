@@ -1,5 +1,5 @@
 /*
- * terminal — Geogram WASM Terminal Module
+ * terminal — XPRS WASM Terminal Module
  *
  * Receives commands via hal_msg_recv(), parses and executes them using
  * HAL file/kv/http/system calls, and sends output back via hal_msg_send().
@@ -7,7 +7,7 @@
  * Build: cd wapps/archive/terminal && make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

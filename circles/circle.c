@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 #include "circle.h"
 #include "db.h"
 #include "util.h"
@@ -1317,7 +1317,7 @@ static void circle_short_code(const char *id, char *out, unsigned cap) {
 void circle_open_share(const char *circleId) {
   /* A deep link that carries the full key: scanning the QR or tapping the link
    * opens the app straight on the join screen. */
-  char url[140] = "https://geogram.radio/circle/";
+  char url[140] = "https://xprs.dev/circle/";
   s_cat(url, circleId, sizeof(url));
   field_set("share_qr", url);          /* QR encodes the link → scan opens the app */
   field_set("share_link", url);        /* copyable / tappable link */

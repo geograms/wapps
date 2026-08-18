@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.bluetooth",
+  "id":              "tools.xprs.bluetooth",
   "version":         "0.2.0",
   "kind":            "app",
   "title":           "Bluetooth",

@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.indexer",
+  "id":              "tools.xprs.indexer",
   "version":         "0.6.2",
   "kind":            "app",
   "title":           "Indexer",

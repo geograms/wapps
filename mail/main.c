@@ -51,7 +51,7 @@
  *
  * Build: cd wapps/mail && WASI_SDK_PATH=~/wasi-sdk make
  */
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── String helpers (no libc: -nostartfiles) ─────────────────────────── */
 static unsigned str_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }

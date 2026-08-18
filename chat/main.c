@@ -1,7 +1,7 @@
 /*
  * APRS station wapp — Map / Messenger / Beacon / Settings.
  *
- * Mirrors the mature Geogram APRS UI on top of Aurora primitives:
+ * Mirrors the mature XPRS APRS UI on top of Aurora primitives:
  *  - Map      : pins for stations/messages received in the filter area
  *               (host renders ui.map.marker pushed from parsed packets)
  *  - Messenger: chat view of APRS text messages addressed to us
@@ -12,7 +12,7 @@
  * HAL. The APRS-IS passcode is computed (aprs_passcode) so we can TX.
  */
 #include <stdint.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 #include "chat.h"
 #include "thread.h"
 #include "ble.h"
@@ -210,7 +210,7 @@ static int is_self_call(const char *c) {
 
 /* ── APRS-IS access control ────────────────────────────────────────────────
  * APRS-IS feeds licensed amateur-radio networks, so it may only be used with
- * a callsign assigned by a radio authority. Geogram's auto-generated X1/X3
+ * a callsign assigned by a radio authority. XPRS's auto-generated X1/X3
  * identities are NOT valid there: the connection is OFF by default and comes
  * up only after the user supplies a licensed callsign + its (verified)
  * APRS-IS passcode in the APRS panel. While enabled, that callsign IS the
@@ -220,7 +220,7 @@ static int  g_aprsis_on = 0;            /* master switch (default OFF) */
 static char g_aprsis_call[16] = "";     /* licensed callsign for APRS-IS */
 static int  g_aprsis_pass = -1;         /* verified APRS-IS passcode */
 
-/* A Geogram auto-generated callsign: "X1…"/"X3…". The X1/X3 prefixes are not
+/* A XPRS auto-generated callsign: "X1…"/"X3…". The X1/X3 prefixes are not
  * allocated by the ITU, so they can't be authority-assigned — frames from
  * such calls must NEVER be originated onto APRS-IS (own or relayed). */
 static int is_autogen_call(const char *c) {
@@ -263,7 +263,7 @@ static int g_ble_on = 1, g_ble_relay = 1, g_ble_started = 0;
  * without blocking people one by one. Persisted in KV "chan" as 3 chars.
  *   local  — nearby groups (BLE / local Reticulum, ids like "#NAME")
  *   global — worldwide groups over internet Reticulum nodes ("#NAME*")
- *   nomad  — the #NOMADNET bridge (LXMF messages from non-geogram nodes)  */
+ *   nomad  — the #NOMADNET bridge (LXMF messages from non-xprs nodes)  */
 static int g_chan_local = 1, g_chan_global = 1, g_chan_nomad = 1;
 static void chan_save(void) {
   char b[4] = { g_chan_local ? '1' : '0', g_chan_global ? '1' : '0',
@@ -4095,7 +4095,7 @@ static void groups_subscribe(void);         /* defined below */
  * publishes it that way already, see host_note_emit -> social.note). What was
  * missing was the other half — LISTENING. We subscribe to kind-1 carrying a `t`
  * tag for any group we are in, so a note posted from ANY NOSTR client (not just
- * geogram) shows up in the group.
+ * xprs) shows up in the group.
  *
  * Dedup on the event id: the same note reaches us as a NOSTR event AND as an
  * APRS/BLE/Reticulum bulletin, and it must appear once.
@@ -4106,10 +4106,10 @@ static void groups_subscribe(void);         /* defined below */
  * hashtags on the public relays, so subscribing to t:NEWS subscribed this phone
  * to the WORLD'S #news firehose — the #NEWS group filled with strangers' spam
  * within minutes of shipping it (observed on-device: 22 messages, none of them
- * ours). A group is a geogram room, not a global hashtag, so it gets its own
+ * ours). A group is a xprs room, not a global hashtag, so it gets its own
  * namespace. Notes are still ordinary kind-1 events any NOSTR client can read;
- * they just carry #geogram-NEWS rather than #NEWS. */
-#define GROUP_TAG_PREFIX "geogram-"
+ * they just carry #xprs-NEWS rather than #NEWS. */
+#define GROUP_TAG_PREFIX "xprs-"
 static void group_tag(const char *gname, char *out, unsigned cap) {
   s_cpy(out, GROUP_TAG_PREFIX, cap);
   s_cat(out, gname, cap);
@@ -4521,7 +4521,7 @@ static void do_rooms_send(const char *buf) {
  *   - NomadNet/LXMF peers from the live announce registry (hal_rns_nodes,
  *     service "lxmf"): matched by announced name, identity hash or LXMF
  *     delivery address; a pasted 32-hex address works even when unheard.
- *   - Geogram/NOSTR people (hal_people_search): callsign / npub / nickname —
+ *   - XPRS/NOSTR people (hal_people_search): callsign / npub / nickname —
  *     these open in the Mail wapp, which owns the one kind-4 inbox. */
 
 /* djb2 + diffed send: an unchanged people list is never re-sent (a re-sent
@@ -4582,7 +4582,7 @@ static uint32_t g_find_hash = 0;
 static void render_finduser(void) {
   char *o = g_find_out; const unsigned sz = sizeof(g_find_out);
   o[0] = 0;
-  /* ONE list. Splitting NomadNet and Geogram into two tabs made the user hunt
+  /* ONE list. Splitting NomadNet and XPRS into two tabs made the user hunt
    * for a person across tabs before knowing which network they were on — the
    * thing they are least likely to know. Each row says where it came from
    * instead. */
@@ -4624,7 +4624,7 @@ static void render_finduser(void) {
       else { s_cat(o, "LXMF ", sz); char sh[9]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); }
       /* Where they are from + how we reach them. */
       s_cat(o, "\",\"subtitle\":\"", sz);
-      s_cat(o, jbool(slice, "geogram") ? "XPRS device" : "NomadNet", sz);
+      s_cat(o, jbool(slice, "xprs") ? "XPRS device" : "NomadNet", sz);
       s_cat(o, live ? " - online now" : " - seen earlier", sz);
       if (hops > 0) {
         char nb[12]; u_itoa((unsigned)hops, nb);
@@ -4635,7 +4635,7 @@ static void render_finduser(void) {
       s_cat(o, " - ", sz);
       { char sh[13]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); s_cat(o, "...", sz); }
       s_cat(o, "\",\"icon\":\"person\"}", sz);
-    } else if (s_eq(kind, "geogram")) {
+    } else if (s_eq(kind, "xprs")) {
       const char *target = call[0] ? call : npub;
       if (target[0]) {
         if (!first) s_cat(o, ",", sz);
@@ -4820,10 +4820,10 @@ static void render_searchall(void) {
         if (disp) jesc(o, sz, disp);
         else { s_cat(o, "LXMF ", sz); char sh[9]; s_cpy(sh, dest, sizeof(sh)); s_cat(o, sh, sz); }
         s_cat(o, "\",\"subtitle\":\"", sz);
-        s_cat(o, jbool(slice, "geogram") ? "XPRS device" : "NomadNet", sz);
+        s_cat(o, jbool(slice, "xprs") ? "XPRS device" : "NomadNet", sz);
         s_cat(o, live ? " - online now" : " - seen earlier", sz);
         s_cat(o, "\",\"icon\":\"person\"}", sz);
-      } else if (s_eq(kind, "geogram")) {
+      } else if (s_eq(kind, "xprs")) {
         const char *target = call[0] ? call : npub;
         if (target[0]) {
           if (!first) s_cat(o, ",", sz);
@@ -5012,7 +5012,7 @@ static void group_note_ingest(const char *evt) {
   /* Our own note is already on screen from the local echo. */
   if (pub[0] && g_pubkey[0] && s_eq_ci(pub, g_pubkey)) return;
 
-  /* topic is "geogram-NEWS" on the wire; the group is "NEWS". */
+  /* topic is "xprs-NEWS" on the wire; the group is "NEWS". */
   const char *pfx = GROUP_TAG_PREFIX;
   unsigned pl = s_len(pfx);
   if (s_len(topic) <= pl) return;
@@ -6102,7 +6102,7 @@ static void follow_render(void) {
  *   1. hal_rns_nodes with {"localOnly":true} — THE SAME CALL the Reticulum
  *      wapp makes for its graph, so the two can never disagree about who is
  *      local. The host decides locality (see rns_iface_kind.dart): anything
- *      heard on something other than the internet, geogram or not.
+ *      heard on something other than the internet, xprs or not.
  *   2. hal_mesh_devices     — the BLE street mesh's own neighbour registry.
  *   3. the pubkey beacons this wapp already hears over BLE broadcast / APRS /
  *      RNS (g_pk_call + g_pk_ts) — the radio side, callsign-keyed.
@@ -6546,7 +6546,7 @@ static int reach_on_net(const char *call) {
   char req[96];
   s_cpy(req, "{\"search\":\"", sizeof(req));
   s_cat(req, call, sizeof(req));
-  s_cat(req, "\",\"geogramOnly\":true,\"limit\":8}", sizeof(req));
+  s_cat(req, "\",\"xprsOnly\":true,\"limit\":8}", sizeof(req));
   int n = hal_rns_nodes(req, (int)s_len(req), g_near_json, sizeof(g_near_json));
   if (n <= 0) return 0;                 /* no answer, or overflow: assume not */
   g_near_json[n < (int)sizeof(g_near_json) ? n : (int)sizeof(g_near_json) - 1] = 0;
@@ -7649,7 +7649,7 @@ void module_tick(void) {
     }
   }
 
-  /* 1:1 messaging moved to the Mail wapp (tools.geogram.mail), which
+  /* 1:1 messaging moved to the Mail wapp (tools.xprs.mail), which
    * owns the NOSTR kind-4 inbox. This wapp no longer polls the relays for DMs:
    * doing so delivered a SECOND copy of every message and raised a SECOND
    * notification for it, and cost a relay round-trip every 60s for a UI that no

@@ -1,9 +1,9 @@
 /*
  * aprs.c — APRS-IS client library implementation (see aprs.h).
- * Ported from the Geogram reference; built on the Aurora HAL sockets.
+ * Ported from the XPRS reference; built on the Aurora HAL sockets.
  */
 #include "chat.h"
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 
 /* ── file-local libc (static so they don't clash with the host wapp) ── */
 static unsigned a_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }

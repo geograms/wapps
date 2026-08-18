@@ -1,5 +1,5 @@
 {
-  "id": "radio.geogram.echo-lib",
+  "id": "radio.xprs.echo-lib",
   "version": "1.0.0",
   "kind": "library",
   "description": "Echo library — demonstrates WASM library pattern",

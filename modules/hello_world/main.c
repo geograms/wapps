@@ -1,5 +1,5 @@
 /*
- * hello_world — Geogram WASM Module PoC
+ * hello_world — XPRS WASM Module PoC
  *
  * Logs a greeting on init, prints the platform and time each tick,
  * and echoes back any host messages.
@@ -8,7 +8,7 @@
  * Expected output: < 16KB .wasm binary
  */
 
-#include "../../hal/geogram_wasm_hal.h"
+#include "../../hal/xprs_wasm_hal.h"
 
 /* Minimal string helpers (no libc dependency for size) */
 static unsigned str_len(const char *s) {

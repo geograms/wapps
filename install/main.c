@@ -1,5 +1,5 @@
 /*
- * install — Geogram Wapp Installer / Shop
+ * install — XPRS Wapp Installer / Shop
  *
  * Reads index.json from a configured source (URL or local path),
  * displays available wapps with versions, and sends install/remove
@@ -21,7 +21,7 @@
  * Build: cd wapps/archive/install && make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -198,7 +198,7 @@ static void parse_sources_raw(void) {
 /* Default catalog source when no user configuration exists yet. The
  * Settings tab can add or replace it; this is just the seed so a
  * fresh install isn't staring at an empty catalog. Self-hosted on
- * geogram.radio — the store appends "/index.json" and downloads
+ * xprs.dev — the store appends "/index.json" and downloads
  * "<base>/<file>" for each wapp.
  *
  * The shipped binary reaches NO proprietary host: the URL is used exactly as

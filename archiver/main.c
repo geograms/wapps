@@ -20,7 +20,7 @@
  * Build: cd wapps/archiver && make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── String helpers ──────────────────────────────────────────────────── */
 static unsigned str_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }

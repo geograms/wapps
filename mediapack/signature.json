@@ -1,6 +1,6 @@
 {
-  "schema": "geogram.wapp.signature/1",
-  "wapp_id": "radio.geogram.mediapack",
+  "schema": "xprs.wapp.signature/1",
+  "wapp_id": "radio.xprs.mediapack",
   "wapp_version": "1.0.0",
   "signed_at": 1780402242,
   "publisher_npub": "npub1d34f2e57kyvplrv5wkf3uyfs8l5hak7fev2qe76z584wly6c2akqh8k824",
@@ -18,15 +18,15 @@
     "tags": [
       [
         "d",
-        "geogram.wapp:radio.geogram.mediapack"
+        "xprs.wapp:radio.xprs.mediapack"
       ],
       [
         "t",
-        "geogram-wapp-signature"
+        "xprs-wapp-signature"
       ],
       [
         "wapp_id",
-        "radio.geogram.mediapack"
+        "radio.xprs.mediapack"
       ],
       [
         "wapp_version",

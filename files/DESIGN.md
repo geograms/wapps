@@ -105,7 +105,7 @@ info dictionary), so the mapping `sha256 → infohash` must be either computed
 
 New wapp `wapps/files` (folder name `files`, title "Files").
 
-HAL additions (host: `wapp_engine.dart`; header: `hal/geogram_wasm_hal.h`):
+HAL additions (host: `wapp_engine.dart`; header: `hal/xprs_wasm_hal.h`):
 
 ```
 hal_media_list(offset, limit, out_json)      // archive entries (meta only)

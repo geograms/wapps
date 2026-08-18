@@ -19,7 +19,7 @@ repository:
 - `lib/wapp/wapp_engine.dart` — the integrated XPRS host
 
 Both implement the same abstractions. The C-level ABI for the
-abstractions lives in `wapps/hal/geogram_wasm_hal.h`.
+abstractions lives in `wapps/hal/xprs_wasm_hal.h`.
 
 ---
 
@@ -1059,7 +1059,7 @@ Every `.wapp` must contain a top-level `manifest.json`:
 
 ```json
 {
-  "id":              "tools.geogram.maps",
+  "id":              "tools.xprs.maps",
   "version":         "1.0.0",
   "kind":            "app|system|addon",
   "title":           "Maps",
@@ -1563,7 +1563,7 @@ sending a `tests.run` outbox message:
 ```json
 { "type":  "tests.run",
   "req_id": 17,
-  "target": "tools.geogram.forum"   // optional; defaults to the sender
+  "target": "tools.xprs.forum"   // optional; defaults to the sender
 }
 ```
 

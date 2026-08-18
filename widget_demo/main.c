@@ -1,5 +1,5 @@
 /*
- * tools.geogram.widget-demo — minimal widget provider wapp.
+ * tools.xprs.widget-demo — minimal widget provider wapp.
  *
  * Declares itself as a provider for two widget IDs in manifest.json
  * (text.greet and text.shout). When the host's WidgetBroker receives
@@ -21,7 +21,7 @@
  * Build: cd wapps && ./build-archive.sh widget_demo
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 

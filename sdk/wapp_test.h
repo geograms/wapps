@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 #include <string.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 
 #ifdef __cplusplus
 extern "C" {

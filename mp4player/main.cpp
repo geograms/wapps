@@ -1,5 +1,5 @@
 /*
- * tools.geogram.mp4player — platform-agnostic MP4 video player wapp.
+ * tools.xprs.mp4player — platform-agnostic MP4 video player wapp.
  *
  * Unlike the old "movies" wapp (which handed bytes to a host-compiled
  * codec), this wapp CONTAINS the decoders: minimp4 demuxes mp4/mov and
@@ -25,7 +25,7 @@
  */
 
 extern "C" {
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 }
 
 #define MINIMP4_IMPLEMENTATION

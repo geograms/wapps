@@ -1,5 +1,5 @@
 /*
- * Geogram Forum wapp.
+ * XPRS Forum wapp.
  *
  * Browses, reads, and posts to a `forum` collection stored in the
  * active profile. Format follows
@@ -18,7 +18,7 @@
  *   sign
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ─── Helpers ───────────────────────────────────────────────────── */
 

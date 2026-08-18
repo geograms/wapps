@@ -6,7 +6,7 @@
  * Circle logic (keys, epochs, encryption, sync) lives in circle.c.
  */
 #include <stdint.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 #include "circle.h"
 #include "util.h"
 
@@ -204,7 +204,7 @@ void module_handle_event(void) {
   } else if (s_eq(cmd, "join_circle")) {
     prompt_join();
   } else if (s_eq(cmd, "apply_url")) {
-    /* Opened from a https://geogram.radio/circle/… deep link. */
+    /* Opened from a https://xprs.dev/circle/… deep link. */
     char code[160] = ""; jstr(buf, "code", code, sizeof(code));
     if (code[0]) circle_apply_join(code);
   } else if (s_eq(cmd, "req_approve")) {

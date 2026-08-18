@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include "geogram_wasm_hal.h"
+#include "xprs_wasm_hal.h"
 #include "db.h"
 #include "util.h"
 

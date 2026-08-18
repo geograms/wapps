@@ -1,6 +1,6 @@
 {
-  "schema": "geogram.wapp.signature/1",
-  "wapp_id": "tools.geogram.movies",
+  "schema": "xprs.wapp.signature/1",
+  "wapp_id": "tools.xprs.movies",
   "wapp_version": "0.1.2",
   "signed_at": 1780394016,
   "publisher_npub": "npub1d34f2e57kyvplrv5wkf3uyfs8l5hak7fev2qe76z584wly6c2akqh8k824",
@@ -23,15 +23,15 @@
     "tags": [
       [
         "d",
-        "geogram.wapp:tools.geogram.movies"
+        "xprs.wapp:tools.xprs.movies"
       ],
       [
         "t",
-        "geogram-wapp-signature"
+        "xprs-wapp-signature"
       ],
       [
         "wapp_id",
-        "tools.geogram.movies"
+        "tools.xprs.movies"
       ],
       [
         "wapp_version",

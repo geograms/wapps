@@ -1,5 +1,5 @@
 /*
- * tools.geogram.tester — end-user test harness for host services.
+ * tools.xprs.tester — end-user test harness for host services.
  *
  * Screens:
  *  - Notifications: buttons that emit `{"type":"notify",...}` for every
@@ -19,7 +19,7 @@
  * Build: cd wapps && ./build-archive.sh tester
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 

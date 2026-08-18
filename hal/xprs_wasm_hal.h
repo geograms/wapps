@@ -1,5 +1,5 @@
 /*
- * Geogram WASM HAL — Hardware Abstraction Layer
+ * XPRS WASM HAL — Hardware Abstraction Layer
  *
  * Modules #include this header and call hal_* functions normally.
  * Each host platform (ESP32/Wasm3, Flutter/Wasmer, CLI/Wasmtime) provides
@@ -9,11 +9,11 @@
  * Functions that need hardware return sentinel values when the capability
  * is absent — modules should check *_available_hw() before using.
  *
- * Copyright (c) geogram — Apache-2.0
+ * Copyright (c) xprs — Apache-2.0
  */
 
-#ifndef GEOGRAM_WASM_HAL_H
-#define GEOGRAM_WASM_HAL_H
+#ifndef XPRS_WASM_HAL_H
+#define XPRS_WASM_HAL_H
 
 #include <stdint.h>
 
@@ -504,7 +504,7 @@ uint32_t hal_i18n_get(const char *key, uint32_t key_len,
 /* ── Storage (host filesystem, no sandbox) ──────────────────────────
  *
  * Absolute paths only. Same trust model as hal_process_exec — wapps
- * have full filesystem access at the privilege level of the geogram
+ * have full filesystem access at the privilege level of the xprs
  * process.
  *
  * Reads slurp the whole file at open and serve from a buffer; writes
@@ -1120,7 +1120,7 @@ uint32_t hal_relay_resolve_recv(char *out, uint32_t out_cap);
  * signs on hal_nostr_post — the nsec never enters the wasm sandbox. */
 
 /* ── LXMF (Reticulum's own messaging: NomadNet, Sideband, …) ──────────────
- * A Geogram group rides NOSTR, but the Reticulum world already has its own
+ * A XPRS group rides NOSTR, but the Reticulum world already has its own
  * chat, and those people are on the same mesh. These two calls let a wapp read
  * what they send us and answer it, so a NomadNet user is a participant rather
  * than a different app.
@@ -1304,7 +1304,7 @@ int32_t hal_rns_hubs(char *out, uint32_t out_cap);
 
 /* The observed network as a {"nodes":[...],"edges":[...],"sample":true}
  * graph. [filter] is an optional JSON object
- * {"service":str,"geogramOnly":bool,"search":str} (pass len 0 for none). */
+ * {"service":str,"xprsOnly":bool,"search":str} (pass len 0 for none). */
 __attribute__((import_module("hal"), import_name("rns_nodes")))
 int32_t hal_rns_nodes(const char *filter, uint32_t filter_len,
                       char *out, uint32_t out_cap);
@@ -1472,11 +1472,11 @@ int32_t hal_people_search(const char *query, uint32_t query_len,
                           char *out, uint32_t out_cap);
 
 /* Everyone this device could start a conversation with, in ONE list — LXMF
- * peers heard on the Reticulum mesh (NomadNet, Sideband, other geogram
- * devices) and geogram people (callsign / npub). JSON array of
- *   {"kind":"lxmf","dest","name","callsign","identity","geogram":bool,
+ * peers heard on the Reticulum mesh (NomadNet, Sideband, other xprs
+ * devices) and xprs people (callsign / npub). JSON array of
+ *   {"kind":"lxmf","dest","name","callsign","identity","xprs":bool,
  *    "hops","via","lastSeen","live":bool}
- *   {"kind":"geogram","callsign","npub","nick","devices","live":bool}
+ *   {"kind":"xprs","callsign","npub","nick","devices","live":bool}
  * sorted live-first then newest-heard. An empty query returns everyone.
  *
  * NOT liveness-gated: LXMF stores and forwards, so a peer heard once is still
@@ -1491,4 +1491,4 @@ int32_t hal_people_directory(const char *query, uint32_t query_len,
 }
 #endif
 
-#endif /* GEOGRAM_WASM_HAL_H */
+#endif /* XPRS_WASM_HAL_H */

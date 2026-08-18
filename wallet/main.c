@@ -1,5 +1,5 @@
 /*
- * wallet — Geogram Wapp: hold and transfer participation coins from different
+ * wallet — XPRS Wapp: hold and transfer participation coins from different
  * providers.
  *
  * This module is a thin bridge: the real coin logic lives host-side in
@@ -16,7 +16,7 @@
  * Build: cd wapps/wallet && make   (or build-archive.sh wallet)
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── tiny string helpers (no libc) ───────────────────────────────────── */
 

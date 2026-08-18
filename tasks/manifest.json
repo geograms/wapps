@@ -1,5 +1,5 @@
 {
-  "id":              "tools.geogram.tasks",
+  "id":              "tools.xprs.tasks",
   "version":         "1.0.1",
   "kind":            "system",
   "title":           "Task Monitor",

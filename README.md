@@ -31,7 +31,7 @@ shipped wapp for installation.
 │   ├── Makefile.common
 │   ├── Makefile.library
 │   └── examples/            ← (optional) tiny HAL demos
-├── hal/                     ← geogram_wasm_hal.h, included by every wapp
+├── hal/                     ← xprs_wasm_hal.h, included by every wapp
 ├── modules/                 ← non-wapp library / example modules
 │
 ├── binaries/                ← built artefacts
@@ -116,7 +116,7 @@ from the index.
 3. Drop a `Makefile` containing `include ../sdk/Makefile.common`
    plus `MODULE_NAME := app` and `MODULE_SRCS := main.c`.
 4. Implement `module_init/tick/handle_event/destroy` in
-   `main.c`. The HAL surface is in `hal/geogram_wasm_hal.h`.
+   `main.c`. The HAL surface is in `hal/xprs_wasm_hal.h`.
 5. Add screens under `screens/` (optional).
 6. From the repo root: `make my-wapp`.
 7. The packaged `.wapp` lands at

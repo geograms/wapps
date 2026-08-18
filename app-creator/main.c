@@ -1,5 +1,5 @@
 /*
- * tools.geogram.app-creator — in-app wapp authoring.
+ * tools.xprs.app-creator — in-app wapp authoring.
  *
  * Projects tab lists every installed wapp by asking the host for the
  * shared archive contents (wapps.list_installed). Picking a card
@@ -9,7 +9,7 @@
  * Compile and Install run entirely inside the wapp using only generic
  * HAL primitives:
  *   - hal_file_open / hal_file_write — stage source files to a build
- *     directory under /tmp/geogram-wapp-build/<slug>/.
+ *     directory under /tmp/xprs-wapp-build/<slug>/.
  *   - hal_process_exec — spawn /bin/sh to resolve WASI_SDK_PATH and
  *     run clang against the staged main.c, then later spawn zip to
  *     pack the build dir into a .wapp ZIP.
@@ -38,7 +38,7 @@
  * Build: WASI_SDK_PATH=$HOME/wasi-sdk make
  */
 
-#include "../hal/geogram_wasm_hal.h"
+#include "../hal/xprs_wasm_hal.h"
 
 /* ── Minimal string helpers (no libc) ─────────────────────────────── */
 
@@ -375,7 +375,7 @@ static void on_pick_file(const char *path, unsigned plen) {
  * compile / install pipeline locally via hal_file_* and
  * hal_process_exec. */
 
-#define BUILD_ROOT "/tmp/geogram-wapp-build"
+#define BUILD_ROOT "/tmp/xprs-wapp-build"
 
 /* Active host-process state for compile / install. The wapp polls
  * these in module_tick once a task is in flight. */
@@ -510,7 +510,7 @@ static void do_compile(void) {
 
     /* Build the compile script. Resolves the SDK and HAL include
      * directory, then execs clang. The wapp doesn't know $HOME or
-     * the user's geogram checkout location, so the shell does the
+     * the user's xprs checkout location, so the shell does the
      * lookup. */
     static char build_dir[256];
     build_path(build_dir, sizeof(build_dir), slug_buf, sn, "");
@@ -523,13 +523,13 @@ static void do_compile(void) {
         "[ -x \"$SDK/bin/clang\" ] || { "
         "  echo \"clang not found at $SDK/bin/clang\" >&2; exit 1; }; "
         "HAL=\"\"; "
-        "for d in \"$HOME/code/geogram/wapps/hal\" "
-        "         \"/usr/local/share/geogram/wapps/hal\" "
-        "         \"/opt/geogram/wapps/hal\"; do "
-        "  [ -f \"$d/geogram_wasm_hal.h\" ] && HAL=\"$d\" && break; "
+        "for d in \"$HOME/code/xprs/wapps/hal\" "
+        "         \"/usr/local/share/xprs/wapps/hal\" "
+        "         \"/opt/xprs/wapps/hal\"; do "
+        "  [ -f \"$d/xprs_wasm_hal.h\" ] && HAL=\"$d\" && break; "
         "done; "
         "[ -n \"$HAL\" ] || { "
-        "  echo \"geogram_wasm_hal.h not found on any known path\" >&2; "
+        "  echo \"xprs_wasm_hal.h not found on any known path\" >&2; "
         "  exit 1; }; "
         "BUILD=\"");
     append_cstr(script, sizeof(script), &op, build_dir);

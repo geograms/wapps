@@ -1,5 +1,5 @@
 {
-  "id": "tools.geogram.circles",
+  "id": "tools.xprs.circles",
   "version": "0.35.1",
   "kind": "app",
   "title": "Circles",
@@ -35,7 +35,7 @@
     "links": [
       "/circle/",
       "xprs://circle",
-      "geogram://circle"
+      "xprs://circle"
     ]
   },
   "requires": {
