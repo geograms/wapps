@@ -2,11 +2,11 @@
   "schema": "xprs.wapp.signature/1",
   "wapp_id": "tools.xprs.forum",
   "wapp_version": "0.1.0",
-  "signed_at": 1787083764,
+  "signed_at": 1787084643,
   "publisher_npub": "npub16jk8434t93q0qw0pcgkpfzqcq2rfpl0rvzjd3wywuunh43cwpv5shdp5k2",
   "publisher_hex": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
   "hash_algo": "sha256",
-  "manifest_digest_hex": "385a032c39d0f28380eeeb3f5c8d04453966e83d94e77c041a62faf0a4b95a75",
+  "manifest_digest_hex": "d4b60a10023a1c2a83bf1de0d6fb1fab35405de7e7d7a2fd58664f4e2e4ac5b0",
   "hashes": {
     "Makefile": "6d5be150f80084e3b215bd6287ae05aec153f6788e10eb0e88fa9aa3af14ada4",
     "app.wasm": "66815c3d3362241eb8250ef3327353e9e07ef7bedeaf442f8c48345895ecd13f",
@@ -15,13 +15,13 @@
     "manifest.json": "b5607323f4d04babd83d1449e57b4fd5495395e5a99ca5515b33cf2778e9c6cd",
     "media/icons/forum.svg": "84ec46271b77d6991da98aa9b0ab245535d848ee89bdf4d214510811687c19f3",
     "screens/home.ui.json": "38a8343c2e397c5969fa759f6dc9ea898a27cefda4c7b094d610b96ddaf024e5",
-    "tests.wasm": "ce6c445741288c9efa2c5ac49bb7eeaf3c0e4a94ee6db2209c9f17ec407e2395",
+    "tests.wasm": "d71fafe0734d064305a90d215e5758fc195633a6e01fd8d90fad3695a7240f1d",
     "tests/test_main.c": "1566d79a853f1fd376a88be529ab3d01b8ef6d9b3328789708120f38b231e8e4"
   },
   "event": {
-    "id": "2745c00322f109d6a7ed2d5f4c44942b29b0af3a54c52473fe47d974489c3af0",
+    "id": "3343342c14e09b0c9b3c14b0c09f72e8e9b85d72d304c2bfbcbc74ad6612256e",
     "pubkey": "d4ac7ac6ab2c40f039e1c22c148818028690fde360a4d8b88ee7277ac70e0b29",
-    "created_at": 1787083764,
+    "created_at": 1787084643,
     "kind": 30078,
     "tags": [
       [
@@ -42,10 +42,10 @@
       ],
       [
         "manifest_digest",
-        "385a032c39d0f28380eeeb3f5c8d04453966e83d94e77c041a62faf0a4b95a75"
+        "d4b60a10023a1c2a83bf1de0d6fb1fab35405de7e7d7a2fd58664f4e2e4ac5b0"
       ]
     ],
-    "content": "385a032c39d0f28380eeeb3f5c8d04453966e83d94e77c041a62faf0a4b95a75",
-    "sig": "20beef1f887735d46e19a54a1f205a1f671d10d6a301e775dca127a55bf8e775bb35e81774a5663684d845b1413c27846a95ade629acb241e5de65a316f16c9b"
+    "content": "d4b60a10023a1c2a83bf1de0d6fb1fab35405de7e7d7a2fd58664f4e2e4ac5b0",
+    "sig": "2ef628a8e847678465ae572e499ac11f90b366957cdcd8ee63160a5aa31ee54a1aa287f1d34d12af06e61f10dffb84e1323322713c8f3956e3271f9f2392c02e"
   }
 }
